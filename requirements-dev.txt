@@ -1,0 +1,7 @@
+# Development / test dependencies.
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# The runtime app does not need pytest; the suites are also runnable directly
+# with plain python (see README), so this file is optional for running the
+# server but required for `python -m pytest`.
+pytest>=8.0

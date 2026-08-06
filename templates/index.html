@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dalton Solar — Rep Portal</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+
+<div class="screen active" id="screen-login">
+  <div class="login-split">
+    <div class="login-brand">
+      <div class="login-brand-top">
+        <div class="brand-mark on-dark"><span class="brand-badge">DS</span>Dalton Solar</div>
+        <div class="login-tagline">Enrollment Portal</div>
+        <div class="login-sub">v1.0 — Demo</div>
+      </div>
+      <div class="bg-orbit"></div><div class="bg-orbit b2"></div>
+    </div>
+    <div class="login-form-wrap">
+      <div class="login-card">
+        <h2>Rep sign in</h2>
+        <p class="lead">Use your Dalton Solar rep credentials.</p>
+        <div class="field"><label>Email</label><input type="email" id="login-email" placeholder="charlie@daltonsolar.com"></div>
+        <div class="field"><label>Password</label><input type="password" id="login-pass" placeholder="••••••••"></div>
+        <button class="btn btn-primary btn-full btn-lg" id="login-submit-btn" onclick="doLogin()">Sign in</button>
+        <p class="helper" id="login-error" style="display:none;color:var(--danger);text-align:center;margin-top:14px;"></p>
+        <p class="helper" style="text-align:center;margin-top:16px;">Forgot your password? Ask your manager to reset it.</p>
+        <div class="switch-role">Enrolling as a customer? <a onclick="showScreen('screen-customer-login')">Sign in to your agreement</a></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="screen" id="screen-customer-login">
+  <div class="login-split">
+    <div class="login-brand">
+      <div class="login-brand-top">
+        <div class="brand-mark on-dark"><span class="brand-badge">DS</span>Dalton Solar</div>
+        <div class="login-tagline">Enrollment Portal</div>
+        <div class="login-sub">v1.0 — Demo</div>
+      </div>
+      <div class="bg-orbit"></div><div class="bg-orbit b2"></div>
+    </div>
+    <div class="login-form-wrap">
+      <div class="login-card">
+        <h2>Customer sign in</h2>
+        <p class="lead">Enter the email your rep used for your enrollment.</p>
+        <div class="field"><label>Email</label><input type="email" id="cust-login-email" placeholder="you@email.com"></div>
+        <div class="field"><label>Password</label><input type="password" id="cust-login-pass" placeholder="••••••••"></div>
+        <button class="btn btn-primary btn-full btn-lg" onclick="doCustomerLogin()">Sign in</button>
+        <p class="helper" id="cust-login-error" style="display:none;color:var(--danger);text-align:center;margin-top:14px;">We couldn't find a pending agreement for that email. Try the link your rep sent you, or check with them.</p>
+        <div class="switch-role">Are you the rep? <a onclick="showScreen('screen-login')">Sign in here</a></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="screen" id="screen-customer-portal">
+  <div class="customer-wrap">
+    <div class="customer-top"><div class="brand-mark"><span class="brand-badge">DS</span>Dalton Solar</div></div>
+    <div class="card">
+      <p class="card-eyebrow">Welcome back</p>
+      <h2 id="portal-hello">Hi there</h2>
+      <p class="lead">Here's where your enrollment stands.</p>
+      <div class="review-block">
+        <div class="review-head">Your agreement</div>
+        <div class="review-line"><span class="rl-label">Project</span><span class="rl-val" id="portal-project"></span></div>
+        <div class="review-line"><span class="rl-label">Status</span><span class="rl-val"><span class="badge badge-gold">Awaiting your signature</span></span></div>
+      </div>
+      <button class="btn btn-primary btn-full btn-lg" onclick="enterCustomerSign('portal')">Review &amp; sign agreement</button>
+    </div>
+  </div>
+</div>
+
+<div class="app-shell" id="app-shell">
+  <div class="sidebar">
+    <div class="sidebar-brand"><div class="brand-mark"><span class="brand-badge">DS</span>Dalton Solar</div></div>
+    <div class="sidebar-profile">
+      <div class="sidebar-avatar" id="rep-avatar">C</div>
+      <div class="sidebar-name" id="rep-name-label">Charlie Mren</div>
+      <div class="sidebar-role" id="sidebar-role-label">Roles: Agent</div>
+    </div>
+    <div class="nav-label">Manage</div>
+    <div class="nav-link active" data-view="dashboard" onclick="showView('dashboard')">
+      <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
+      Dashboard
+    </div>
+    <div class="nav-link" data-view="projects" onclick="showView('projects')">
+      <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+      Projects
+    </div>
+    <div class="nav-link" data-view="customers" onclick="showView('customers')">
+      <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      Customers
+    </div>
+    <div class="sidebar-spacer"></div>
+    <div class="nav-label">Account</div>
+    <div class="nav-link" onclick="resetAll()">
+      <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      Logout
+    </div>
+  </div>
+
+  <div class="main-area">
+    <div class="view active" id="view-dashboard">
+      <div class="page-head">
+        <div><h1 id="dash-greeting">Good afternoon, Charlie</h1><div class="sub">Here's how your pipeline looks today.</div></div>
+        <button class="btn btn-primary" onclick="startWizardFresh()">+ New enrollment</button>
+      </div>
+      <div class="stat-grid" id="dash-stats"></div>
+      <div class="section-title">My projects <a onclick="showView('projects')">View all →</a></div>
+      <div id="dash-projects" style="margin-bottom:30px;"></div>
+      <div class="section-title">Recent customers <a onclick="showView('customers')">View all →</a></div>
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Name</th><th>Project</th><th>Status</th><th>Last modified</th><th></th></tr></thead>
+        <tbody id="dash-recent-body"></tbody>
+      </table></div>
+    </div>
+
+    <div class="view" id="view-projects">
+      <div class="page-head"><div><h1>My projects</h1><div class="sub">Community solar projects you're approved to enroll customers into.</div></div></div>
+      <div id="projects-list"></div>
+    </div>
+
+    <div class="view" id="view-customers">
+      <div class="page-head">
+        <div><h1>Customers</h1><div class="sub">Every enrollment you've started, in progress, or verified.</div></div>
+        <input class="search-input" placeholder="Search customers…" oninput="renderCustomers(this.value)">
+      </div>
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Name</th><th>Project</th><th>Status</th><th>Date added</th><th>Last modified</th><th></th></tr></thead>
+        <tbody id="customers-body"></tbody>
+      </table></div>
+    </div>
+
+    <div class="view" id="view-wizard">
+      <div class="wizard-wrap">
+        <div class="wizard-inner">
+          <div class="exit-wizard" onclick="exitWizard()">← Back to dashboard</div>
+          <div class="arc-panel">
+            <svg viewBox="0 0 400 78" width="100%" height="60" id="arc-svg">
+              <path d="M 20 66 Q 200 4 380 66" fill="none" stroke="#DFE7E2" stroke-width="2"/>
+              <path id="arc-progress" d="M 20 66 Q 200 4 380 66" fill="none" stroke="#1F6E52" stroke-width="2.5" stroke-dasharray="1" stroke-dashoffset="1" pathLength="1"/>
+              <circle id="arc-sun" cx="20" cy="66" r="6.5" fill="#D8A31A"/>
+            </svg>
+            <div class="step-labels" id="step-labels"></div>
+          </div>
+
+          <div class="screen wizard-step" id="step-project">
+            <!-- MILESTONE 2: workflow renderer mount point.
+                 This container is intentionally empty. Its contents are drawn by
+                 renderWorkflowStep() in app.js from the step descriptor returned by
+                 GET /api/perch/enrollments/:id/workflow. Adding a new enrollment step
+                 is a BACKEND change (register a step builder in services/perch/workflow.py)
+                 - no markup is added here. -->
+            <div id="workflow-root"></div>
+          </div>
+
+          <div class="screen wizard-step" id="step-bill">
+            <div class="card">
+              <p class="card-eyebrow">New enrollment</p>
+              <h2>Upload the utility bill</h2>
+              <p class="lead">Upload a PDF or photo of the bill — we'll pull the customer's name, address, account number, and bill amount automatically. Double-check everything below before continuing.</p>
+              <div class="dropzone" id="bill-dropzone" onclick="document.getElementById('bill-file').click()"
+                   ondragover="dzDragOver(event,'bill-dropzone')" ondragleave="dzDragLeave(event,'bill-dropzone')" ondrop="dzDrop(event,'bill-dropzone',handleBillUpload)">
+                <div class="dz-title">Drag a file here, or click to browse</div>
+                <div class="dz-sub">PDF works best · JPG/PNG also supported · up to 15MB</div>
+              </div>
+              <input type="file" id="bill-file" accept=".pdf,.jpg,.jpeg,.png" onchange="handleBillUpload(this.files)">
+              <div id="bill-file-chip"></div>
+              <div id="ocr-container"></div>
+
+              <div class="row2" style="margin-top:22px;">
+                <div class="field"><label>First name</label><input type="text" id="c-first" oninput="checkBillReady()"></div>
+                <div class="field"><label>Last name</label><input type="text" id="c-last" oninput="checkBillReady()"></div>
+              </div>
+              <div class="field"><label>Utility account number</label><input type="text" class="mono-field" id="c-acct" inputmode="numeric" maxlength="10" placeholder="1234567890" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,10); checkBillReady();"></div>
+              <div class="field"><label>Street address</label><input type="text" id="a-street" placeholder="123 Maple Ave" oninput="checkBillReady()"></div>
+              <div class="field"><label>Unit / Apt <span style="font-weight:400;color:var(--ink-faint);">(optional)</span></label><input type="text" id="a-unit"></div>
+              <div class="row3">
+                <div class="field"><label>City</label><input type="text" id="a-city" oninput="checkBillReady()"></div>
+                <div class="field"><label>State</label><input type="text" id="a-state" value="NY" readonly style="background:#FBFCFB;color:var(--ink-muted);"></div>
+                <div class="field"><label>ZIP</label><input type="text" id="a-zip" class="mono-field" maxlength="5" oninput="checkBillReady()"></div>
+              </div>
+              <div class="field">
+                <label>Average monthly bill amount</label>
+                <select id="bill-amount" onchange="checkBillReady()">
+                  <option value="">Select a range</option>
+                  <option value="Less than $75">Less than $75</option>
+                  <option value="$75 – $149">$75 – $149</option>
+                  <option value="$150 – $249">$150 – $249</option>
+                  <option value="$250+">$250+</option>
+                </select>
+              </div>
+              <div class="wizard-actions"><button class="btn btn-ghost" onclick="backFromCustomer()">Back</button><button class="btn btn-primary" id="btn-bill-next" onclick="submitBill()" disabled>Continue</button></div>
+            </div>
+          </div>
+
+          <div class="screen wizard-step" id="step-contact">
+            <div class="card">
+              <p class="card-eyebrow">New enrollment</p>
+              <h2>Contact &amp; login</h2>
+              <p class="lead">These aren't on the bill — enter the customer's contact info and set the credentials they'll use to sign in later.</p>
+              <div class="field"><label>Email</label><input type="email" id="c-email" placeholder="name@email.com"></div>
+              <div class="field"><label>Phone number</label><input type="tel" id="c-phone" placeholder="(555) 555-5555"></div>
+              <p class="helper" style="margin:-6px 0 14px;">Set login credentials for the customer — they'll use these to sign in and review their agreement.</p>
+              <div class="row2">
+                <div class="field"><label>Password</label><input type="password" id="c-pass" placeholder="••••••••"></div>
+                <div class="field"><label>Confirm password</label><input type="password" id="c-pass-confirm" placeholder="••••••••"></div>
+              </div>
+              <div class="wizard-actions"><button class="btn btn-ghost" onclick="goStep(2)">Back</button><button class="btn btn-primary" onclick="submitContact()">Continue</button></div>
+            </div>
+          </div>
+
+          <div class="screen wizard-step" id="step-lmi">
+            <div class="card">
+              <p class="card-eyebrow">New enrollment</p>
+              <h2>LMI documentation</h2>
+              <p class="lead">Qualify the customer for the low-income adder — by document, by income self-attestation, or mark it N/A.</p>
+
+              <div class="toggle-row" style="margin-bottom:18px;">
+                <div class="toggle-btn" id="lmi-mode-doc" onclick="setLmiMode('doc')">Upload documentation</div>
+                <div class="toggle-btn" id="lmi-mode-attest" onclick="setLmiMode('attest')">Self-attest by income</div>
+                <div class="toggle-btn" id="lmi-mode-na" onclick="setLmiMode('na')">N/A</div>
+              </div>
+
+              <div id="lmi-doc-panel">
+                <div class="field">
+                  <label>Document type</label>
+                  <select id="lmi-doctype" onchange="checkLmiReady()">
+                    <option value="">Select a document type</option>
+                    <option value="Electric bill showing HEAP/LIHEAP/EAP assistance">Electric bill showing HEAP/LIHEAP/EAP assistance</option>
+                    <option value="SNAP award letter">SNAP award letter</option>
+                    <option value="SNAP card">SNAP card</option>
+                    <option value="Housing authority certification / Section 8">Housing authority certification / Section 8</option>
+                    <option value="Disability benefits letter">Disability benefits letter</option>
+                    <option value="SSI">SSI</option>
+                    <option value="Medicaid award letter">Medicaid award letter</option>
+                    <option value="Lifeline qualification">Lifeline qualification</option>
+                    <option value="SLIP">SLIP</option>
+                    <option value="Other qualifying document">Other qualifying document</option>
+                  </select>
+                </div>
+                <div class="dropzone" id="lmi-dropzone" onclick="document.getElementById('lmi-file').click()"
+                     ondragover="dzDragOver(event,'lmi-dropzone')" ondragleave="dzDragLeave(event,'lmi-dropzone')" ondrop="dzDrop(event,'lmi-dropzone',handleLmiUpload)">
+                  <div class="dz-title">Drag LMI documentation here, or click to browse</div>
+                  <div class="dz-sub">PDF, JPG, or PNG · up to 15MB</div>
+                </div>
+                <input type="file" id="lmi-file" accept=".pdf,.jpg,.jpeg,.png" onchange="handleLmiUpload(this.files)">
+                <div id="lmi-file-chip"></div>
+                <div id="lmi-check-container"></div>
+              </div>
+
+              <div id="lmi-attest-panel" style="display:none;">
+                <p class="helper" style="margin:0 0 14px;">Based on the NY State Median Income (80%) table used for community solar income qualification.</p>
+                <div class="field">
+                  <label>People living in the household</label>
+                  <select id="lmi-household-size" onchange="updateAmiThreshold()">
+                    <option value="">Select household size</option>
+                    <option value="1">1 person</option>
+                    <option value="2">2 people</option>
+                    <option value="3">3 people</option>
+                    <option value="4">4 people</option>
+                    <option value="5">5 people</option>
+                    <option value="6">6 people</option>
+                    <option value="7">7 people</option>
+                    <option value="8">8 people</option>
+                  </select>
+                </div>
+                <div class="helper" id="ami-threshold-display" style="margin:-8px 0 14px;"></div>
+                <div class="toggle-row">
+                  <div class="toggle-btn" id="ami-below" onclick="setIncomeAnswer(true)">Income is below this level</div>
+                  <div class="toggle-btn" id="ami-above" onclick="setIncomeAnswer(false)">Income is above this level</div>
+                </div>
+              </div>
+              <div class="wizard-actions"><button class="btn btn-ghost" onclick="goStep(3)">Back</button><button class="btn btn-primary" id="btn-lmi-next" onclick="submitLmi()" disabled>Continue</button></div>
+            </div>
+          </div>
+
+          <div class="screen wizard-step" id="step-agreement">
+            <div class="card">
+              <p class="card-eyebrow">New enrollment</p>
+              <h2>Review &amp; send agreement</h2>
+              <p class="lead">Check everything below, then send the agreement to the customer to sign.</p>
+              <div class="review-block">
+                <div class="review-head">Customer</div>
+                <div class="review-line"><span class="rl-label">Name</span><span class="rl-val" id="rv-name"></span></div>
+                <div class="review-line"><span class="rl-label">Email</span><span class="rl-val" id="rv-email"></span></div>
+                <div class="review-line"><span class="rl-label">Phone</span><span class="rl-val" id="rv-phone"></span></div>
+                <div class="review-line"><span class="rl-label">Account #</span><span class="rl-val mono" id="rv-acct"></span></div>
+              </div>
+              <div class="review-block">
+                <div class="review-head">Project</div>
+                <div class="review-line"><span class="rl-label">Project</span><span class="rl-val" id="rv-project"></span></div>
+                <div class="review-line"><span class="rl-label">Utility</span><span class="rl-val" id="rv-utility"></span></div>
+                <div class="review-line"><span class="rl-label">Service address</span><span class="rl-val" id="rv-address"></span></div>
+                <div class="review-line"><span class="rl-label">Avg. monthly bill</span><span class="rl-val" id="rv-bill"></span></div>
+                <div class="review-line"><span class="rl-label">LMI</span><span class="rl-val" id="rv-lmi"></span></div>
+              </div>
+              <div id="pre-send">
+                <div class="wizard-actions"><button class="btn btn-ghost" onclick="goStep(4)">Back</button><button class="btn btn-primary" onclick="sendAgreement()">Send agreement to customer</button></div>
+              </div>
+              <div id="post-send" style="display:none;">
+                <div class="badge badge-gold" style="margin-bottom:12px;">Awaiting customer signature</div>
+                <p class="lead" style="margin-bottom:14px;">A secure signing link has been sent to <strong id="post-send-contact"></strong>. Your customer can use either option below.</p>
+
+                <div class="link-option">
+                  <div class="link-option-label">Magic link — goes straight to signing</div>
+                  <div class="link-box">
+                    <span class="lb-text" id="magic-link-text">https://sign.daltonsolar.com/a/••••••••</span>
+                    <button type="button" class="btn btn-primary btn-sm" onclick="enterCustomerSign('preview')">Open</button>
+                  </div>
+                </div>
+
+                <div class="link-option">
+                  <div class="link-option-label">Login link — customer signs in with the credentials you set</div>
+                  <div class="link-box">
+                    <span class="lb-text">https://portal.daltonsolar.com/login</span>
+                    <button type="button" class="btn btn-ghost btn-sm" onclick="showScreen('screen-customer-login')">Open</button>
+                  </div>
+                </div>
+
+                <p class="helper" style="margin:14px 0 18px;">In this demo both options run right here in the browser. A live build would text or email these instead of showing them on screen.</p>
+                <button class="btn btn-ghost btn-full" onclick="exitWizard()">Done — back to dashboard</button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="screen" id="screen-customer">
+  <div class="customer-wrap">
+    <div class="customer-top"><div class="brand-mark"><span class="brand-badge">DS</span>Dalton Solar</div></div>
+    <div class="card">
+      <p class="card-eyebrow">Community solar agreement</p>
+      <h2 id="cust-hello">Hi there — one step left</h2>
+      <p class="lead">Everything below was filled in by your Dalton Solar representative. Review each document in your packet, then sign to complete your enrollment.</p>
+      <div class="review-block">
+        <div class="review-head">Your information</div>
+        <div class="review-line"><span class="rl-label">Name</span><span class="rl-val" id="cv-name"></span></div>
+        <div class="review-line"><span class="rl-label">Service address</span><span class="rl-val" id="cv-address"></span></div>
+        <div class="review-line"><span class="rl-label">Utility</span><span class="rl-val" id="cv-utility"></span></div>
+        <div class="review-line"><span class="rl-label">Account #</span><span class="rl-val mono" id="cv-acct"></span></div>
+      </div>
+
+      <div class="doc-packet" id="doc-packet"></div>
+
+      <div style="display:flex;justify-content:space-between;align-items:baseline;">
+        <label style="margin-top:6px;">Sign below</label>
+        <button class="btn-clear" onclick="clearSignature()">Clear</button>
+      </div>
+      <div class="sig-canvas-wrap" id="sig-canvas-wrap"><canvas id="sig-canvas" width="480" height="140"></canvas></div>
+      <div class="agree-row">
+        <input type="checkbox" id="cv-agree">
+        <span>I have reviewed each document above and authorize Dalton Solar and its partners to enroll me in this program.</span>
+      </div>
+      <button class="btn btn-primary btn-full btn-lg" id="cv-submit" onclick="completeSign()" disabled>Complete enrollment</button>
+    </div>
+  </div>
+</div>
+
+<div class="screen" id="screen-complete">
+  <canvas id="confetti-canvas" style="position:fixed;top:0;left:0;pointer-events:none;z-index:999;"></canvas>
+  <div class="customer-wrap">
+    <div class="card">
+      <div class="complete-wrap">
+        <div class="complete-check"></div>
+        <h2 style="margin-bottom:6px;">Enrollment submitted</h2>
+        <p class="lead" style="max-width:340px;" id="complete-copy">Signed and sent to QA. The rep dashboard will show this as <strong>Customer - Verified</strong> once it clears review.</p>
+        <button class="btn btn-primary btn-lg" id="complete-cta" onclick="completeReturnToDashboard()">Return to dashboard</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/4.1.1/tesseract.min.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

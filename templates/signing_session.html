@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign your enrollment — Dalton Solar</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@600;700;800&family=Inter:wght@400;500;600&display=swap');
+  :root{
+    --bg:#F4F7F5; --surface:#fff; --border:#DFE7E2; --border-strong:#C7D3CC;
+    --ink:#122720; --ink-muted:#5C6E67; --ink-faint:#8A9992;
+    --brand:#1F6E52; --brand-dark:#134432; --brand-tint:#E7F1EC; --gold:#D8A31A;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:'Inter',sans-serif;}
+  h1,h2{font-family:'Manrope',sans-serif;}
+  .wrap{max-width:640px;margin:0 auto;padding:36px 20px 90px;}
+  .brand{display:flex;align-items:center;gap:9px;font-family:'Manrope';font-weight:800;font-size:18px;color:var(--brand-dark);margin-bottom:22px;}
+  .brand .dot{width:24px;height:24px;border-radius:7px;background:var(--gold);display:flex;align-items:center;justify-content:center;color:var(--brand-dark);font-size:11px;font-weight:800;}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:28px;box-shadow:0 8px 24px -12px rgba(18,39,32,0.1);margin-bottom:16px;}
+  .lead{color:var(--ink-muted);font-size:14px;line-height:1.6;}
+  .progress{display:flex;gap:6px;margin:18px 0 26px;}
+  .progress .seg{flex:1;height:5px;border-radius:3px;background:var(--border);}
+  .progress .seg.done{background:var(--brand);}
+  .field-row{border:1.5px solid var(--border-strong);border-radius:10px;padding:14px 16px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;transition:border-color .12s;}
+  .field-row:hover{border-color:var(--brand);}
+  .field-row.done{border-color:var(--brand);background:var(--brand-tint);}
+  .field-row .ft-name{font-weight:600;font-size:13.5px;}
+  .field-row .ft-sub{font-size:11.5px;color:var(--ink-faint);margin-top:2px;}
+  .field-row .ft-status{font-size:11.5px;font-weight:700;color:var(--ink-faint);}
+  .field-row.done .ft-status{color:var(--brand);}
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;font-weight:600;font-size:14.5px;
+    padding:12px 20px;border-radius:10px;border:1.5px solid transparent;cursor:pointer;background:var(--brand);color:#fff;}
+  .btn:hover{background:var(--brand-dark);}
+  .btn:disabled{background:#B9C8C0;cursor:not-allowed;}
+  .btn-full{width:100%;}
+  .modal-backdrop{position:fixed;inset:0;background:rgba(18,39,32,0.45);display:none;align-items:center;justify-content:center;z-index:50;padding:16px;}
+  .modal-backdrop.active{display:flex;}
+  .modal{background:#fff;border-radius:14px;padding:24px;max-width:460px;width:100%;}
+  .tabs{display:flex;gap:8px;margin-bottom:16px;}
+  .tab{flex:1;text-align:center;padding:9px;border:1.5px solid var(--border-strong);border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;color:var(--ink-muted);}
+  .tab.active{border-color:var(--brand);background:var(--brand-tint);color:var(--brand-dark);}
+  input[type=text]{width:100%;padding:11px 13px;border:1.5px solid var(--border-strong);border-radius:9px;font-size:20px;font-family:'Manrope';font-style:italic;}
+  canvas{border:1.5px dashed var(--border-strong);border-radius:9px;width:100%;height:120px;touch-action:none;cursor:crosshair;}
+  .modal-actions{display:flex;justify-content:space-between;margin-top:16px;gap:10px;}
+  .btn-ghost{background:none;border:1.5px solid var(--border-strong);color:var(--ink-muted);}
+  #done-screen{display:none;text-align:center;}
+  #done-screen .check{width:52px;height:52px;border-radius:50%;background:var(--brand);margin:0 auto 16px;position:relative;}
+  #done-screen .check::after{content:'';position:absolute;left:19px;top:11px;width:12px;height:22px;border:solid #fff;border-width:0 3px 3px 0;transform:rotate(40deg);}
+  #error-banner{display:none;background:#FBEAE9;border:1px solid #E5B4AF;color:#8A2A22;padding:12px 16px;border-radius:10px;font-size:13.5px;margin-bottom:16px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><span class="dot">DS</span>Dalton Solar</div>
+  <div id="error-banner"></div>
+
+  <div id="main-screen">
+    <div class="card">
+      <h2 id="hello">Loading your documents…</h2>
+      <p class="lead" id="sub-lead"></p>
+      <div class="progress" id="progress"></div>
+      <div id="fields"></div>
+    </div>
+    <button class="btn btn-full" id="submit-btn" disabled onclick="submitPacket()">Complete enrollment</button>
+  </div>
+
+  <div id="done-screen" class="card">
+    <div class="check"></div>
+    <h2>Enrollment submitted</h2>
+    <p class="lead">Your signature has been recorded. Dalton Solar will follow up if anything else is needed.</p>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="modal">
+  <div class="modal">
+    <h2 id="modal-title" style="font-size:17px;margin:0 0 4px;">Adopt your signature</h2>
+    <p class="lead" style="margin:0 0 16px;" id="modal-sub"></p>
+    <div class="tabs">
+      <div class="tab active" id="tab-type" onclick="switchTab('type')">Type</div>
+      <div class="tab" id="tab-draw" onclick="switchTab('draw')">Draw</div>
+    </div>
+    <div id="pane-type"><input type="text" id="typed-input" placeholder="Type your name"></div>
+    <div id="pane-draw" style="display:none;">
+      <canvas id="sig-canvas" width="420" height="120"></canvas>
+      <button class="btn-ghost" style="margin-top:8px;border-radius:8px;padding:6px 12px;font-size:12px;" onclick="clearCanvas()">Clear</button>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn" id="apply-btn" onclick="applySignature()">Apply</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const token = window.location.pathname.split('/').pop();
+let sessionData = null;
+let activeField = null;
+let currentTab = 'type';
+let sigCtx, drawing = false, hasDrawn = false;
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({error: 'Request failed'}));
+    throw new Error(body.error || 'Request failed');
+  }
+  return res.json();
+}
+
+function showError(msg) {
+  const el = document.getElementById('error-banner');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+async function load() {
+  try {
+    sessionData = await api(`/api/signing-sessions/${token}`);
+  } catch (e) {
+    showError(e.message);
+    document.getElementById('hello').textContent = 'This link is not available';
+    return;
+  }
+  document.getElementById('hello').textContent = `Hi ${sessionData.customer_name || 'there'} — review and sign`;
+  document.getElementById('sub-lead').textContent =
+    `${sessionData.project_name || 'Your project'} · ${sessionData.utility || ''} · Enrollment ${sessionData.enrollment_code}`;
+  renderFields();
+}
+
+function renderFields() {
+  const wrap = document.getElementById('fields');
+  const prog = document.getElementById('progress');
+  wrap.innerHTML = '';
+  prog.innerHTML = '';
+  sessionData.required_fields.forEach(f => {
+    const seg = document.createElement('div');
+    seg.className = 'seg' + (f.completed ? ' done' : '');
+    prog.appendChild(seg);
+
+    const row = document.createElement('div');
+    row.className = 'field-row' + (f.completed ? ' done' : '');
+    row.innerHTML = `<div><div class="ft-name">${labelFor(f.document_type)}</div>
+        <div class="ft-sub">${f.field_type === 'signature' ? 'Signature required' : 'Initial required'}</div></div>
+        <div class="ft-status">${f.completed ? 'Signed \u2713' : 'Click to sign \u2192'}</div>`;
+    row.onclick = () => openModal(f);
+    wrap.appendChild(row);
+  });
+  document.getElementById('submit-btn').disabled = !sessionData.required_fields.every(f => f.completed);
+}
+
+function labelFor(docType) {
+  const map = {
+    subscription_agreement: 'Community Solar Subscription Agreement',
+    cdg_disclosure: 'CDG Disclosure Form',
+    income_survey: 'Household Income Survey',
+    esign_consent: 'ESIGN Consent Disclosure',
+    credit_contact_consent: 'Credit Check & Contact Consent',
+    terms_privacy: 'Terms & Conditions / Privacy Policy',
+  };
+  return map[docType] || docType;
+}
+
+function openModal(field) {
+  activeField = field;
+  document.getElementById('modal-title').textContent =
+    (field.field_type === 'signature' ? 'Sign' : 'Initial') + ' — ' + labelFor(field.document_type);
+  document.getElementById('modal-sub').textContent = 'Adopt a signature to apply to this field.';
+  document.getElementById('typed-input').value = sessionData.customer_name || '';
+  switchTab('type');
+  document.getElementById('modal').classList.add('active');
+  setTimeout(initCanvas, 50);
+}
+function closeModal() {
+  document.getElementById('modal').classList.remove('active');
+  activeField = null;
+}
+function switchTab(tab) {
+  currentTab = tab;
+  document.getElementById('tab-type').classList.toggle('active', tab === 'type');
+  document.getElementById('tab-draw').classList.toggle('active', tab === 'draw');
+  document.getElementById('pane-type').style.display = tab === 'type' ? 'block' : 'none';
+  document.getElementById('pane-draw').style.display = tab === 'draw' ? 'block' : 'none';
+}
+function initCanvas() {
+  const canvas = document.getElementById('sig-canvas');
+  sigCtx = canvas.getContext('2d');
+  sigCtx.clearRect(0, 0, canvas.width, canvas.height);
+  sigCtx.strokeStyle = '#122720'; sigCtx.lineWidth = 2.5; sigCtx.lineCap = 'round';
+  hasDrawn = false;
+  function pos(e) {
+    const r = canvas.getBoundingClientRect();
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: (cx - r.left) * (canvas.width / r.width), y: (cy - r.top) * (canvas.height / r.height) };
+  }
+  function start(e) { drawing = true; hasDrawn = true; const p = pos(e); sigCtx.beginPath(); sigCtx.moveTo(p.x, p.y); e.preventDefault(); }
+  function move(e) { if (!drawing) return; const p = pos(e); sigCtx.lineTo(p.x, p.y); sigCtx.stroke(); e.preventDefault(); }
+  function end() { drawing = false; }
+  canvas.onmousedown = start; canvas.onmousemove = move; window.onmouseup = end;
+  canvas.ontouchstart = start; canvas.ontouchmove = move; canvas.ontouchend = end;
+}
+function clearCanvas() { initCanvas(); }
+
+async function applySignature() {
+  if (!activeField) return;
+  let payload = { signer_name: sessionData.customer_name, signer_email: '' };
+  if (currentTab === 'type') {
+    const val = document.getElementById('typed-input').value.trim();
+    if (!val) { alert('Type your name to adopt a signature.'); return; }
+    payload.method = 'typed';
+    payload.value_text = val;
+  } else {
+    if (!hasDrawn) { alert('Draw your signature first.'); return; }
+    payload.method = 'drawn';
+    payload.value_image_base64 = document.getElementById('sig-canvas').toDataURL('image/png');
+  }
+  try {
+    await api(`/api/signing-sessions/${token}/fields/${activeField.field_key}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+  } catch (e) { showError(e.message); return; }
+  closeModal();
+  sessionData = await api(`/api/signing-sessions/${token}`);
+  renderFields();
+}
+
+async function submitPacket() {
+  try {
+    await api(`/api/signing-sessions/${token}/complete`, { method: 'POST' });
+  } catch (e) { showError(e.message); return; }
+  document.getElementById('main-screen').style.display = 'none';
+  document.getElementById('done-screen').style.display = 'block';
+}
+
+load();
+</script>
+</body>
+</html>

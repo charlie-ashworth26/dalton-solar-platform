@@ -1,0 +1,269 @@
+"""
+Milestone 1 test suite — Perch integration.
+
+Covers every Milestone 1 deliverable:
+  * persistent Dalton draft, associated with the authenticated rep
+  * Perch token requested and stored server-side
+  * automatic token refresh on expiry
+  * ZIP + utility selection
+  * adapter layer dispatch
+  * mocked capacity endpoint through the adapter
+  * full API response persisted
+  * dynamic fields present (customer type, capacity, savings, proof docs, next step)
+  * SECURITY: no Perch token or credential ever reaches an API response
+
+Run: python3 test/test_perch_milestone1.py
+"""
+import sys, os, json
+from datetime import datetime, timedelta
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app import app
+from db import init_db, query, query_one, execute
+import seed
+
+
+def section(title):
+    print(f"\n{'='*72}\n{title}\n{'='*72}")
+
+
+def check(label, condition):
+    print(f"  [{'PASS' if condition else 'FAIL'}] {label}")
+    if not condition:
+        raise AssertionError(f"Failed: {label}")
+
+
+def login(client, email, password):
+    r = client.post("/api/auth/login", json={"email": email, "password": password})
+    assert r.status_code == 200, f"login failed for {email}: {r.data}"
+    return {"Authorization": f"Bearer {r.get_json()['token']}"}
+
+
+def main():
+    os.environ["PERCH_API_MODE"] = "mock"
+    init_db(reset=True)
+    seed.seed()
+    client = app.test_client()
+
+    section("MIGRATION — Perch tables exist and the ledger recorded them")
+    with app.app_context():
+        tables = {r["name"] for r in query("SELECT name FROM sqlite_master WHERE type='table'")}
+    for t in ("perch_tokens", "perch_api_calls", "perch_capacity_snapshots", "perch_products", "schema_migrations"):
+        check(f"table '{t}' created", t in tables)
+    with app.app_context():
+        applied = query("SELECT filename FROM schema_migrations")
+    check("migration 001 recorded in ledger", any("001_perch" in r["filename"] for r in applied))
+    with app.app_context():
+        cols = {r["name"] for r in query("PRAGMA table_info(enrollments)")}
+    for c in ("service_zip", "utility_name", "selected_perch_product_id", "perch_enrollment_ref", "perch_customer_ref"):
+        check(f"enrollments.{c} column added", c in cols)
+
+    section("MIGRATION IDEMPOTENCY — re-running migrations is safe")
+    from db.migrate import run_migrations, pending_migrations
+    from db import DB_PATH
+    applied_again = run_migrations(DB_PATH, verbose=False)
+    check("second migration run applies nothing", applied_again == [])
+
+    section("SEED — no invented projects are created any more")
+    with app.app_context():
+        proj_count = query_one("SELECT COUNT(*) AS n FROM projects")["n"]
+    check("projects table is empty (Perch owns products now)", proj_count == 0)
+
+    rep_headers = login(client, "charlie@daltonsolar.com", "RepPass1!")
+    admin_headers = login(client, "admin@daltonsolar.com", "AdminPass1!")
+
+    section("DELIVERABLE 1+2 — persistent draft, associated with the authenticated rep")
+    r = client.post("/api/perch/drafts", headers=rep_headers)
+    check("draft created (201)", r.status_code == 201)
+    draft = r.get_json()
+    enrollment_id = draft["enrollment_id"]
+    check("immutable Dalton enrollment code issued", draft["enrollment_code"].startswith("ENR-"))
+    check("status is Draft", draft["status"] == "Draft")
+    check("rep name returned", draft["rep_name"] == "Charlie Mren")
+    with app.app_context():
+        row = query_one("SELECT * FROM enrollments WHERE id = ?", (enrollment_id,))
+        rep = query_one("SELECT * FROM sales_reps WHERE id = ?", (row["sales_rep_id"],))
+        rep_user = query_one("SELECT * FROM users WHERE id = ?", (rep["user_id"],))
+    check("draft persisted to the database", row is not None)
+    check("draft associated with the authenticated rep", rep_user["email"] == "charlie@daltonsolar.com")
+
+    section("DELIVERABLE 3 — Perch token requested and stored server-side")
+    with app.app_context():
+        tokens_before = query("SELECT * FROM perch_tokens")
+    check("no token exists before the first Perch call", len(tokens_before) == 0)
+
+    r = client.post(f"/api/perch/enrollments/{enrollment_id}/capacity",
+                    headers=rep_headers, json={"zip_code": "13348", "utility": "National Grid"})
+    check("capacity call succeeded (200)", r.status_code == 200)
+    capacity = r.get_json()
+
+    with app.app_context():
+        tokens_after = query("SELECT * FROM perch_tokens WHERE is_active = 1")
+    check("a Perch token was obtained and stored", len(tokens_after) == 1)
+    check("token has an expiry", bool(tokens_after[0]["expires_at"]))
+    check("token tagged with api_mode", tokens_after[0]["api_mode"] == "mock")
+
+    section("SECURITY — no Perch token or credential reaches any API response")
+    stored_token = tokens_after[0]["access_token"]
+    check("capacity response does not contain the token", stored_token not in json.dumps(capacity))
+    r_status = client.get("/api/perch/token-status", headers=admin_headers)
+    check("admin token-status endpoint works", r_status.status_code == 200)
+    body = json.dumps(r_status.get_json())
+    check("token-status does NOT leak the token value", stored_token not in body)
+    check("token-status reports expiry instead", "expires_at" in r_status.get_json())
+    r_forbidden = client.get("/api/perch/token-status", headers=rep_headers)
+    check("token-status is admin-only (rep gets 403)", r_forbidden.status_code == 403)
+    with app.app_context():
+        calls = query("SELECT * FROM perch_api_calls WHERE operation = 'get_token'")
+    check("token request was audit-logged", len(calls) >= 1)
+    check("audit log REDACTS the token value", stored_token not in (calls[0]["response_json"] or ""))
+    check("audit log shows redaction marker", "[REDACTED]" in (calls[0]["response_json"] or ""))
+
+    section("DELIVERABLE 4 — automatic token refresh on expiry")
+    with app.app_context():
+        original_token_id = tokens_after[0]["id"]
+        expired = (datetime.now() - timedelta(minutes=5)).isoformat()
+        execute("UPDATE perch_tokens SET expires_at = ? WHERE id = ?", (expired, original_token_id))
+    r = client.post(f"/api/perch/enrollments/{enrollment_id}/capacity",
+                    headers=rep_headers, json={"zip_code": "13348", "utility": "National Grid"})
+    check("capacity call still succeeds with an expired token", r.status_code == 200)
+    with app.app_context():
+        active = query("SELECT * FROM perch_tokens WHERE is_active = 1")
+        all_tokens = query("SELECT * FROM perch_tokens ORDER BY id")
+    check("a new token was issued automatically", len(all_tokens) == 2)
+    check("exactly one token is active", len(active) == 1)
+    check("the active token is the new one", active[0]["id"] != original_token_id)
+    check("the expired token was deactivated", all_tokens[0]["is_active"] == 0)
+
+    section("DELIVERABLE 5+6 — ZIP/utility selection through the adapter to mocked capacity")
+    check("response echoes the ZIP", capacity["zip_code"] == "13348")
+    check("response resolves the utility", capacity["utility"] == "National Grid")
+    check("api_mode surfaced so the UI can badge mocked data", capacity["api_mode"] == "mock")
+    check("products returned", capacity["product_count"] == 2)
+
+    section("DELIVERABLE 7 — full API response persisted")
+    with app.app_context():
+        snaps = query("SELECT * FROM perch_capacity_snapshots WHERE enrollment_id = ?", (enrollment_id,))
+        prods = query("SELECT * FROM perch_products")
+        api_calls = query("SELECT * FROM perch_api_calls WHERE enrollment_id = ? AND operation = 'get_capacity'", (enrollment_id,))
+    check("capacity snapshot persisted", len(snaps) == 2)  # two calls made so far
+    raw = json.loads(snaps[0]["raw_response_json"])
+    check("snapshot stores the RAW unmodified response", "products" in raw and len(raw["products"]) == 2)
+    check("normalized products persisted", len(prods) == 4)  # 2 products x 2 calls
+    check("api call persisted with timing", api_calls[0]["duration_ms"] is not None)
+    check("api call linked to the Dalton enrollment ID", api_calls[0]["enrollment_id"] == enrollment_id)
+    check("api call records the endpoint", "capacity" in api_calls[0]["endpoint"])
+    with app.app_context():
+        enr = query_one("SELECT * FROM enrollments WHERE id = ?", (enrollment_id,))
+    check("ZIP written to the enrollment", enr["service_zip"] == "13348")
+    check("utility written to the enrollment", enr["utility_name"] == "National Grid")
+
+    section("DELIVERABLE 8 — every dynamically-rendered field is present")
+    standard = next(p for p in capacity["products"] if p["customer_type"] == "residential")
+    lmi = next(p for p in capacity["products"] if p["customer_type"] == "lmi")
+    check("customer type present", standard["customer_type"] == "residential")
+    check("available capacity present", standard["available_capacity_kw"] == 412.5)
+    check("savings percentage present", standard["savings_percentage"] == 10.0)
+    check("proof-document requirement present", standard["proof_documents_required"] == ["utility_bill"])
+    check("next step present", standard["next_step"] == "collect_customer_info")
+    check("LMI product flagged lmi_required", lmi["lmi_required"] is True)
+    check("LMI product requires an extra proof doc", "lmi_proof" in lmi["proof_documents_required"])
+    check("Perch product ID preserved (not a Dalton id)", standard["perch_product_id"].startswith("PERCH-"))
+
+    section("UTILITY-SPECIFIC RULES — a different ZIP yields a different utility and products")
+    r2 = client.post("/api/perch/drafts", headers=rep_headers)
+    e2 = r2.get_json()["enrollment_id"]
+    r = client.post(f"/api/perch/enrollments/{e2}/capacity",
+                    headers=rep_headers, json={"zip_code": "11550", "utility": "PSEG Long Island"})
+    check("Long Island ZIP succeeds", r.status_code == 200)
+    li = r.get_json()
+    check("different utility resolved", li["utility"] == "PSEG Long Island")
+    check("different product returned", li["products"][0]["perch_product_id"] == "PERCH-PSEG-VDER-001")
+    check("different proof requirements", "proof_of_residence" in li["products"][0]["proof_documents_required"])
+
+    section("ERROR HANDLING — unserviced ZIP and upstream failure")
+    r3 = client.post("/api/perch/drafts", headers=rep_headers)
+    e3 = r3.get_json()["enrollment_id"]
+    r = client.post(f"/api/perch/enrollments/{e3}/capacity", headers=rep_headers,
+                    json={"zip_code": "99999", "utility": ""})
+    check("unserviced ZIP returns 200 with zero products (not an error)", r.status_code == 200)
+    check("zero products reported", r.get_json()["product_count"] == 0)
+    with app.app_context():
+        e3row = query_one("SELECT status FROM enrollments WHERE id = ?", (e3,))
+    check("draft stays in Draft when no capacity found", e3row["status"] == "Draft")
+
+    r = client.post(f"/api/perch/enrollments/{e3}/capacity", headers=rep_headers,
+                    json={"zip_code": "00000", "utility": ""})
+    check("upstream failure surfaces as 503", r.status_code == 503)
+    check("error names the failure type", r.get_json()["perch_error"] == "PerchUnavailableError")
+    with app.app_context():
+        failed = query("SELECT * FROM perch_api_calls WHERE enrollment_id = ? AND error_message IS NOT NULL", (e3,))
+    check("the FAILED call was persisted too (audit requirement)", len(failed) >= 1)
+
+    r = client.post(f"/api/perch/enrollments/{e3}/capacity", headers=rep_headers, json={"zip_code": ""})
+    check("missing ZIP rejected with 400", r.status_code == 400)
+
+    section("ACCESS CONTROL — reps cannot touch another rep's enrollment")
+    other = login(client, "qa@daltonsolar.com", "QaPass1!")
+    r = client.post("/api/perch/drafts", headers=other)
+    check("QA reviewer cannot create a draft (403)", r.status_code == 403)
+    r = client.post(f"/api/perch/enrollments/{enrollment_id}/capacity", headers=other,
+                    json={"zip_code": "13348"})
+    check("QA reviewer cannot run capacity (403)", r.status_code == 403)
+    r = client.get(f"/api/perch/enrollments/{enrollment_id}/api-calls", headers=other)
+    check("QA reviewer CAN read the audit trail (200)", r.status_code == 200)
+
+    section("RESUME — a stored snapshot is retrievable and explicitly marked stale")
+    r = client.get(f"/api/perch/enrollments/{enrollment_id}/capacity", headers=rep_headers)
+    check("stored snapshot retrievable (200)", r.status_code == 200)
+    snap = r.get_json()
+    check("snapshot flagged stale so it is never mistaken for live capacity", snap["stale"] is True)
+    check("snapshot includes products", len(snap["products"]) == 2)
+
+    section("ADAPTER BOUNDARY — routes never import a Perch client directly")
+    route_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                   "routes", "perch_routes.py")).read()
+    check("routes do not import PerchHTTPClient", "PerchHTTPClient" not in route_src)
+    check("routes do not import PerchMockClient", "PerchMockClient" not in route_src)
+    check("routes do not read PERCH_CLIENT_SECRET", "PERCH_CLIENT_SECRET" not in route_src)
+    check("routes go through the adapter", "from services.perch import adapter" in route_src)
+
+    section("MODE SWITCH — the live client is selected purely by env var")
+    from services.perch.config import get_perch_client, get_api_mode
+    os.environ["PERCH_API_MODE"] = "live"
+    os.environ["PERCH_BASE_URL"] = "https://staging.example.invalid"
+    live_client = get_perch_client()
+    check("PERCH_API_MODE=live selects the HTTP client", type(live_client).__name__ == "PerchHTTPClient")
+    check("live client reports mode 'live'", live_client.mode == "live")
+    os.environ["PERCH_API_MODE"] = "mock"
+    check("PERCH_API_MODE=mock selects the mock client", type(get_perch_client()).__name__ == "PerchMockClient")
+    check("both satisfy the same interface", hasattr(live_client, "get_capacity") and hasattr(get_perch_client(), "get_capacity"))
+
+    section("FRONTEND CONTRACT — the capacity screen is wired to the real endpoints")
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    html = open(os.path.join(base, "templates", "index.html")).read()
+    js = open(os.path.join(base, "static", "js", "app.js")).read()
+    check("ZIP input present", 'id="perch-zip"' in html)
+    check("utility select present", 'id="perch-utility"' in html)
+    check("check-availability button present", 'id="btn-check-capacity"' in html)
+    check("dynamic product container present", 'id="perch-products-wrap"' in html)
+    check("draft code banner present", 'id="draft-code"' in html)
+    check("mocked-data badge present so fixtures are never mistaken for real data", 'id="api-mode-badge"' in html)
+    check("hardcoded project picker markup removed", 'project-picker-grid' not in html)
+    check("JS creates a draft BEFORE any Perch call", "'/api/perch/drafts'" in js)
+    check("JS calls the capacity endpoint", "/capacity'" in js or "/capacity\'" in js)
+    check("JS loads utilities from the API", "'/api/perch/utilities'" in js)
+    check("JS renders customer_type from the response", "customer_type" in js)
+    check("JS renders savings_percentage from the response", "savings_percentage" in js)
+    check("JS renders available_capacity_kw from the response", "available_capacity_kw" in js)
+    check("JS renders proof_documents_required from the response", "proof_documents_required" in js)
+    check("JS renders next_step from the response", "next_step" in js)
+    check("old buildProjectPicker removed", "function buildProjectPicker" not in js)
+    check("no Perch credentials anywhere in frontend JS", "PERCH_CLIENT_SECRET" not in js and "client_secret" not in js)
+
+    print(f"\n{'='*72}\nMILESTONE 1 — ALL CHECKS PASSED\n{'='*72}")
+
+
+if __name__ == "__main__":
+    main()

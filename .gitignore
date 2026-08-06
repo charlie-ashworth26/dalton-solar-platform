@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Virtual environments (both common conventions)
+venv/
+.venv/
+env/
+
+# Secrets — NEVER commit. Perch credentials are supplied via environment only.
+.env
+.env.*
+*.pem
+*.key
+
+# Runtime data: contains password hashes, session tokens, customer documents
+dalton_solar.db
+uploads/*
+storage/generated/*
+storage/packages/*
+!uploads/.gitkeep
+!storage/generated/.gitkeep
+!storage/packages/.gitkeep

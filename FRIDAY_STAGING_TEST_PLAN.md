@@ -98,7 +98,7 @@ signature is wrong.
 
 **Verify:**
 - `enrollment_token` parses as a UUID
-- `expires_at` is ~30 minutes ahead — **compare to Perch's clock, not ours**
+- `expires_at` is ~1 hour ahead — **compare to Perch's clock, not ours**
 - Note the `next_step` value (we expect `/capacity`; confirm)
 
 **Database:** one row in `perch_tokens` (`api_mode='live'`, `enrollment_id` set,
@@ -115,15 +115,17 @@ Must return `expires_at` and `seconds_remaining` — **never the token value**.
 
 ### 2.3 Invalid email → 422 (already covered in §1)
 
-### 2.4 ⚠️ Duplicate-email behavior — **undocumented, test explicitly**
+### 2.4 Duplicate-email behavior — **now documented; verify it matches**
 Call `POST /token` **twice with the same email**.
 
-**Unknown:** two independent sessions, the same token, or an error?
+**Expected (newest YAML):** `422` —
+`"An enrollment request already exists for this email. Use the /status endpoint
+to check the current status of the enrollment."`
+(or `"Email has already been taken"` if the address already has an account).
 
-**Why it matters:** if a rep abandons an enrollment and starts over for the same
-customer, we need to know whether that resumes or forks. Record the answer —
-it determines whether Milestone 3 must call `/refresh_token` instead of `/token`
-for a returning customer.
+**Our behaviour:** the adapter catches this and automatically resumes via
+`PATCH /refresh_token` rather than failing. Confirm the resume produces a
+working token and that the 422-and-resume appears in `perch_api_calls`.
 
 ---
 
@@ -193,7 +195,7 @@ recorded as `PATCH`.
 | 401 | HMAC wrong on this endpoint | Note: refresh uses HMAC, **not** the enrollment token |
 
 ### 4.1 Forced-expiry test
-Wait out the 30 minutes (or ask Perch for a short-TTL key), then call
+Wait out the hour (or ask Perch for a short-TTL key), then call
 `/capacity`. Confirm the **automatic 403 → refresh → retry** path fires and the
 rep sees no error. Confirm `perch_api_calls` contains the 403 **and** the
 successful retry.

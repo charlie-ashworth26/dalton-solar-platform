@@ -547,7 +547,7 @@ step Perch expects.
 genuine 5xx stays an error and is distinguishable from either.
 
 **4. Tokens are per-enrollment, not global.**
-Perch's enrollment token is session-scoped with a 30-minute TTL, so it can't be
+Perch's enrollment token is session-scoped with a 1-hour TTL, so it can't be
 a singleton. Refresh is both proactive (2-minute skew) and reactive (on 403).
 
 **5. Utility slugs are reference data, not free text.**

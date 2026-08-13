@@ -12,8 +12,9 @@ Base URLs (documented):
 
 Auth (documented):
     Enrollment flow uses an enrollment_token (UUID) in the X-Enrollment-Token
-    header. It expires after 30 minutes. A 403 means expired/invalid — call
-    PATCH /refresh_token, then retry the original request.
+    header. It expires after 1 HOUR. A 403 on an enrollment-session endpoint
+    means expired/invalid - call PATCH /refresh_token, then retry the original
+    request.
 
     Pre-enrollment (GET /markets/capacity) uses HMAC auth with NO enrollment
     token. The signing scheme is not published; get_market_capacity() therefore
@@ -25,8 +26,23 @@ from services.perch import hmac_auth
 from services.perch.errors import (
     PerchAuthError, PerchUnavailableError, PerchValidationError,
     PerchTokenExpiredError, PerchNoCapacityError, PerchNotImplementedError,
-    PerchNotFoundError,
+    PerchNotFoundError, PerchEnrollmentInProgressError,
 )
+
+
+# NEW YAML /token 422 examples: "Email has already been taken" and "An
+# enrollment request already exists for this email. Use the /status endpoint...".
+# Matched on message text because the spec gives every 422 the same
+# error code ("unprocessable_entity"), so the code alone cannot distinguish them.
+_IN_PROGRESS_MARKERS = ("already been taken", "already exists")
+
+
+def _is_enrollment_in_progress(resp):
+    try:
+        return any(m in (resp.json().get("message") or "").lower()
+                   for m in _IN_PROGRESS_MARKERS)
+    except Exception:
+        return False
 
 
 def _msg(resp):
@@ -39,14 +55,19 @@ def _msg(resp):
 
 # Documented path suffixes, relative to the enrollment base URL.
 PATH_TOKEN = "/token"
+# NEW YAML: POST /token returns 201 Created (previous spec said 200).
+TOKEN_CREATED_STATUS = 201
 PATH_REFRESH_TOKEN = "/refresh_token"
 PATH_CAPACITY = "/capacity"
 PATH_ENROLL = "/enroll"          # Milestone 3
 PATH_STATUS = "/status"          # Milestone 6
 PATH_MARKETS_CAPACITY = "/capacity"   # relative to the MARKETS base URL
 
-# Documented: "It's going to expire after 30 minutes" (engineering call).
-TOKEN_TTL_SECONDS = 30 * 60
+# NEW YAML: "Expires 1 hour after issuance (see `expires_at` on the token
+# response)". The previous spec said 30 minutes; the engineering call predated
+# the published spec. expires_at on the response is still authoritative - this
+# constant is only the fallback when the field is absent.
+TOKEN_TTL_SECONDS = 60 * 60
 
 ENROLLMENT_TOKEN_HEADER = "X-Enrollment-Token"
 
@@ -159,6 +180,12 @@ class PerchHTTPClient(PerchClient):
             resp = requests.post(url, data=body.encode("utf-8"), headers=headers, timeout=self.timeout)
         except Exception as e:
             raise PerchUnavailableError(f"Could not reach Perch at {url}: {e}") from e
+        # NEW YAML: 422 on /token now covers three distinct cases. Two of them
+        # ("Email has already been taken" / "An enrollment request already
+        # exists") are recoverable via PATCH /refresh_token, so they get their
+        # own error type rather than being lumped in with a validation failure.
+        if resp.status_code == 422 and _is_enrollment_in_progress(resp):
+            raise PerchEnrollmentInProgressError(_msg(resp))
         self._raise_for_hmac_status(resp, PATH_TOKEN)
         return self._parse_token_response(resp)
 
@@ -234,8 +261,9 @@ class PerchHTTPClient(PerchClient):
             raise PerchAuthError(
                 "Perch token response did not contain an enrollment_token. "
                 f"Received keys: {sorted(data.keys())}")
-        # expires_at is authoritative - prefer Perch's clock over ours.
-        # next_step on a refresh response is how an interrupted flow resumes.
+        # NEW YAML: enrollment_token, expires_at AND next_step are all `required`
+        # on the token response. expires_at is authoritative - prefer Perch's
+        # clock over ours. next_step is how an interrupted flow resumes.
         return {
             "enrollment_token": token,
             "expires_at": data.get("expires_at"),

@@ -42,7 +42,7 @@ def _visible(enrollment_id):
 def create_draft():
     """Creates a Dalton enrollment draft and returns its immutable internal ID.
 
-    Perch's enrollment_token is session-scoped and dies in 30 minutes, so it can
+    Perch's enrollment_token is session-scoped and dies in 1 hour, so it can
     never be the durable key. The Dalton Enrollment ID is issued first and is
     what everything else - documents, signatures, VIPR reconciliation - hangs off.
     """

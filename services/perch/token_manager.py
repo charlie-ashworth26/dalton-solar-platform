@@ -116,16 +116,46 @@ def _email_for(enrollment_id):
 
 
 def issue_new_token(enrollment_id, user_id=None):
-    """POST /token - brand new enrollment token."""
+    """POST /token - brand new enrollment token.
+
+    NEW YAML: if Perch already has an in-progress enrollment for this email it
+    returns 422 rather than a second session. The documented recovery is to
+    resume via PATCH /refresh_token, which is what we do here - otherwise a rep
+    revisiting an abandoned customer would be permanently stuck.
+    """
     from services.perch.client import PATH_TOKEN
+    from services.perch.errors import PerchEnrollmentInProgressError
     client = get_perch_client()
     started = _now()
     try:
         data = client.request_token(_email_for(enrollment_id))
+    except PerchEnrollmentInProgressError:
+        _log(enrollment_id, "request_token", PATH_TOKEN, "POST", started,
+             error="422 enrollment already in progress - resuming via refresh_token",
+             user_id=user_id)
+        return _resume_existing_enrollment(enrollment_id, user_id=user_id)
     except Exception as e:
         _log(enrollment_id, "request_token", PATH_TOKEN, "POST", started, error=str(e), user_id=user_id)
         raise
     _log(enrollment_id, "request_token", PATH_TOKEN, "POST", started, user_id=user_id)
+    return _store(enrollment_id, data["enrollment_token"], refresh_count=0,
+                  expires_at_iso=data.get("expires_at"))
+
+
+def _resume_existing_enrollment(enrollment_id, user_id=None):
+    """Recovery for the documented 422: Perch already has an in-progress
+    enrollment for this email, so obtain a token for it via PATCH /refresh_token
+    instead of trying to create a second one."""
+    from services.perch.client import PATH_REFRESH_TOKEN
+    client = get_perch_client()
+    started = _now()
+    try:
+        data = client.refresh_token(_email_for(enrollment_id))
+    except Exception as e:
+        _log(enrollment_id, "refresh_token", PATH_REFRESH_TOKEN, "PATCH", started,
+             error=str(e), user_id=user_id)
+        raise
+    _log(enrollment_id, "refresh_token", PATH_REFRESH_TOKEN, "PATCH", started, user_id=user_id)
     return _store(enrollment_id, data["enrollment_token"], refresh_count=0,
                   expires_at_iso=data.get("expires_at"))
 

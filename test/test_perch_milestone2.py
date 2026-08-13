@@ -20,7 +20,25 @@ import seed
 
 # POST /token requires the customer's email (OpenAPI spec), so every capacity
 # call now carries one. Distinct per-suite so mock refresh-by-email is isolated.
-TEST_EMAIL = "suite.customer@example.com"
+# NEW YAML: POST /token returns 422 if an enrollment is already in progress for
+# an email, so each ENROLLMENT needs its own address - exactly as production will.
+#
+# It must be stable PER ENROLLMENT, not per call: the suite checks capacity more
+# than once on the same enrollment, and the email is the Perch session identity.
+# Varying it mid-enrollment would silently re-point the session at a different
+# Perch record (which is how the first version of this helper broke the
+# refresh-count assertion).
+def email_for(enrollment_id):
+    return f"suite.customer{enrollment_id}@example.com"
+
+
+_email_seq = [0]
+
+
+def next_email():
+    """A fresh address not tied to any enrollment - for direct client-level tests."""
+    _email_seq[0] += 1
+    return f"suite.standalone{_email_seq[0]}@example.com"
 
 
 def section(t):
@@ -104,9 +122,10 @@ def main():
         check("no inferred slugs remain at all", U.unconfirmed_slugs() == [])
 
     # ───────────────────────────────────────────────────────────
-    section("AUTH - X-Enrollment-Token, 30 minutes, PATCH /refresh_token")
+    section("AUTH - X-Enrollment-Token, 1 hour TTL, PATCH /refresh_token")
     from services.perch.client import TOKEN_TTL_SECONDS, ENROLLMENT_TOKEN_HEADER
-    check("TTL is 30 minutes as stated on the call", TOKEN_TTL_SECONDS == 1800)
+    # NEW YAML: "Expires 1 hour after issuance". The previous spec said 30 min.
+    check("TTL is 1 hour per the newest spec", TOKEN_TTL_SECONDS == 3600)
     check("auth header is X-Enrollment-Token", ENROLLMENT_TOKEN_HEADER == "X-Enrollment-Token")
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "services", "perch", "client.py"), encoding="utf-8").read()
@@ -117,7 +136,7 @@ def main():
 
     eid = new_draft(c, rep)
     r = c.post(f"/api/perch/enrollments/{eid}/capacity", headers=rep,
-               json={"email": TEST_EMAIL, "zip_code": "13348", "utility_name": "national-grid-ny"})
+               json={"email": email_for(eid), "zip_code": "13348", "utility_name": "national-grid-ny"})
     check("capacity call succeeds", r.status_code == 200)
     with app.app_context():
         tok = query_one("SELECT * FROM perch_tokens WHERE enrollment_id = ? AND is_active = 1", (eid,))
@@ -138,7 +157,7 @@ def main():
     check("admin token-status works", r_ts.status_code == 200)
     check("token-status does NOT leak the token value", token_value not in r_ts.data.decode())
     check("token-status reports expiry instead", "expires_at" in r_ts.get_json())
-    check("token-status reports the 30-min TTL", r_ts.get_json()["ttl_seconds"] == 1800)
+    check("token-status reports the 1-hour TTL", r_ts.get_json()["ttl_seconds"] == 3600)
     check("token-status is admin-only",
           c.get(f"/api/perch/enrollments/{eid}/token-status", headers=rep).status_code == 403)
     with app.app_context():
@@ -165,7 +184,7 @@ def main():
     PerchMockClient().expire_token(before["access_token"])
 
     r = c.post(f"/api/perch/enrollments/{eid}/capacity", headers=rep,
-               json={"email": TEST_EMAIL, "zip_code": "13348", "utility_name": "national-grid-ny"})
+               json={"email": email_for(eid), "zip_code": "13348", "utility_name": "national-grid-ny"})
     check("request still succeeds after a 403 from Perch", r.status_code == 200)
     body = r.get_json()
     check("capacity data returned despite the expired token", body["result"]["capacity_available"] is True)
@@ -189,14 +208,14 @@ def main():
     section("Proactive refresh means 403s are rare in the first place")
     eid_p = new_draft(c, rep)
     c.post(f"/api/perch/enrollments/{eid_p}/capacity", headers=rep,
-           json={"email": TEST_EMAIL, "zip_code": "13348", "utility_name": "national-grid-ny"})
+           json={"email": email_for(eid_p), "zip_code": "13348", "utility_name": "national-grid-ny"})
     with app.app_context():
         t = query_one("SELECT * FROM perch_tokens WHERE enrollment_id=? AND is_active=1", (eid_p,))
         # Age our own record past the skew window; the token is still live at Perch.
         execute("UPDATE perch_tokens SET expires_at=? WHERE id=?",
                 ((datetime.now() + timedelta(seconds=30)).isoformat(), t["id"]))
     r = c.post(f"/api/perch/enrollments/{eid_p}/capacity", headers=rep,
-               json={"email": TEST_EMAIL, "zip_code": "13348", "utility_name": "national-grid-ny"})
+               json={"email": email_for(eid_p), "zip_code": "13348", "utility_name": "national-grid-ny"})
     check("a near-expiry token is refreshed before the call, not after a 403",
           r.status_code == 200 and r.get_json()["result"]["token_was_refreshed"] is False)
     with app.app_context():
@@ -207,7 +226,7 @@ def main():
     section("POST /capacity - documented request and response contract")
     eid2 = new_draft(c, rep)
     r = c.post(f"/api/perch/enrollments/{eid2}/capacity", headers=rep,
-               json={"email": TEST_EMAIL, "zip_code": "10001", "utility_name": "consolidated-edison-ny"})
+               json={"email": email_for(eid2), "zip_code": "10001", "utility_name": "consolidated-edison-ny"})
     res = r.get_json()["result"]
     with app.app_context():
         call = query_one("""SELECT * FROM perch_api_calls WHERE enrollment_id=?
@@ -250,7 +269,7 @@ def main():
     section("503 - no capacity is a BUSINESS OUTCOME, not an error")
     eid3 = new_draft(c, rep)
     r = c.post(f"/api/perch/enrollments/{eid3}/capacity", headers=rep,
-               json={"email": TEST_EMAIL, "zip_code": "99999", "utility_name": "national-grid-ny"})
+               json={"email": email_for(eid3), "zip_code": "99999", "utility_name": "national-grid-ny"})
     check("HTTP 200 to our frontend (not a 5xx bubbled up)", r.status_code == 200)
     b = r.get_json()
     check("capacity_available is False", b["result"]["capacity_available"] is False)
@@ -267,21 +286,21 @@ def main():
 
     section("Genuine upstream failure is still an error")
     r = c.post(f"/api/perch/enrollments/{eid3}/capacity", headers=rep,
-               json={"email": TEST_EMAIL, "zip_code": "00000", "utility_name": "national-grid-ny"})
+               json={"email": email_for(eid3), "zip_code": "00000", "utility_name": "national-grid-ny"})
     check("real 5xx surfaces as 503 to the client", r.status_code == 503)
     check("distinguished from no-capacity by error type",
           r.get_json()["perch_error"] == "PerchUnavailableError")
 
     section("Validation happens before we call Perch")
     r = c.post(f"/api/perch/enrollments/{eid3}/capacity", headers=rep,
-               json={"email": TEST_EMAIL, "zip_code": "123", "utility_name": "national-grid-ny"})
+               json={"email": email_for(eid3), "zip_code": "123", "utility_name": "national-grid-ny"})
     check("short ZIP rejected with 400", r.status_code == 400)
     r = c.post(f"/api/perch/enrollments/{eid3}/capacity", headers=rep,
-               json={"email": TEST_EMAIL, "zip_code": "13348", "utility_name": "Some Made Up Utility"})
+               json={"email": email_for(eid3), "zip_code": "13348", "utility_name": "Some Made Up Utility"})
     check("unknown utility rejected with 400", r.status_code == 400)
     check("error explains slugs", "slug" in r.get_json()["error"].lower())
     r = c.post(f"/api/perch/enrollments/{eid3}/capacity", headers=rep,
-               json={"email": TEST_EMAIL, "zip_code": "13348", "utility_name": "National Grid NY"})
+               json={"email": email_for(eid3), "zip_code": "13348", "utility_name": "National Grid NY"})
     check("a DISPLAY NAME is translated to its slug rather than rejected",
           r.get_json()["result"]["utility_slug"] == "national-grid-ny")
 
@@ -303,7 +322,7 @@ def main():
     check("descriptor declares the primary action", wf["step"]["primary_action"]["operation"] == "check_capacity")
 
     c.post(f"/api/perch/enrollments/{eid4}/capacity", headers=rep,
-           json={"email": TEST_EMAIL, "zip_code": "13348", "utility_name": "national-grid-ny"})
+           json={"email": email_for(eid4), "zip_code": "13348", "utility_name": "national-grid-ny"})
     wf2 = c.get(f"/api/perch/enrollments/{eid4}/workflow", headers=rep).get_json()
     check("workflow advanced to capacity_result", wf2["step"]["key"] == "capacity_result")
     check("step renders Perch's data as panels", wf2["step"]["panels"][0]["type"] == "capacity_summary")
@@ -402,7 +421,7 @@ def main():
           c.post("/api/perch/drafts", headers=qa).status_code == 403)
     check("QA reviewer cannot run capacity (403)",
           c.post(f"/api/perch/enrollments/{eid4}/capacity", headers=qa,
-                 json={"email": TEST_EMAIL, "zip_code": "13348", "utility_name": "national-grid-ny"}).status_code == 403)
+                 json={"email": email_for(eid4), "zip_code": "13348", "utility_name": "national-grid-ny"}).status_code == 403)
     check("QA reviewer CAN read the Perch audit trail (200)",
           c.get(f"/api/perch/enrollments/{eid4}/api-calls", headers=qa).status_code == 200)
     check("unauthenticated requests are rejected",
@@ -521,7 +540,94 @@ def main():
           validate_upload("bill.pdf", 5 * 1024 * 1024) is not None)
     check("a 3 MB file is accepted", validate_upload("bill.pdf", 3 * 1024 * 1024) is None)
 
-    print(f"\n{'='*74}\nMILESTONE 2 + SPEC ALIGNMENT - ALL CHECKS PASSED\n{'='*74}")
+    # ───────────────────────────────────────────────────────────
+    section("NEWEST YAML - token TTL is 1 hour, sourced from expires_at")
+    eid_ttl = new_draft(c, rep)
+    ttl_email = email_for(eid_ttl)
+    r = c.post(f"/api/perch/enrollments/{eid_ttl}/capacity", headers=rep,
+               json={"email": ttl_email, "zip_code": "13348", "utility_name": "national-grid-ny"})
+    check("capacity succeeds", r.status_code == 200)
+    with app.app_context():
+        trow = query_one("SELECT * FROM perch_tokens WHERE enrollment_id=? AND is_active=1", (eid_ttl,))
+    from datetime import datetime as _dt
+    remaining = (_dt.fromisoformat(trow["expires_at"]) - _dt.now()).total_seconds()
+    check("stored expiry is ~1 hour out, not 30 minutes", 3000 < remaining <= 3600)
+    check("token-status advertises the 1-hour TTL",
+          c.get(f"/api/perch/enrollments/{eid_ttl}/token-status",
+                headers=admin).get_json()["ttl_seconds"] == 3600)
+
+    section("NEWEST YAML - POST /token 201, and duplicate email returns 422")
+    from services.perch.client import TOKEN_CREATED_STATUS
+    check("client records 201 as the documented creation status", TOKEN_CREATED_STATUS == 201)
+    from services.perch.errors import PerchEnrollmentInProgressError
+    from services.perch.config import get_perch_client as _gpc
+    dup_email = next_email()
+    mc = _gpc()
+    first = mc.request_token(dup_email)
+    check("first token issued for a fresh email", bool(first["enrollment_token"]))
+    check("token response carries expires_at (required field)", bool(first["expires_at"]))
+    check("token response carries next_step (now a REQUIRED field)", bool(first["next_step"]))
+    check("token next_step points at /capacity, per the documented flow",
+          first["next_step"].endswith("/capacity"))
+    try:
+        mc.request_token(dup_email)
+        dup_raised = False
+    except PerchEnrollmentInProgressError as e:
+        dup_raised, dup_msg = True, str(e)
+    check("a second token request for the SAME email is rejected", dup_raised)
+    check("and the message points the rep at /status", "/status" in dup_msg)
+
+    section("NEWEST YAML - duplicate email resumes via PATCH /refresh_token")
+    # A rep revisiting an abandoned customer must not be permanently stuck:
+    # the documented recovery is to resume the in-progress enrollment.
+    eid_dup = new_draft(c, rep)
+    shared = next_email()
+    r1 = c.post(f"/api/perch/enrollments/{eid_dup}/capacity", headers=rep,
+                json={"email": shared, "zip_code": "13348", "utility_name": "national-grid-ny"})
+    check("first enrollment for this email succeeds", r1.status_code == 200)
+    eid_dup2 = new_draft(c, rep)
+    r2 = c.post(f"/api/perch/enrollments/{eid_dup2}/capacity", headers=rep,
+                json={"email": shared, "zip_code": "13348", "utility_name": "national-grid-ny"})
+    check("a SECOND enrollment reusing that email still succeeds (resumed, not blocked)",
+          r2.status_code == 200)
+    with app.app_context():
+        resumed = query("""SELECT * FROM perch_api_calls WHERE enrollment_id=?
+                           AND operation='refresh_token'""", (eid_dup2,))
+        logged = query("""SELECT * FROM perch_api_calls WHERE enrollment_id=?
+                          AND error_message LIKE '%already in progress%'""", (eid_dup2,))
+    check("recovery went through PATCH /refresh_token", len(resumed) >= 1)
+    check("the 422-and-resume was audit-logged, not silently swallowed", len(logged) >= 1)
+
+    section("NEWEST YAML - retired LMI source type")
+    with app.app_context():
+        rej = query_one("SELECT * FROM perch_proof_doc_types WHERE source_type=?",
+                        ("self_attestation_qualifying_income_rejected",))
+        acc = query_one("SELECT * FROM perch_proof_doc_types WHERE source_type=?",
+                        ("self_attestation_qualifying_income",))
+        statuses = {r_["status_value"] for r_ in query("SELECT * FROM perch_self_attestation_status")}
+    check("_rejected source type marked INACTIVE (422 in the newest spec)", rej["is_active"] == 0)
+    check("retirement reason recorded for auditability", "422" in (rej["retired_note"] or ""))
+    check("the surviving source type stays active", acc["is_active"] == 1)
+    check("replacement status vocabulary recorded", statuses == {"accepted", "rejected"})
+
+    section("NEWEST YAML - HMAC is UNCHANGED (regression guard)")
+    # The newest YAML did not alter signing. These assertions exist so a future
+    # edit to the auth path fails loudly - the staging 403 was proven NOT to be
+    # a signing problem (corrupted HMAC -> 401, correct HMAC -> 403).
+    check("signed payload construction unchanged",
+          H.build_signed_payload("1617187200", "BODY") == "1617187200\nBODY")
+    check("signature vector unchanged",
+          H.compute_signature("YOUR_SECRET_KEY", H.build_signed_payload("1617187200",
+              H.compact_json({"email": "john.doe@example.com"})))
+          == "78c4cc8f5c02760d16b9911ab8ed5db3076096273f5bdcca14e4ec10772db5b5")
+    check("header names unchanged",
+          set(H.sign_json_request("K", "S", {"e": 1})[0].keys())
+          == {"Content-Type", "X-API-Key", "X-HMAC-Signature", "X-HMAC-Timestamp"})
+    check("canonical query string unchanged",
+          H.canonical_query_string({"zip_code": "10001", "utility_name": "consolidated-edison-ny"})
+          == "utility_name=consolidated-edison-ny&zip_code=10001")
+
+    print(f"\n{'='*74}\nMILESTONE 2.5 - NEWEST YAML ALIGNMENT - ALL CHECKS PASSED\n{'='*74}")
 
 
 if __name__ == "__main__":

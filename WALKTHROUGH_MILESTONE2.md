@@ -76,7 +76,7 @@ all from that payload. **No Perch call has happened yet.**
 **Stored in Perch:** nothing.
 
 **Why the draft comes first:** Perch's enrollment token is session-scoped and
-expires in 30 minutes. It can never be the durable key for an enrollment that
+expires in 1 hour. It can never be the durable key for an enrollment that
 will later collect documents, a signature, and a VIPR payability record. The
 Dalton Enrollment ID is issued before any Perch contact and is what everything
 else hangs off.
@@ -104,7 +104,7 @@ posted, e.g. by an integration, `utilities.resolve_slug()` translates it.)
    Perch failure.
 2. `token_manager.get_valid_token(enrollment_id)` — no usable token exists, so:
    → **`POST /token`** to Perch → stores the returned UUID in `perch_tokens`
-   with a 30-minute expiry, scoped to this enrollment.
+   with a 1-hour expiry (taken from Perch's `expires_at`), scoped to this enrollment.
 3. → **`POST /capacity`** to Perch with header `X-Enrollment-Token: <uuid>`.
 4. Persists the raw response, normalizes it, records the `next_step` URL.
 5. Re-resolves the workflow and returns the **next step descriptor** alongside
@@ -167,7 +167,7 @@ processed.
 
 ---
 
-## Step 3 — The token expires mid-session (30 minutes)
+## Step 3 — The token expires mid-session (1 hour)
 
 Realistic scenario from the engineering call: a rep starts an enrollment, gets
 pulled away, comes back 40 minutes later and clicks *Check availability* again.
@@ -242,7 +242,7 @@ payability.**
 
 Everything Perch-side. `PerchMockClient` returns fixtures that match the
 published schemas **exactly** — the six documented `project_details` fields and
-nothing else, `next_step` as a URL, UUID tokens, a real 30-minute TTL enforced
+nothing else, `next_step` as a URL, UUID tokens, a real 1-hour TTL enforced
 by the mock itself, 403 on expiry, and 503 for no capacity.
 
 What is **real** in the walkthrough above: the Dalton Enrollment ID, the audit

@@ -47,5 +47,8 @@ def get_perch_client():
 
 
 # Refresh this far before actual expiry so a token cannot die mid-request.
-# Perch's TTL is 30 minutes; 2 minutes of headroom is ~7% of the window.
+# NEW YAML: Perch's TTL is 1 hour. 2 minutes of headroom is ~3% of the window.
+# Kept at 120s deliberately rather than scaled up: the skew exists to absorb
+# clock drift and in-flight latency, both of which are absolute, not
+# proportional to the TTL.
 TOKEN_REFRESH_SKEW_SECONDS = int(os.environ.get("PERCH_TOKEN_SKEW_SECONDS", "120"))

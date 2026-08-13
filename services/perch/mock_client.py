@@ -11,8 +11,11 @@ Fidelity rules this mock follows:
     so the adapter's refresh-and-retry path is exercised for real.
   * Tokens are UUIDs, matching the documented example format
     (550e8400-e29b-41d4-a716-446655440000).
-  * The mock enforces the 30-minute TTL itself, so token expiry is genuinely
-    tested rather than simulated only by clock manipulation.
+  * The mock enforces the 1-HOUR TTL itself (NEW YAML), so token expiry is
+    genuinely tested rather than simulated only by clock manipulation.
+  * Re-requesting a token for an email that already has an in-progress
+    enrollment raises PerchEnrollmentInProgressError, mirroring the documented
+    422 - so the resume-via-refresh path is exercised for real.
 
 Fixtures are keyed by ZIP so tests can assert exact values. The catalog is a
 TEST FIXTURE, not a mirror of Perch's real projects - Perch has ~3,400 NY
@@ -25,6 +28,7 @@ from services.perch.client import PerchClient, TOKEN_TTL_SECONDS
 from services.perch.errors import (
     PerchValidationError, PerchUnavailableError,
     PerchNoCapacityError, PerchTokenExpiredError, PerchNotFoundError,
+    PerchEnrollmentInProgressError,
 )
 
 DOCUMENTED_NEXT_STEP_ENROLL = "https://api.perchenergy.com/affiliate_partners/v1/enrollments/enroll"
@@ -116,8 +120,17 @@ class PerchMockClient(PerchClient):
             raise PerchValidationError("Email is invalid")
 
     def request_token(self, email: str) -> dict:
-        """POST /token - spec requires {"email": ...}, HMAC-authenticated."""
+        """POST /token - spec requires {"email": ...}, HMAC-authenticated.
+
+        NEW YAML: returns 201 Created. A second call for an email that already
+        has an in-progress enrollment returns 422 ("An enrollment request
+        already exists for this email"), NOT a second session.
+        """
         self._validate_email(email)
+        if email in PerchMockClient._tokens_by_email:
+            raise PerchEnrollmentInProgressError(
+                "An enrollment request already exists for this email. Use the "
+                "/status endpoint to check the current status of the enrollment.")
         return self._issue(email)
 
     def refresh_token(self, email: str) -> dict:
@@ -138,7 +151,7 @@ class PerchMockClient(PerchClient):
             raise PerchTokenExpiredError("Perch returned 403 - enrollment token expired.")
 
     def expire_token(self, token):
-        """Test hook: force a token past its TTL without waiting 30 minutes."""
+        """Test hook: force a token past its TTL without waiting an hour."""
         if token in PerchMockClient._issued_tokens:
             PerchMockClient._issued_tokens[token] = datetime.now() - timedelta(seconds=1)
 

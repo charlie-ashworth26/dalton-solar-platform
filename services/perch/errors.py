@@ -61,3 +61,19 @@ class PerchNotFoundError(PerchError):
     in-progress enrollment for that email - so there is nothing to resume and
     the caller must start a fresh POST /token instead."""
     http_status = 404
+
+
+class PerchEnrollmentInProgressError(PerchError):
+    """Documented 422 on POST /token: an enrollment request already exists for
+    this email, or the email already has an account.
+
+    New-YAML behaviour (this case was NOT documented in the previous spec):
+        "An enrollment request already exists for this email. Use the /status
+         endpoint to check the current status of the enrollment."
+
+    This is a routine outcome, not a failure: a rep re-opening an abandoned
+    enrollment for the same customer will hit it. The recovery is
+    PATCH /refresh_token (which resumes the most recent in-progress enrollment),
+    NOT a retry of POST /token.
+    """
+    http_status = 409  # Conflict is the honest local mapping; Perch returns 422

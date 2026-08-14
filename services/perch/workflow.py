@@ -1,30 +1,14 @@
 """
-The workflow engine.
+Perch workflow state and the service-area/capacity descriptor.
 
-ARCHITECTURAL DECISION (Milestone 2)
-------------------------------------
-Perch's API is hypermedia-driven: every response carries a `next_step` URL, and
-the docs are explicit that partners follow it rather than deciding for
-themselves ("Partners do not select the method - follow the next_step URL in
-each response to know which LMI steps (if any) are required").
+Perch is hypermedia-driven: each response supplies a next_step URL, so Dalton
+stores and resolves that URL rather than inventing its own API sequence.
 
-So Dalton does NOT hardcode an enrollment page sequence. Instead:
-
-  * The backend resolves a STEP DESCRIPTOR for an enrollment - what to show,
-    what fields to collect, how to validate them, what the next action is.
-  * The frontend is a generic RENDERER for that descriptor. It knows how to draw
-    a text field, a select, a panel, and a button. It knows nothing about
-    community solar.
-  * When Perch hands back a next_step URL, we map it to a step key. An
-    UNRECOGNIZED URL is surfaced loudly rather than swallowed, because that is
-    Perch telling us the workflow changed.
-
-This means adding Milestone 3's enroll step is a backend change (register a step
-builder) rather than a frontend rewrite.
-
-The descriptor schema is deliberately small. It is not a general-purpose form
-DSL - it covers what the documented API actually requires, and grows as
-milestones land.
+The descriptor renderer deliberately owns only the service-area/capacity entry
+point. Once capacity succeeds, the browser returns to Dalton's existing Bill,
+Contact, LMI, and Agreement screens. Those screens reuse already-collected data
+while this module continues to map Perch next_step URLs into safe branch keys.
+Unknown next steps are surfaced instead of guessed.
 """
 import json
 from urllib.parse import urlparse
@@ -37,6 +21,11 @@ from services.perch import adapter, utilities
 NEXT_STEP_PATH_MAP = {
     "/enrollments/enroll": "enroll",
     "/enrollments/capacity": "service_area",
+    "/enrollments/lmi/proof_docs": "proof_docs",
+    "/enrollments/lmi/self_attestation": "self_attestation",
+    "/enrollments/lmi/self_attestation/accept": "self_attestation_accept",
+    "/enrollments/contracts": "contracts",
+    "/enrollments/contracts/accept": "contracts_accept",
     "/enrollments/status": "status",
 }
 
@@ -127,9 +116,16 @@ def _step_service_area(enrollment, last_check):
                 "required": True,
                 "placeholder": "Select a utility",
                 "value": enrollment.get("utility_name") or "",
+                # A project-card enrollment already chose its utility. Keep that
+                # choice visible but locked so the rep cannot accidentally pair
+                # a Dalton project with a different Perch utility.
+                "readonly": bool(enrollment.get("project_id") and enrollment.get("utility_name")),
+                "help": "Utility is fixed by the selected Dalton project." if enrollment.get("project_id") and enrollment.get("utility_name") else None,
                 # Values are Perch SLUGS. The renderer never sees display names
                 # as values, so a display-name/slug mismatch is impossible.
-                "options": utilities.select_options(),
+                "options": ([o for o in utilities.select_options() if o["value"] == enrollment.get("utility_name")]
+                            if enrollment.get("project_id") and enrollment.get("utility_name")
+                            else utilities.select_options()),
                 "validation": {"message": "Select the customer's utility."},
             },
         ],
@@ -178,8 +174,7 @@ def _capacity_notices(d):
     if d.get("proof_documents_required"):
         notices.append({
             "tone": "warn",
-            "text": "This project requires proof documents. Perch determines which documents "
-                    "and when - the collection step is Milestone 5.",
+            "text": "This project may require proof documents. Perch confirms the required branch after customer enrollment.",
         })
     if d.get("lmi_capacity_available") is False:
         notices.append({
@@ -194,11 +189,9 @@ def _step_capacity_result(enrollment, check):
     recognized_key, recognized = resolve_next_step_key(check.get("next_step_url"))
     if recognized and recognized_key == "enroll":
         action = {
-            "label": "Continue to enrollment",
+            "label": "Continue",
             "operation": "advance",
-            "enabled": False,
-            "disabled_reason": "Perch's next step is POST /enroll, which is Milestone 3. "
-                               "Capacity has been confirmed and stored.",
+            "enabled": True,
         }
     elif not recognized:
         action = {
@@ -227,7 +220,7 @@ def _step_capacity_result(enrollment, check):
             "resolved_step": recognized_key,
         },
         "primary_action": action,
-        "secondary_action": {"label": "Change ZIP or utility", "operation": "restart_service_area"},
+        "secondary_action": {"label": "Change email, ZIP or utility", "operation": "restart_service_area"},
     }
 
 
@@ -267,7 +260,9 @@ def resolve(enrollment_id):
     check = adapter.latest_capacity_check(enrollment_id)
     state = get_state(enrollment_id)
 
-    if check is None:
+    if state and state.get("current_step_key") == "service_area":
+        step = _step_service_area(enrollment, check)
+    elif check is None:
         step = _step_service_area(enrollment, None)
     elif not check["capacity_available"]:
         step = _step_no_capacity(enrollment, check)

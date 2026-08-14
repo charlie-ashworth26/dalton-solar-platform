@@ -39,6 +39,14 @@ def _serialize_enrollment(row, requester_role):
         "updated_at": d["updated_at"],
         "customer": dict(customer) if customer else None,
         "service_address": dict(address) if address else None,
+        "billing_address": {
+            "same_as_service": bool(d.get("billing_same_as_service", 1)),
+            "street": d.get("billing_street"),
+            "unit": d.get("billing_unit"),
+            "city": d.get("billing_city"),
+            "state": d.get("billing_state"),
+            "zip": d.get("billing_zip"),
+        },
         "utility_account": utility_dict,
         "project": dict(project) if project else None,
         "sales_rep": dict(rep) if rep else None,
@@ -189,23 +197,43 @@ def update_enrollment(enrollment_id):
             )
             execute("UPDATE enrollments SET service_address_id=? WHERE id=?", (cur.lastrowid, enrollment_id))
 
+    # Billing / mailing address (Perch requires this separately from service address).
+    if "billing_address" in data:
+        b = data["billing_address"] or {}
+        same = 1 if b.get("same_as_service", True) else 0
+        if same:
+            current = query_one("SELECT service_address_id FROM enrollments WHERE id=?", (enrollment_id,))
+            svc = query_one("SELECT * FROM service_addresses WHERE id=?", (current["service_address_id"],)) if current and current["service_address_id"] else None
+            if svc:
+                execute(
+                    """UPDATE enrollments SET billing_same_as_service=1, billing_street=?, billing_unit=?,
+                       billing_city=?, billing_state=?, billing_zip=? WHERE id=?""",
+                    (svc["street"], svc["unit"], svc["city"], svc["state"], svc["zip"], enrollment_id),
+                )
+        else:
+            execute(
+                """UPDATE enrollments SET billing_same_as_service=0, billing_street=?, billing_unit=?,
+                   billing_city=?, billing_state=?, billing_zip=? WHERE id=?""",
+                (b.get("street"), b.get("unit"), b.get("city"), b.get("state", "NY"), b.get("zip"), enrollment_id),
+            )
+
     # Utility account
     if "utility_account" in data:
         u = data["utility_account"]
         current = query_one("SELECT * FROM enrollments WHERE id=?", (enrollment_id,))
         if current["utility_account_id"]:
             execute(
-                """UPDATE utility_accounts SET utility_name=?, account_number=?, meter_number=?, rate_class=?,
+                """UPDATE utility_accounts SET utility_name=?, account_number=?, secondary_account_identifier=?, meter_number=?, rate_class=?,
                    monthly_usage_kwh=?, updated_at=datetime('now') WHERE id=?""",
-                (u.get("utility_name"), u.get("account_number"), u.get("meter_number"), u.get("rate_class"),
-                 u.get("monthly_usage_kwh"), current["utility_account_id"]),
+                (u.get("utility_name"), u.get("account_number"), u.get("secondary_account_identifier"),
+                 u.get("meter_number"), u.get("rate_class"), u.get("monthly_usage_kwh"), current["utility_account_id"]),
             )
         else:
             cur = execute(
-                """INSERT INTO utility_accounts (customer_id, service_address_id, utility_name, account_number, meter_number, rate_class, monthly_usage_kwh)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO utility_accounts (customer_id, service_address_id, utility_name, account_number, secondary_account_identifier, meter_number, rate_class, monthly_usage_kwh)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (current["customer_id"], current["service_address_id"], u.get("utility_name"), u.get("account_number"),
-                 u.get("meter_number"), u.get("rate_class"), u.get("monthly_usage_kwh")),
+                 u.get("secondary_account_identifier"), u.get("meter_number"), u.get("rate_class"), u.get("monthly_usage_kwh")),
             )
             execute("UPDATE enrollments SET utility_account_id=? WHERE id=?", (cur.lastrowid, enrollment_id))
 

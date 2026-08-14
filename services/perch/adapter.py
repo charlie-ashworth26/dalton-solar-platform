@@ -17,7 +17,11 @@ from datetime import datetime
 from db import query, query_one, execute
 from services.perch.config import get_perch_client, get_api_mode
 from services.perch import token_manager, utilities
-from services.perch.client import PATH_CAPACITY
+from services.perch.client import (
+    PATH_CAPACITY, PATH_ENROLL, PATH_LMI_PROOF_DOCS, PATH_CONTRACTS,
+    build_enrollment_multipart, build_proof_docs_multipart,
+    contracts_safe, redact_contract_urls,
+)
 from services.perch.errors import (
     PerchError, PerchValidationError, PerchTokenExpiredError, PerchNoCapacityError,
 )
@@ -221,3 +225,221 @@ def api_call_history(enrollment_id):
         (enrollment_id,),
     )
     return [dict(r) for r in rows]
+
+
+# ─────────────── Enrollment / LMI / contracts bridge ───────────────
+# These methods deliberately live in the adapter instead of routes. The browser
+# supplies Dalton enrollment data; this layer is responsible for translating it
+# into Perch's exact multipart contract, refreshing tokens, and recording a
+# URL-free / secret-free audit trail.
+
+def choose_customer_type(details):
+    """Derive Perch customer_type from the authoritative capacity response.
+
+    Business is never silently selected because Perch requires extra business
+    fields that Dalton's residential/LMI GUI does not currently collect.
+    """
+    details = details or {}
+    if details.get("lmi_capacity_available"):
+        return "LMI", "lmi_capacity_available=True"
+    if details.get("residential_capacity_available"):
+        return "Residential", "residential_capacity_available=True"
+    if details.get("small_commercial_capacity_available"):
+        raise PerchValidationError(
+            "This service area currently has only small-commercial capacity. "
+            "The Dalton GUI does not collect the business fields Perch requires yet.")
+    raise PerchValidationError("No eligible residential or LMI capacity is available for this enrollment.")
+
+
+def _rewind_files(files):
+    for value in (files or {}).values():
+        if isinstance(value, tuple) and len(value) >= 2 and hasattr(value[1], "seek"):
+            try:
+                value[1].seek(0)
+            except Exception:
+                pass
+
+
+def _close_files(files):
+    for value in (files or {}).values():
+        if isinstance(value, tuple) and len(value) >= 2 and hasattr(value[1], "close"):
+            try:
+                value[1].close()
+            except Exception:
+                pass
+
+
+def _call_with_refresh(enrollment_id, user_id, operation, endpoint, method,
+                       request_summary, call, files=None):
+    """Call one enrollment-session endpoint with the documented retry-once path."""
+    client = get_perch_client()
+    token = token_manager.get_valid_token(enrollment_id, user_id=user_id)
+    started = datetime.now()
+    refreshed = False
+    try:
+        result = call(client, token)
+    except PerchTokenExpiredError:
+        record_api_call(
+            enrollment_id=enrollment_id, operation=operation, endpoint=endpoint,
+            http_method=method, request_json=request_summary, response_json=None,
+            status_code=403,
+            duration_ms=int((datetime.now() - started).total_seconds() * 1000),
+            error_message="403 enrollment_token expired - refreshing and retrying once",
+            initiated_by_user_id=user_id,
+        )
+        refreshed = True
+        token_manager.refresh_existing_token(enrollment_id, user_id=user_id)
+        token = token_manager.get_valid_token(enrollment_id, user_id=user_id)
+        _rewind_files(files)
+        started = datetime.now()
+        result = call(client, token)
+    return result, refreshed, int((datetime.now() - started).total_seconds() * 1000)
+
+
+def create_enrollment(enrollment_id, enrollment_payload, user_id=None):
+    """POST /enroll using already-captured Dalton data and the stored utility bill."""
+    capacity = latest_capacity_check(enrollment_id)
+    if not capacity or not capacity.get("capacity_available"):
+        raise PerchValidationError("A successful Perch capacity check is required before enrollment.")
+
+    details = capacity.get("project_details") or {}
+    customer_type, reason = choose_customer_type(details)
+    payload = dict(enrollment_payload or {})
+    payload["customer_type"] = customer_type
+    payload["utility_name"] = capacity["utility_slug"]
+    payload["zip_code"] = capacity["zip_code"]
+
+    stored = query_one("SELECT perch_token_email FROM enrollments WHERE id = ?", (enrollment_id,))
+    token_email = (stored["perch_token_email"] if stored else None) or ""
+    if not payload.get("email_address") or payload["email_address"].strip().lower() != token_email.strip().lower():
+        raise PerchValidationError(
+            "Customer email must match the email used to open this Perch enrollment session.")
+
+    accounts = payload.get("utility_accounts") or []
+    if len(accounts) != 1:
+        raise PerchValidationError("The current Dalton GUI supports exactly one utility account per enrollment.")
+    acct = accounts[0]
+    utility_row = utilities.by_slug(capacity["utility_slug"]) or {}
+    expected_len = utility_row.get("account_number_length")
+    account_number = str(acct.get("utility_account_number") or "").strip()
+    if expected_len and (not account_number.isdigit() or len(account_number) != int(expected_len)):
+        raise PerchValidationError(
+            f"{utility_row.get('display_name') or capacity['utility_slug']} account numbers must be {expected_len} digits.")
+    pod_error = utilities.validate_pod_id(capacity["utility_slug"], acct.get("secondary_account_identifier"))
+    if pod_error:
+        raise PerchValidationError(pod_error)
+
+    form, files = build_enrollment_multipart(payload)
+    request_summary = {
+        "customer_type": customer_type,
+        "customer_type_reason": reason,
+        "utility_name": capacity["utility_slug"],
+        "zip_code": capacity["zip_code"],
+        "utility_account_count": len(accounts),
+        "utility_bill_count": len(acct.get("utility_bills") or []),
+        "account_last4": account_number[-4:] if account_number else None,
+    }
+    try:
+        result, refreshed, duration_ms = _call_with_refresh(
+            enrollment_id, user_id, "create_enrollment", PATH_ENROLL, "POST",
+            request_summary,
+            lambda client, token: client.create_enrollment(token, form, files),
+            files=files,
+        )
+        record_api_call(
+            enrollment_id=enrollment_id, operation="create_enrollment", endpoint=PATH_ENROLL,
+            http_method="POST", request_json=request_summary,
+            response_json={"next_step": result.get("next_step"), "response_shape": result.get("response_shape")},
+            status_code=200, duration_ms=duration_ms, error_message=None,
+            initiated_by_user_id=user_id,
+        )
+        return {
+            "customer_type": customer_type,
+            "next_step_url": result.get("next_step"),
+            "response_shape": result.get("response_shape"),
+            "token_was_refreshed": refreshed,
+        }
+    except PerchError as e:
+        record_api_call(
+            enrollment_id=enrollment_id, operation="create_enrollment", endpoint=PATH_ENROLL,
+            http_method="POST", request_json=request_summary, response_json=None,
+            status_code=getattr(e, "http_status", None), duration_ms=0,
+            error_message=str(e), initiated_by_user_id=user_id,
+        )
+        raise
+    finally:
+        _close_files(files)
+
+
+def submit_proof_docs(enrollment_id, utility_account_number, documents, user_id=None):
+    """POST /lmi/proof_docs using a stored Dalton document path and explicit metadata."""
+    files, proof_doc = build_proof_docs_multipart(utility_account_number, documents)
+    safe_meta = {
+        "utility_account_last4": str(utility_account_number)[-4:],
+        "documents": [
+            {k: d.get(k) for k in ("source_type", "name_on_document", "relationship", "document_type")}
+            for d in documents
+        ],
+    }
+    try:
+        result, refreshed, duration_ms = _call_with_refresh(
+            enrollment_id, user_id, "submit_proof_docs", PATH_LMI_PROOF_DOCS, "POST",
+            safe_meta,
+            lambda client, token: client.submit_proof_docs(token, files),
+            files=files,
+        )
+        record_api_call(
+            enrollment_id=enrollment_id, operation="submit_proof_docs", endpoint=PATH_LMI_PROOF_DOCS,
+            http_method="POST", request_json=safe_meta,
+            response_json={"next_step": result.get("next_step"), "response_shape": result.get("response_shape")},
+            status_code=200, duration_ms=duration_ms, error_message=None,
+            initiated_by_user_id=user_id,
+        )
+        return {
+            "next_step_url": result.get("next_step"),
+            "response_shape": result.get("response_shape"),
+            "token_was_refreshed": refreshed,
+        }
+    except PerchError as e:
+        record_api_call(
+            enrollment_id=enrollment_id, operation="submit_proof_docs", endpoint=PATH_LMI_PROOF_DOCS,
+            http_method="POST", request_json=safe_meta, response_json=None,
+            status_code=getattr(e, "http_status", None), duration_ms=0,
+            error_message=str(e), initiated_by_user_id=user_id,
+        )
+        raise
+    finally:
+        _close_files(files)
+
+
+def generate_contracts(enrollment_id, user_id=None):
+    """POST /contracts. Returns raw URLs only to the immediate server caller.
+
+    The API-call audit stores the URL-free normalized contract list. Nothing in
+    this function persists or logs a presigned URL.
+    """
+    request_summary = {"body": None}
+    try:
+        result, refreshed, duration_ms = _call_with_refresh(
+            enrollment_id, user_id, "generate_contracts", PATH_CONTRACTS, "POST",
+            request_summary,
+            lambda client, token: client.generate_contracts(token),
+        )
+        safe = contracts_safe(result)
+        record_api_call(
+            enrollment_id=enrollment_id, operation="generate_contracts", endpoint=PATH_CONTRACTS,
+            http_method="POST", request_json=request_summary,
+            response_json={"contracts": safe, "next_step": result.get("next_step")},
+            status_code=200, duration_ms=duration_ms, error_message=None,
+            initiated_by_user_id=user_id,
+        )
+        result["token_was_refreshed"] = refreshed
+        return result
+    except PerchError as e:
+        record_api_call(
+            enrollment_id=enrollment_id, operation="generate_contracts", endpoint=PATH_CONTRACTS,
+            http_method="POST", request_json=request_summary, response_json=None,
+            status_code=getattr(e, "http_status", None), duration_ms=0,
+            error_message=str(e), initiated_by_user_id=user_id,
+        )
+        raise

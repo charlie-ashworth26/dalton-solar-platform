@@ -166,7 +166,7 @@
               <div class="dropzone" id="bill-dropzone" onclick="document.getElementById('bill-file').click()"
                    ondragover="dzDragOver(event,'bill-dropzone')" ondragleave="dzDragLeave(event,'bill-dropzone')" ondrop="dzDrop(event,'bill-dropzone',handleBillUpload)">
                 <div class="dz-title">Drag a file here, or click to browse</div>
-                <div class="dz-sub">PDF works best · JPG/PNG also supported · up to 15MB</div>
+                <div class="dz-sub">PDF works best · JPG/PNG also supported · up to 4MB</div>
               </div>
               <input type="file" id="bill-file" accept=".pdf,.jpg,.jpeg,.png" onchange="handleBillUpload(this.files)">
               <div id="bill-file-chip"></div>
@@ -176,14 +176,29 @@
                 <div class="field"><label>First name</label><input type="text" id="c-first" oninput="checkBillReady()"></div>
                 <div class="field"><label>Last name</label><input type="text" id="c-last" oninput="checkBillReady()"></div>
               </div>
-              <div class="field"><label>Utility account number</label><input type="text" class="mono-field" id="c-acct" inputmode="numeric" maxlength="10" placeholder="1234567890" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,10); checkBillReady();"></div>
-              <div class="field"><label>Street address</label><input type="text" id="a-street" placeholder="123 Maple Ave" oninput="checkBillReady()"></div>
-              <div class="field"><label>Unit / Apt <span style="font-weight:400;color:var(--ink-faint);">(optional)</span></label><input type="text" id="a-unit"></div>
+              <div class="field"><label>Utility account number</label><input type="text" class="mono-field" id="c-acct" inputmode="numeric" maxlength="20" placeholder="1234567890" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,20); checkBillReady();"><p class="helper" id="acct-rule-help"></p></div>
+              <div class="field" id="pod-id-field" style="display:none;"><label>Secondary account identifier / POD ID</label><input type="text" class="mono-field" id="c-pod" maxlength="20" oninput="checkBillReady()"><p class="helper" id="pod-rule-help"></p></div>
+              <div class="field"><label>Street address</label><input type="text" id="a-street" placeholder="123 Maple Ave" oninput="syncBillingFromService(); checkBillReady()"></div>
+              <div class="field"><label>Unit / Apt <span style="font-weight:400;color:var(--ink-faint);">(optional)</span></label><input type="text" id="a-unit" oninput="syncBillingFromService()"></div>
               <div class="row3">
-                <div class="field"><label>City</label><input type="text" id="a-city" oninput="checkBillReady()"></div>
+                <div class="field"><label>City</label><input type="text" id="a-city" oninput="syncBillingFromService(); checkBillReady()"></div>
                 <div class="field"><label>State</label><input type="text" id="a-state" value="NY" readonly style="background:#FBFCFB;color:var(--ink-muted);"></div>
-                <div class="field"><label>ZIP</label><input type="text" id="a-zip" class="mono-field" maxlength="5" oninput="checkBillReady()"></div>
+                <div class="field"><label>ZIP</label><input type="text" id="a-zip" class="mono-field" maxlength="5" oninput="syncBillingFromService(); checkBillReady()"></div>
               </div>
+              <div class="field" style="margin-top:4px;">
+                <label style="display:flex;gap:9px;align-items:center;font-weight:600;cursor:pointer;"><input type="checkbox" id="billing-same" checked onchange="toggleBillingAddress()" style="width:auto;"> Billing / mailing address is the same as the service address</label>
+              </div>
+              <div id="billing-address-fields" style="display:none;">
+                <div class="field"><label>Billing street address</label><input type="text" id="b-street" placeholder="123 Maple Ave" oninput="checkBillReady()"></div>
+                <div class="field"><label>Billing unit / Apt <span style="font-weight:400;color:var(--ink-faint);">(optional)</span></label><input type="text" id="b-unit"></div>
+                <div class="row3">
+                  <div class="field"><label>Billing city</label><input type="text" id="b-city" oninput="checkBillReady()"></div>
+                  <div class="field"><label>State</label><input type="text" id="b-state" value="NY" readonly style="background:#FBFCFB;color:var(--ink-muted);"></div>
+                  <div class="field"><label>Billing ZIP</label><input type="text" id="b-zip" class="mono-field" maxlength="5" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,5); checkBillReady();"></div>
+                </div>
+              </div>
+              <p class="helper" id="bill-submit-error" style="display:none;color:var(--danger);margin-bottom:12px;"></p>
+
               <div class="field">
                 <label>Average monthly bill amount</label>
                 <select id="bill-amount" onchange="checkBillReady()">
@@ -203,22 +218,22 @@
               <p class="card-eyebrow">New enrollment</p>
               <h2>Contact &amp; login</h2>
               <p class="lead">These aren't on the bill — enter the customer's contact info and set the credentials they'll use to sign in later.</p>
-              <div class="field"><label>Email</label><input type="email" id="c-email" placeholder="name@email.com"></div>
+              <div class="field"><label>Email</label><input type="email" id="c-email" placeholder="name@email.com" readonly style="background:#FBFCFB;color:var(--ink-muted);"><p class="helper">Set during the Perch availability check. Go back to change it.</p></div>
               <div class="field"><label>Phone number</label><input type="tel" id="c-phone" placeholder="(555) 555-5555"></div>
               <p class="helper" style="margin:-6px 0 14px;">Set login credentials for the customer — they'll use these to sign in and review their agreement.</p>
               <div class="row2">
                 <div class="field"><label>Password</label><input type="password" id="c-pass" placeholder="••••••••"></div>
                 <div class="field"><label>Confirm password</label><input type="password" id="c-pass-confirm" placeholder="••••••••"></div>
               </div>
-              <div class="wizard-actions"><button class="btn btn-ghost" onclick="goStep(2)">Back</button><button class="btn btn-primary" onclick="submitContact()">Continue</button></div>
+              <p class="helper" id="contact-submit-error" style="display:none;color:var(--danger);margin-top:6px;"></p><div class="wizard-actions"><button class="btn btn-ghost" onclick="goStep(2)">Back</button><button class="btn btn-primary" id="btn-contact-next" onclick="submitContact()">Continue</button></div>
             </div>
           </div>
 
           <div class="screen wizard-step" id="step-lmi">
             <div class="card">
               <p class="card-eyebrow">New enrollment</p>
-              <h2>LMI documentation</h2>
-              <p class="lead">Qualify the customer for the low-income adder — by document, by income self-attestation, or mark it N/A.</p>
+              <h2 id="lmi-title">LMI documentation</h2>
+              <p class="lead" id="lmi-lead">Qualify the customer for the low-income adder — by document, by income self-attestation, or mark it N/A.</p>
 
               <div class="toggle-row" style="margin-bottom:18px;">
                 <div class="toggle-btn" id="lmi-mode-doc" onclick="setLmiMode('doc')">Upload documentation</div>
@@ -233,6 +248,7 @@
                     <option value="">Select a document type</option>
                     <option value="Electric bill showing HEAP/LIHEAP/EAP assistance">Electric bill showing HEAP/LIHEAP/EAP assistance</option>
                     <option value="SNAP award letter">SNAP award letter</option>
+                    <option value="Free/reduced school lunch letter">Free/reduced school lunch letter</option>
                     <option value="SNAP card">SNAP card</option>
                     <option value="Housing authority certification / Section 8">Housing authority certification / Section 8</option>
                     <option value="Disability benefits letter">Disability benefits letter</option>
@@ -243,10 +259,15 @@
                     <option value="Other qualifying document">Other qualifying document</option>
                   </select>
                 </div>
+                <div class="row2">
+                  <div class="field"><label>Name on document</label><input type="text" id="lmi-name-on-doc" oninput="checkLmiReady()"></div>
+                  <div class="field"><label>Relationship</label><select id="lmi-relationship" onchange="checkLmiReady()"><option value="self">Self</option><option value="other">Other</option><option value="unknown">Unknown</option></select></div>
+                </div>
+                <div class="field"><label>Document format</label><select id="lmi-format" onchange="checkLmiReady()"><option value="">Select format</option><option value="letter">Letter</option><option value="card">Card</option><option value="account_statement">Account statement</option><option value="utility_bill">Utility bill</option><option value="other">Other</option><option value="unknown">Unknown</option></select></div>
                 <div class="dropzone" id="lmi-dropzone" onclick="document.getElementById('lmi-file').click()"
                      ondragover="dzDragOver(event,'lmi-dropzone')" ondragleave="dzDragLeave(event,'lmi-dropzone')" ondrop="dzDrop(event,'lmi-dropzone',handleLmiUpload)">
                   <div class="dz-title">Drag LMI documentation here, or click to browse</div>
-                  <div class="dz-sub">PDF, JPG, or PNG · up to 15MB</div>
+                  <div class="dz-sub">PDF, JPG, or PNG · up to 4MB</div>
                 </div>
                 <input type="file" id="lmi-file" accept=".pdf,.jpg,.jpeg,.png" onchange="handleLmiUpload(this.files)">
                 <div id="lmi-file-chip"></div>
@@ -275,15 +296,15 @@
                   <div class="toggle-btn" id="ami-above" onclick="setIncomeAnswer(false)">Income is above this level</div>
                 </div>
               </div>
-              <div class="wizard-actions"><button class="btn btn-ghost" onclick="goStep(3)">Back</button><button class="btn btn-primary" id="btn-lmi-next" onclick="submitLmi()" disabled>Continue</button></div>
+              <p class="helper" id="lmi-submit-error" style="display:none;color:var(--danger);margin-top:8px;"></p><div class="wizard-actions"><button class="btn btn-ghost" onclick="goStep(3)">Back</button><button class="btn btn-primary" id="btn-lmi-next" onclick="submitLmi()" disabled>Continue</button></div>
             </div>
           </div>
 
           <div class="screen wizard-step" id="step-agreement">
             <div class="card">
               <p class="card-eyebrow">New enrollment</p>
-              <h2>Review &amp; send agreement</h2>
-              <p class="lead">Check everything below, then send the agreement to the customer to sign.</p>
+              <h2>Review contracts</h2>
+              <p class="lead">Review the personalized Perch contract packet for this enrollment. Final acceptance is intentionally disabled in this milestone.</p>
               <div class="review-block">
                 <div class="review-head">Customer</div>
                 <div class="review-line"><span class="rl-label">Name</span><span class="rl-val" id="rv-name"></span></div>
@@ -300,7 +321,14 @@
                 <div class="review-line"><span class="rl-label">LMI</span><span class="rl-val" id="rv-lmi"></span></div>
               </div>
               <div id="pre-send">
-                <div class="wizard-actions"><button class="btn btn-ghost" onclick="goStep(4)">Back</button><button class="btn btn-primary" onclick="sendAgreement()">Send agreement to customer</button></div>
+                <div class="review-block" id="perch-contracts-review">
+                  <div class="review-head">Perch contract packet</div>
+                  <div id="perch-contract-list"><p class="helper">Generating the personalized contract packet…</p></div>
+                </div>
+                <div class="badge badge-gold" style="margin-bottom:12px;">Contract acceptance is not enabled yet</div>
+                <p class="helper" style="margin-bottom:14px;">Review is enabled. Viewing a contract does not accept it, and Dalton will not call Perch's contract-acceptance endpoint in this milestone.</p>
+                <p class="helper" id="contract-review-error" style="display:none;color:var(--danger);margin-bottom:10px;"></p>
+                <div class="wizard-actions"><button class="btn btn-ghost" id="agreement-back-btn" onclick="backFromAgreement()">Back</button><button class="btn btn-primary" disabled>Acceptance not enabled</button></div>
               </div>
               <div id="post-send" style="display:none;">
                 <div class="badge badge-gold" style="margin-bottom:12px;">Awaiting customer signature</div>

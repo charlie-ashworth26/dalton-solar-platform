@@ -13,6 +13,12 @@ def create_app():
 
     if not os.path.exists(DB_PATH):
         init_db()
+    else:
+        # Existing installations must receive additive migrations too. This is
+        # intentionally non-destructive; the migration runner records each file
+        # and applies it once.
+        from db.migrate import run_migrations
+        run_migrations(DB_PATH, verbose=False)
 
     app.register_blueprint(auth_routes.bp)
     app.register_blueprint(enrollment_routes.bp)

@@ -6,8 +6,9 @@ name. A mismatch does not raise a helpful error — the capacity check simply
 fails to find a project. This module is the single translation point, backed by
 the perch_utilities reference table seeded in migration 002.
 
-POD ID rules live here too. They are documented and stable, so they belong in
-reference data now even though the collection UI is Milestone 3. Validating
+POD ID rules live here too. They are documented and stable, and the existing
+Dalton bill screen now reveals the secondary identifier only when the selected
+utility requires it. Validating
 before the API call means a rep sees "NYSEG needs 15 digits, that's 14" instead
 of an opaque rejection — which is exactly the example Perch walked through on
 the engineering call.
@@ -45,7 +46,18 @@ def resolve_slug(value):
     if by_slug(value):
         return value
     match = by_display_name(value)
-    return match["slug"] if match else None
+    if match:
+        return match["slug"]
+
+    # Legacy Dalton project cards predate the Perch slug table and use the
+    # shorter label "National Grid". This is a UI compatibility alias to the
+    # published NY slug, not a guessed Perch value.
+    aliases = {
+        "national grid": "national-grid-ny",
+        "con edison": "consolidated-edison-ny",
+        "pseg": "pse-g-ny",
+    }
+    return aliases.get(value.lower())
 
 
 def select_options():
@@ -58,8 +70,8 @@ def select_options():
 
 
 # ─────────────── POD ID (secondary identifier) validation ───────────────
-# Consumed in Milestone 3 when the enroll step collects it. Defined here now
-# because the rules are published and belong with the rest of the utility data.
+# Consumed by the existing Dalton bill/account screen before /enroll. The rules
+# are published reference data and belong with the rest of the utility data.
 
 def pod_id_rule(slug):
     """Returns the POD ID rule for a utility, or None if it doesn't require one."""

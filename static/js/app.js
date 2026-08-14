@@ -52,24 +52,23 @@ async function apiFetch(path, opts){
 
 let projects = []; // populated by loadProjects() from GET /api/projects — see below
 
-// NOTE (Phase 2): the wizard below still reads/writes this local `customers`
-// array — the enrollment wizard itself is not yet connected to the backend
-// (that's Phase 2 steps 10-15). It starts empty now instead of seeded with
-// fake demo people; the Dashboard and Customers views below no longer read
-// from this array at all — they load real enrollments from the API.
+// The legacy customer-portal demo still reads this local array. The rep-facing
+// enrollment wizard does not: its customer/document/Perch data is persisted
+// through the real Dalton backend routes below.
 let customers = [];
 
 const steps = [1,2,3,4,5];
 const stepIds = {1:'step-project',2:'step-bill',3:'step-contact',4:'step-lmi',5:'step-agreement'};
-const stepLabels = ['Project','Bill','Contact','LMI','Agreement'];
+const stepLabels = ['Capacity','Bill','Contact','LMI','Agreement'];
 
 let state = {
   rep:{name:'Charlie Mren'},
   project:{id:'',name:'',utility:''},
   customer:{first:'',last:'',email:'',phone:'',acct:'',password:''},
   address:{street:'',unit:'',city:'',state:'NY',zip:''},
-  bill:{fileName:'',amount:''},
-  lmi:{na:false,docType:'',fileName:''}
+  bill:{fileName:'',amount:'',documentId:null},
+  billing:{sameAsService:true,street:'',unit:'',city:'',state:'NY',zip:''},
+  lmi:{mode:'doc',docType:'',fileName:'',documentId:null,nameOnDocument:'',relationship:'self',documentFormat:''}
 };
 let currentCustomerId = null;
 let skipProjectStep = false;
@@ -302,20 +301,41 @@ async function renderCustomers(query){
 }
 
 function resetWizardState(){
-  state.customer = {first:'',last:'',email:'',phone:'',acct:'',password:''};
+  state.customer = {first:'',last:'',email:'',phone:'',acct:'',podId:'',password:''};
   state.address = {street:'',unit:'',city:'',state:'NY',zip:''};
-  state.bill = {fileName:'',amount:''};
-  state.lmi = {mode:'doc',docType:'',fileName:'',householdSize:'',incomeBelow:null};
+  state.bill = {fileName:'',amount:'',documentId:null};
+  state.billing = {sameAsService:true,street:'',unit:'',city:'',state:'NY',zip:''};
+  state.lmi = {mode:'doc',docType:'',fileName:'',documentId:null,householdSize:'',incomeBelow:null,nameOnDocument:'',relationship:'self',documentFormat:''};
+  billRuntimeFile = null; billUploadPromise = null; billUploadGeneration += 1;
+  lmiRuntimeFile = null; lmiUploadPromise = null; lmiUploadGeneration += 1;
+  perchContracts = [];
+  perchContext = freshPerchContext();
   currentCustomerId = null;
   clearWizardForms();
 }
 function clearWizardForms(){
-  ['c-first','c-last','c-email','c-phone','c-acct','c-pass','c-pass-confirm','a-street','a-unit','a-city','a-zip'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+  ['c-first','c-last','c-email','c-phone','c-acct','c-pod','c-pass','c-pass-confirm','a-street','a-unit','a-city','a-zip','b-street','b-unit','b-city','b-zip','lmi-name-on-doc'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
   document.getElementById('bill-amount').value='';
   document.getElementById('bill-file-chip').innerHTML='';
+  document.getElementById('bill-file').value='';
+  document.getElementById('billing-same').checked=true;
+  document.getElementById('billing-address-fields').style.display='none';
+  document.getElementById('pod-id-field').style.display='none';
+  document.getElementById('bill-submit-error').style.display='none';
   document.getElementById('ocr-container').innerHTML='';
   document.getElementById('lmi-doctype').value='';
   document.getElementById('lmi-file-chip').innerHTML='';
+  document.getElementById('lmi-file').value='';
+  document.getElementById('lmi-name-on-doc').value='';
+  document.getElementById('lmi-relationship').value='self';
+  document.getElementById('lmi-format').value='';
+  document.getElementById('lmi-submit-error').style.display='none';
+  document.getElementById('contact-submit-error').style.display='none';
+  const lmiTitle=document.getElementById('lmi-title');
+  const lmiLead=document.getElementById('lmi-lead');
+  if(lmiTitle) lmiTitle.textContent='LMI documentation';
+  if(lmiLead) lmiLead.textContent='Qualify the customer for the low-income adder — by document, by income self-attestation, or mark it N/A.';
+  document.getElementById('contract-review-error').style.display='none';
   document.getElementById('lmi-check-container').innerHTML='';
   document.getElementById('lmi-household-size').value='';
   document.getElementById('ami-threshold-display').textContent='';
@@ -324,26 +344,25 @@ function clearWizardForms(){
   document.getElementById('lmi-mode-doc').classList.remove('selected');
   document.getElementById('lmi-mode-attest').classList.remove('selected');
   document.getElementById('lmi-mode-na').classList.remove('selected');
+  document.getElementById('lmi-mode-doc').style.display='flex';
+  document.getElementById('lmi-mode-attest').style.display='flex';
+  document.getElementById('lmi-mode-na').style.display='flex';
   document.getElementById('lmi-doc-panel').style.display='block';
   document.getElementById('lmi-attest-panel').style.display='none';
   document.getElementById('btn-lmi-next').disabled=true;
   document.getElementById('btn-bill-next').disabled=true;
   document.getElementById('pre-send').style.display='block';
   document.getElementById('post-send').style.display='none';
+  const contractList=document.getElementById('perch-contract-list'); if(contractList) contractList.innerHTML='<p class="helper">Generating the personalized contract packet…</p>';
 }
 
-/* ==================== MILESTONE 2: WORKFLOW RENDERER ====================
+/* ==================== PERCH CAPACITY RENDERER ====================
 
-   The frontend is a RENDERER, not a page sequence.
-
-   It asks the backend "what step am I on?" and draws whatever descriptor comes
-   back: fields, validations, panels, actions. It contains no knowledge of
-   community solar, no hardcoded step order, and no business rules. Perch owns
-   the workflow (via its next_step URLs); the backend translates that into a
-   descriptor; this code draws it.
-
-   Adding Milestone 3's enrollment step requires ZERO changes in this file -
-   it's a new step builder in services/perch/workflow.py.
+   The generic descriptor renderer is intentionally limited to the Perch
+   service-area/capacity entry point. After capacity succeeds, control returns
+   to Dalton's existing Bill -> Contact -> LMI -> Agreement screens. Perch's
+   next_step remains authoritative for deciding whether LMI is required and
+   when contracts can be generated; it does not replace Dalton's working UX.
 
    Descriptor contract (see services/perch/workflow.py):
      step.key, .eyebrow, .title, .subtitle
@@ -353,8 +372,24 @@ function clearWizardForms(){
      step.primary_action / .secondary_action  {label, operation, enabled, disabled_reason}
 */
 
-let currentDraft = null;     // {enrollment_id, enrollment_code} - created BEFORE any Perch call
-let currentWorkflow = null;  // last descriptor from GET .../workflow
+let currentDraft = null;     // {enrollment_id, enrollment_code} - durable Dalton key
+let currentWorkflow = null;  // descriptor used only for service-area/capacity
+let utilityRules = {};
+let billRuntimeFile = null, billUploadPromise = null, billUploadGeneration = 0;
+let lmiRuntimeFile = null, lmiUploadPromise = null, lmiUploadGeneration = 0;
+let perchContracts = [];
+function freshPerchContext(){
+  return {email:'', capacityZip:'', utilitySlug:'', utilityDisplay:'', projectDetails:null,
+          nextStepKey:null, enrollmentSubmitted:false, proofSubmitted:false, contractsGenerated:false,
+          agreementBackStep:3};
+}
+let perchContext = freshPerchContext();
+
+async function loadUtilityRules(){
+  if(Object.keys(utilityRules).length) return;
+  const data = await apiFetch('/api/perch/utilities');
+  (data.utilities || []).forEach(u => { utilityRules[u.slug] = u; });
+}
 
 async function startWizardFresh(){
   resetWizardState();
@@ -367,10 +402,11 @@ async function startWizardFresh(){
   renderWorkflowLoading('Starting a new enrollment...');
 
   // A Dalton Enrollment ID is issued before any Perch call. Perch's enrollment
-  // token is session-scoped and expires in 30 minutes, so it can never be the
+  // token is session-scoped and expires in 1 hour, so it can never be the
   // durable key for an enrollment.
   try {
-    currentDraft = await apiFetch('/api/perch/drafts', {method: 'POST'});
+    await loadUtilityRules();
+    currentDraft = await apiFetch('/api/perch/drafts', {method: 'POST', body: JSON.stringify({})});
   } catch(err){
     renderWorkflowError('Could not start a new enrollment: ' + err.message);
     return;
@@ -420,7 +456,7 @@ function renderField(f){
       .concat((f.options||[]).map(o =>
         '<option value="' + esc(o.value) + '"' + (o.value === f.value ? ' selected' : '') + '>' +
         esc(o.label) + '</option>'));
-    control = '<select id="wf-' + esc(f.name) + '" data-field="' + esc(f.name) + '">' + opts.join('') + '</select>';
+    control = '<select id="wf-' + esc(f.name) + '" data-field="' + esc(f.name) + '"' + (f.readonly ? ' disabled' : '') + '>' + opts.join('') + '</select>';
   } else {
     control = '<input type="text" id="wf-' + esc(f.name) + '" data-field="' + esc(f.name) + '"' +
       (f.mono ? ' class="mono-field"' : '') +
@@ -551,15 +587,23 @@ function collectAndValidate(step){
 async function runWorkflowOperation(op){
   if(op === 'exit'){ exitWizard(); return; }
   if(op === 'restart_service_area'){
-    // Re-checking capacity is always a fresh Perch call - stored checks are
-    // audit records, never a cache, because Perch enforces live rates at enroll.
-    currentWorkflow.step = null;
     renderWorkflowLoading('Loading...');
-    await loadWorkflow();
+    try {
+      const body = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/restart-service-area', {method:'POST', body:JSON.stringify({})});
+      // The backend deliberately invalidated the old email-scoped token. Keep
+      // the existing Bill/contact state in case the rep is only correcting the
+      // email or capacity ZIP; if a later utility choice changes, Bill-screen
+      // validation will use the newly authoritative utility rules.
+      perchContext.email=''; perchContext.capacityZip=''; perchContext.utilitySlug='';
+      perchContext.utilityDisplay=''; perchContext.projectDetails=null; perchContext.nextStepKey=null;
+      state.customer.email='';
+      currentWorkflow = body.workflow;
+      renderWorkflowStep(currentWorkflow);
+    } catch(err){ renderWorkflowError(err.message); }
     return;
   }
   if(op === 'check_capacity'){ await submitCapacity(); return; }
-  if(op === 'advance'){ return; }  // disabled until Milestone 3
+  if(op === 'advance'){ advanceFromCapacity(); return; }
   console.warn('Unknown workflow operation:', op);
 }
 
@@ -590,24 +634,52 @@ async function submitCapacity(){
     formErr.style.display = 'block';
     return;
   }
+  perchContext.email = values.email;
+  perchContext.capacityZip = body.result.zip_code;
+  perchContext.utilitySlug = body.result.utility_slug;
+  perchContext.utilityDisplay = body.result.utility_display_name || body.result.utility_slug;
+  perchContext.projectDetails = body.result.project_details || {};
+  perchContext.nextStepKey = (((body.workflow||{}).step||{}).perch_next_step||{}).resolved_step || null;
+  state.customer.email = values.email;
+  state.project.utility = perchContext.utilityDisplay;
+  if(!state.project.name) state.project.name = 'Assigned by Perch';
   currentWorkflow = body.workflow;
   renderWorkflowStep(currentWorkflow);
 }
 
-// Dashboard project cards still use the legacy /api/projects list. Those cards
+function advanceFromCapacity(){
+  if(!currentDraft || !perchContext.email || perchContext.nextStepKey !== 'enroll') return;
+  buildStepLabels();
+  configureBillUtilityRules();
+  goStep(2);
+}
+
+// Dashboard project cards use the same Perch session/capacity entry point, but
+// preserve the selected Dalton project instead of creating a second wizard.
 // disappear when the dashboard becomes Perch-driven; this keeps them working.
-function startWizardForProject(projId){
+async function startWizardForProject(projId){
   const p = projects.find(x=>String(x.id)===String(projId));
   if(!p){ alert('Could not find that project - try refreshing the page.'); return; }
   resetWizardState();
-  state.project = {id:p.id, name:p.name, utility:p.utility};
-  skipProjectStep = true;
-  showView('wizard');
-  goStep(2);
+  state.project = {id:p.id, name:p.name, utility:p.utility, savingsPct:p.savingsPct};
+  skipProjectStep = false;
+  currentDraft = null; currentWorkflow = null;
+  showView('wizard'); goStep(1);
+  renderWorkflowLoading('Starting a new enrollment...');
+  try {
+    await loadUtilityRules();
+    currentDraft = await apiFetch('/api/perch/drafts', {method:'POST', body:JSON.stringify({project_id:p.id})});
+    await loadWorkflow();
+  } catch(err){ renderWorkflowError('Could not start a new enrollment: ' + err.message); }
 }
 function exitWizard(){ showView('dashboard'); }
 
-function backFromCustomer(){ if(skipProjectStep){ exitWizard(); } else { goStep(1); } }
+function backFromCustomer(){
+  if(currentWorkflow){
+    goStep(1);
+    renderWorkflowStep(currentWorkflow);
+  } else { exitWizard(); }
+}
 
 function buildStepLabels(){
   const wrap = document.getElementById('step-labels');
@@ -639,19 +711,27 @@ function goStep(n){
 }
 function hydrateStep(n){
   if(n===2){
+    configureBillUtilityRules();
     document.getElementById('c-first').value = state.customer.first;
     document.getElementById('c-last').value = state.customer.last;
     document.getElementById('c-acct').value = state.customer.acct;
+    document.getElementById('c-pod').value = state.customer.podId || '';
     document.getElementById('a-street').value = state.address.street;
     document.getElementById('a-unit').value = state.address.unit;
     document.getElementById('a-city').value = state.address.city;
     document.getElementById('a-zip').value = state.address.zip;
     document.getElementById('bill-amount').value = state.bill.amount || '';
+    document.getElementById('billing-same').checked = state.billing.sameAsService !== false;
+    document.getElementById('b-street').value = state.billing.street || '';
+    document.getElementById('b-unit').value = state.billing.unit || '';
+    document.getElementById('b-city').value = state.billing.city || '';
+    document.getElementById('b-zip').value = state.billing.zip || '';
+    toggleBillingAddress(false);
     if(state.bill.fileName){ showBillChip(state.bill.fileName); }
     checkBillReady();
   }
   if(n===3){
-    document.getElementById('c-email').value = state.customer.email;
+    document.getElementById('c-email').value = state.customer.email || perchContext.email;
     document.getElementById('c-phone').value = state.customer.phone;
     document.getElementById('c-pass').value = state.customer.password || '';
     document.getElementById('c-pass-confirm').value = state.customer.password || '';
@@ -659,14 +739,65 @@ function hydrateStep(n){
   if(n===4){
     const mode = state.lmi.mode || 'doc';
     setLmiMode(mode);
-    if(mode === 'doc' && state.lmi.fileName){ document.getElementById('lmi-doctype').value = state.lmi.docType; showLmiChip(state.lmi.fileName); }
+    document.getElementById('lmi-name-on-doc').value = state.lmi.nameOnDocument || (state.customer.first+' '+state.customer.last).trim();
+    document.getElementById('lmi-relationship').value = state.lmi.relationship || 'self';
+    document.getElementById('lmi-format').value = state.lmi.documentFormat || '';
+    if(mode === 'doc' && state.lmi.fileName){
+      document.getElementById('lmi-doctype').value = state.lmi.docType;
+      showLmiChip(state.lmi.fileName);
+    }
     if(mode === 'attest'){
       document.getElementById('lmi-household-size').value = state.lmi.householdSize || '';
       updateAmiThreshold();
       if(state.lmi.incomeBelow === true || state.lmi.incomeBelow === false) setIncomeAnswer(state.lmi.incomeBelow);
     }
+    if(perchContext.nextStepKey === 'proof_docs') prepareLmiForPerch();
     checkLmiReady();
   }
+  if(n===5 && perchContracts.length){ renderPerchContracts(); }
+}
+
+function currentUtilityRule(){ return utilityRules[perchContext.utilitySlug] || null; }
+
+function configureBillUtilityRules(){
+  const rule = currentUtilityRule();
+  const acct = document.getElementById('c-acct');
+  const acctHelp = document.getElementById('acct-rule-help');
+  const podField = document.getElementById('pod-id-field');
+  const podHelp = document.getElementById('pod-rule-help');
+  if(!acct || !acctHelp || !podField) return;
+  const expected = rule && rule.account_number_length ? Number(rule.account_number_length) : null;
+  acct.maxLength = expected || 20;
+  acct.placeholder = expected ? ('•'.repeat(Math.min(expected, 12))) : 'Utility account number';
+  acctHelp.textContent = expected ? ((rule.display_name || 'This utility') + ' uses a ' + expected + '-digit account number.') : '';
+  const needsPod = !!(rule && rule.requires_pod_id);
+  podField.style.display = needsPod ? 'block' : 'none';
+  podHelp.textContent = needsPod && rule.pod_id ? ('Required: ' + rule.pod_id.description + '.') : '';
+}
+
+function syncBillingFromService(){
+  if(!document.getElementById('billing-same').checked) return;
+  document.getElementById('b-street').value = document.getElementById('a-street').value;
+  document.getElementById('b-unit').value = document.getElementById('a-unit').value;
+  document.getElementById('b-city').value = document.getElementById('a-city').value;
+  document.getElementById('b-zip').value = document.getElementById('a-zip').value;
+}
+
+function toggleBillingAddress(runCheck=true){
+  const same = document.getElementById('billing-same').checked;
+  document.getElementById('billing-address-fields').style.display = same ? 'none' : 'block';
+  if(same) syncBillingFromService();
+  if(runCheck) checkBillReady();
+}
+
+function podLooksValid(rule, value){
+  if(!rule || !rule.requires_pod_id) return true;
+  value = (value || '').trim();
+  const pod = rule.pod_id || {};
+  if(!value) return false;
+  if(pod.length && value.length !== Number(pod.length)) return false;
+  if(pod.prefix && !value.toUpperCase().startsWith(String(pod.prefix).toUpperCase())) return false;
+  return true;
 }
 
 function checkBillReady(){
@@ -677,13 +808,38 @@ function checkBillReady(){
   const city = document.getElementById('a-city').value.trim();
   const zip = document.getElementById('a-zip').value.trim();
   const amt = document.getElementById('bill-amount').value;
-  const ready = first && last && acct.length===10 && street && city && zip.length===5 && amt;
+  const rule = currentUtilityRule();
+  const expected = rule && rule.account_number_length ? Number(rule.account_number_length) : null;
+  const acctOk = /^\d+$/.test(acct) && (!expected || acct.length === expected);
+  const podOk = podLooksValid(rule, document.getElementById('c-pod').value);
+  const sameBilling = document.getElementById('billing-same').checked;
+  const billingOk = sameBilling || (
+    document.getElementById('b-street').value.trim() &&
+    document.getElementById('b-city').value.trim() &&
+    /^\d{5}$/.test(document.getElementById('b-zip').value.trim())
+  );
+  const ready = !!(first && last && state.bill.fileName && acctOk && podOk && street && city && /^\d{5}$/.test(zip) && billingOk && amt);
   document.getElementById('btn-bill-next').disabled = !ready;
 }
-function submitBill(){
+
+async function uploadDocumentToDalton(file, category){
+  if(!currentDraft) throw new Error('The enrollment session is not ready yet.');
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  fd.append('category', category);
+  return apiFetch('/api/enrollments/' + currentDraft.enrollment_id + '/documents', {method:'POST', body:fd});
+}
+
+async function submitBill(){
+  const errEl = document.getElementById('bill-submit-error');
+  errEl.style.display='none';
+  const btn = document.getElementById('btn-bill-next');
+  if(btn.disabled) return;
+
   state.customer.first = document.getElementById('c-first').value.trim();
   state.customer.last = document.getElementById('c-last').value.trim();
   state.customer.acct = document.getElementById('c-acct').value.trim();
+  state.customer.podId = document.getElementById('c-pod').value.trim();
   state.address = {
     street: document.getElementById('a-street').value.trim(),
     unit: document.getElementById('a-unit').value.trim(),
@@ -691,23 +847,89 @@ function submitBill(){
     state: 'NY',
     zip: document.getElementById('a-zip').value.trim()
   };
+  const sameBilling = document.getElementById('billing-same').checked;
+  state.billing = {
+    sameAsService: sameBilling,
+    street: sameBilling ? state.address.street : document.getElementById('b-street').value.trim(),
+    unit: sameBilling ? state.address.unit : document.getElementById('b-unit').value.trim(),
+    city: sameBilling ? state.address.city : document.getElementById('b-city').value.trim(),
+    state: 'NY',
+    zip: sameBilling ? state.address.zip : document.getElementById('b-zip').value.trim()
+  };
   state.bill.amount = document.getElementById('bill-amount').value;
-  upsertCustomerRecord({status:'Opportunity - Address'});
-  goStep(3);
+
+  btn.disabled=true; btn.textContent='Saving…';
+  try{
+    if(billUploadPromise) await billUploadPromise;
+    if(!state.bill.documentId) throw new Error('The utility bill has not finished saving. Please try again.');
+    const payload = {
+      customer:{first_name:state.customer.first,last_name:state.customer.last,email:state.customer.email,phone:state.customer.phone || null},
+      service_address:{street:state.address.street,unit:state.address.unit,city:state.address.city,state:'NY',zip:state.address.zip},
+      billing_address:{same_as_service:state.billing.sameAsService,street:state.billing.street,unit:state.billing.unit,city:state.billing.city,state:'NY',zip:state.billing.zip},
+      utility_account:{utility_name:perchContext.utilitySlug,account_number:state.customer.acct,secondary_account_identifier:state.customer.podId || null}
+    };
+    if(state.project.id) payload.project_id = state.project.id;
+    await apiFetch('/api/enrollments/' + currentDraft.enrollment_id, {method:'PATCH', body:JSON.stringify(payload)});
+    goStep(3);
+  }catch(err){
+    errEl.textContent=err.message; errEl.style.display='block';
+  }finally{
+    btn.textContent='Continue'; checkBillReady();
+  }
 }
-function submitContact(){
+
+async function submitContact(){
+  const errEl = document.getElementById('contact-submit-error');
+  errEl.style.display='none';
   const email = document.getElementById('c-email').value.trim();
   const phone = document.getElementById('c-phone').value.trim();
   const pass = document.getElementById('c-pass').value;
   const passConfirm = document.getElementById('c-pass-confirm').value;
-  if(!email || !phone || !pass || !passConfirm){ alert('Fill in every field before continuing.'); return; }
-  if(pass.length < 6){ alert('Password should be at least 6 characters.'); return; }
-  if(pass !== passConfirm){ alert('Passwords don\'t match.'); return; }
+  if(!email || !phone || !pass || !passConfirm){ errEl.textContent='Fill in every field before continuing.'; errEl.style.display='block'; return; }
+  if(pass.length < 6){ errEl.textContent='Password should be at least 6 characters.'; errEl.style.display='block'; return; }
+  if(pass !== passConfirm){ errEl.textContent='Passwords don\'t match.'; errEl.style.display='block'; return; }
+  if(email.toLowerCase() !== (perchContext.email || '').toLowerCase()){
+    errEl.textContent='Email must match the address used for the Perch availability check. Go back to change it.'; errEl.style.display='block'; return;
+  }
   state.customer.email = email;
   state.customer.phone = phone;
   state.customer.password = pass;
-  upsertCustomerRecord({status:'Opportunity - Utility'});
-  goStep(4);
+  const btn=document.getElementById('btn-contact-next');
+  btn.disabled=true; btn.textContent=perchContext.enrollmentSubmitted ? 'Continuing…' : 'Submitting to Perch…';
+  try{
+    await apiFetch('/api/enrollments/' + currentDraft.enrollment_id, {
+      method:'PATCH',
+      body:JSON.stringify({customer:{first_name:state.customer.first,last_name:state.customer.last,email:state.customer.email,phone:state.customer.phone,password:state.customer.password}})
+    });
+    if(!perchContext.enrollmentSubmitted){
+      const body = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/enroll', {method:'POST', body:JSON.stringify({document_id:state.bill.documentId})});
+      perchContext.enrollmentSubmitted = true;
+      perchContext.nextStepKey = body.next_step_key;
+    }
+    await continueFromPerchNextStep('contact');
+  }catch(err){
+    errEl.textContent=err.message; errEl.style.display='block';
+  }finally{
+    btn.disabled=false; btn.textContent='Continue';
+  }
+}
+
+async function continueFromPerchNextStep(origin){
+  if(perchContext.contractsGenerated){
+    perchContext.agreementBackStep = origin === 'lmi' ? 4 : 3;
+    goStep(5); renderPerchContracts(); return;
+  }
+  if(perchContext.nextStepKey === 'proof_docs'){
+    goStep(4); prepareLmiForPerch(); return;
+  }
+  if(perchContext.nextStepKey === 'contracts'){
+    state.lmi.mode='na'; state.lmi.docType=''; state.lmi.fileName='';
+    await generateContractsAndOpenAgreement(origin === 'lmi' ? 4 : 3); return;
+  }
+  if(perchContext.nextStepKey === 'self_attestation' || perchContext.nextStepKey === 'self_attestation_accept'){
+    throw new Error('Perch requires its self-attestation branch for this enrollment. That branch is intentionally not wired into this milestone, so Dalton will not guess or skip it.');
+  }
+  throw new Error('Perch returned a next step Dalton does not recognize. The enrollment was not advanced.');
 }
 
 function dzDragOver(e, id){ e.preventDefault(); document.getElementById(id).classList.add('drag'); }
@@ -746,7 +968,15 @@ function parseUtilityBill(rawText){
   if(m) result.acct = m[1].replace(/-/g,'');
   m = t.match(/AMOUNT DUE\D{0,25}?\$?\s*([\d,]+\.\d{2})/i);
   if(m) result.amount = parseFloat(m[1].replace(/,/g,''));
-  m = t.match(/SERVICE FOR\s+([A-Z][A-Z .'-]+?)\s+(\d+[A-Z0-9 .'-]*?)\s+([A-Za-z .'-]+?)\s+([A-Z]{2})\s+(\d{5})/);
+  // Utility PDFs flatten columns/lines into a single text stream. The old
+  // pattern let the street stop immediately after the house number, which could
+  // turn "123 MAIN ST ALBANY" into street="123", city="MAIN ST ALBANY".
+  // Prefer an address boundary at a common street suffix, then fall back to the
+  // legacy pattern for unusual addresses rather than refusing to extract.
+  m = t.match(/SERVICE FOR\s+([A-Z][A-Z .'-]+?)\s+(\d+[A-Z0-9 .#'-]*?\b(?:ST(?:REET)?|AVE(?:NUE)?|RD|ROAD|BLVD|BOULEVARD|DR|DRIVE|LN|LANE|CT|COURT|PL|PLACE|PKWY|PARKWAY|HWY|HIGHWAY|WAY|TER|TERRACE))\s+([A-Za-z .'-]+?)\s+([A-Z]{2})\s+(\d{5})/i);
+  if(!m){
+    m = t.match(/SERVICE FOR\s+([A-Z][A-Z .'-]+?)\s+(\d+[A-Z0-9 .'-]*?)\s+([A-Za-z .'-]+?)\s+([A-Z]{2})\s+(\d{5})/);
+  }
   if(m){
     const nameParts = m[1].trim().split(/\s+/);
     result.last = nameParts.length>1 ? nameParts[nameParts.length-1] : '';
@@ -774,12 +1004,37 @@ function ocrRow(label, ok, valueText){
 async function handleBillUpload(files){
   if(!files.length) return;
   const f = files[0];
+  if(f.size > 4 * 1024 * 1024){
+    removeBill();
+    const errEl=document.getElementById('bill-submit-error');
+    errEl.textContent='Perch accepts utility bills up to 4 MB. Choose a smaller PDF or image.';
+    errEl.style.display='block';
+    return;
+  }
+  const generation = ++billUploadGeneration;
+  billRuntimeFile = f;
   state.bill.fileName = f.name;
+  state.bill.documentId = null;
+  state.bill.uploadError = null;
   showBillChip(f.name);
+
+  // Persist the exact same file selected for OCR. The generation guard prevents
+  // a slower, older upload from overwriting the document ID for a newer bill.
+  billUploadPromise = uploadDocumentToDalton(f, 'utility_bill')
+    .then(saved => {
+      if(generation === billUploadGeneration) state.bill.documentId = saved.document_id;
+      return saved;
+    })
+    .catch(err => {
+      if(generation === billUploadGeneration) state.bill.uploadError = err.message;
+      throw err;
+    });
+
   const c = document.getElementById('ocr-container');
   c.innerHTML = '<div class="ocr-panel"><div class="ocr-analyzing"><div class="spinner"></div>Reading the bill…</div></div>';
   try{
     const text = await extractTextFromFile(f);
+    if(generation !== billUploadGeneration) return;
     const parsed = parseUtilityBill(text);
     if(parsed.first) document.getElementById('c-first').value = parsed.first;
     if(parsed.last) document.getElementById('c-last').value = parsed.last;
@@ -788,6 +1043,7 @@ async function handleBillUpload(files){
     if(parsed.city) document.getElementById('a-city').value = parsed.city;
     if(parsed.zip) document.getElementById('a-zip').value = parsed.zip;
     if(parsed.amount != null) document.getElementById('bill-amount').value = amountToBracket(parsed.amount);
+    syncBillingFromService();
     c.innerHTML = '<div class="ocr-panel"><div class="ocr-head">Pulled from the bill</div>' +
       ocrRow('Customer name', !!parsed.first, parsed.first ? 'Found' : 'Not found — enter manually') +
       ocrRow('Service address', !!parsed.street, parsed.street ? 'Found' : 'Not found — enter manually') +
@@ -795,12 +1051,21 @@ async function handleBillUpload(files){
       ocrRow('Bill amount', parsed.amount!=null, parsed.amount!=null ? ('$'+parsed.amount.toFixed(2)) : 'Not found — select manually') +
       '</div>';
   } catch(err){
+    if(generation !== billUploadGeneration) return;
     c.innerHTML = '<div class="ocr-panel"><div class="ocr-analyzing">Couldn\'t read this file automatically — enter the details below by hand.</div></div>';
   }
+  // Avoid an unhandled rejection before the rep presses Continue; submitBill
+  // will display the same save error without discarding the OCR results.
+  billUploadPromise.catch(()=>{});
   checkBillReady();
 }
 function removeBill(){
+  billUploadGeneration += 1;
+  billRuntimeFile = null;
+  billUploadPromise = null;
   state.bill.fileName='';
+  state.bill.documentId=null;
+  state.bill.uploadError=null;
   document.getElementById('bill-file-chip').innerHTML='';
   document.getElementById('ocr-container').innerHTML='';
   document.getElementById('bill-file').value='';
@@ -809,16 +1074,21 @@ function removeBill(){
 
 /* ---------------- LMI DOCUMENT CHECKER ---------------- */
 const lmiTypes = [
-  {label:'Electric bill showing HEAP/LIHEAP/EAP assistance', dac:false, re:/\bHEAP\b|\bLIHEAP\b|Energy Assistance|\bEAP\b|Energy Affordability Credit|Billing Adjustments/i},
-  {label:'SNAP award letter', dac:false, re:/SNAP.{0,30}(award|notice|eligib|approv)/i},
-  {label:'SNAP card', dac:false, re:/\bSNAP\b/i},
-  {label:'Housing authority certification / Section 8', dac:false, re:/Section\s*8|Housing Authority|Tenant Eligibility|\bHUD\b/i},
-  {label:'Disability benefits letter', dac:false, re:/Disability Benefits|SSDI/i},
-  {label:'SSI', dac:false, re:/\bSSI\b|Supplemental Security Income/i},
-  {label:'Medicaid award letter', dac:true, re:/Medicaid|NY State of Health|Essential Plan/i},
-  {label:'Lifeline qualification', dac:true, re:/\bLifeline\b/i},
-  {label:'SLIP', dac:true, re:/\bSLIP\b/i},
+  {label:'Electric bill showing HEAP/LIHEAP/EAP assistance', sourceType:'proof_doc_liheap', defaultDocType:'utility_bill', dac:false, re:/\bHEAP\b|\bLIHEAP\b|Energy Assistance|\bEAP\b|Energy Affordability Credit|Billing Adjustments/i},
+  {label:'SNAP award letter', sourceType:'proof_doc_snap', defaultDocType:'letter', dac:false, re:/SNAP.{0,30}(award|notice|eligib|approv)/i},
+  {label:'SNAP card', sourceType:'proof_doc_snap', defaultDocType:'card', dac:false, re:/\bSNAP\b/i},
+  {label:'Free/reduced school lunch letter', sourceType:'proof_doc_free_reduced_school_lunch_letter', defaultDocType:'letter', dac:false, re:/free.{0,20}reduced.{0,30}(lunch|meal)|school.{0,20}lunch/i},
+  {label:'Housing authority certification / Section 8', sourceType:'proof_doc_section_8', defaultDocType:'', dac:false, re:/Section\s*8|Housing Authority|Tenant Eligibility|\bHUD\b/i},
+  {label:'SSI', sourceType:'proof_doc_ssi', defaultDocType:'', dac:false, re:/\bSSI\b|Supplemental Security Income/i},
+  {label:'Medicaid award letter', sourceType:'proof_doc_medicaid', defaultDocType:'letter', dac:true, re:/Medicaid|NY State of Health|Essential Plan/i},
+  {label:'Lifeline qualification', sourceType:'proof_doc_lifeline_usac', defaultDocType:'', dac:true, re:/\bLifeline\b/i},
+  // These legacy Dalton labels do not map cleanly to a published Perch proof
+  // source type, so they remain selectable for local review but cannot be sent
+  // to Perch until an explicit supported source is chosen.
+  {label:'Disability benefits letter', sourceType:null, defaultDocType:'letter', dac:false, re:/Disability Benefits|SSDI/i},
+  {label:'SLIP', sourceType:null, defaultDocType:'', dac:true, re:/\bSLIP\b/i},
 ];
+function lmiTypeForLabel(label){ return lmiTypes.find(x=>x.label===label) || null; }
 function classifyLmiDoc(rawText){
   const t = cleanText(rawText);
   let matched = null;
@@ -856,19 +1126,43 @@ function renderLmiCheckPanel(analysis){
   c.innerHTML = banner + '<div class="ocr-panel"><div class="ocr-head">Automated document check</div>' + rows.join('') + dacNote + '</div>';
 }
 function showLmiChip(name){
-  document.getElementById('lmi-file-chip').innerHTML = '<div class="file-chip"><div class="fc-left"><div class="fc-icon">📄</div><div><div class="fc-name">'+name+'</div><div class="fc-size">Uploaded</div></div></div><button class="fc-remove" onclick="removeLmi()">Remove</button></div>';
+  document.getElementById('lmi-file-chip').innerHTML = '<div class="file-chip"><div class="fc-left"><div class="fc-icon">📄</div><div><div class="fc-name">'+esc(name)+'</div><div class="fc-size">Uploaded</div></div></div><button class="fc-remove" onclick="removeLmi()">Remove</button></div>';
 }
 const amiTable = [
   {size:1, amount:61750},{size:2, amount:70550},{size:3, amount:79350},{size:4, amount:88150},
   {size:5, amount:95250},{size:6, amount:102300},{size:7, amount:109350},{size:8, amount:116400},
 ];
 function setLmiMode(mode){
+  if(perchContext.nextStepKey === 'proof_docs' && mode !== 'doc'){
+    const errEl=document.getElementById('lmi-submit-error');
+    errEl.textContent='Perch requires proof documentation for this enrollment, so self-attestation and N/A cannot replace this step.';
+    errEl.style.display='block';
+    mode='doc';
+  }
   state.lmi.mode = mode;
   document.getElementById('lmi-mode-doc').classList.toggle('selected', mode==='doc');
   document.getElementById('lmi-mode-attest').classList.toggle('selected', mode==='attest');
   document.getElementById('lmi-mode-na').classList.toggle('selected', mode==='na');
   document.getElementById('lmi-doc-panel').style.display = mode==='doc' ? 'block' : 'none';
   document.getElementById('lmi-attest-panel').style.display = mode==='attest' ? 'block' : 'none';
+  checkLmiReady();
+}
+function prepareLmiForPerch(){
+  perchContext.nextStepKey='proof_docs';
+  state.lmi.mode='doc';
+  const lmiTitle=document.getElementById('lmi-title');
+  const lmiLead=document.getElementById('lmi-lead');
+  if(lmiTitle) lmiTitle.textContent='LMI documentation';
+  if(lmiLead) lmiLead.textContent='Perch requires proof documentation for this enrollment. Use the existing Dalton upload below; you will not be asked to upload it again.';
+  document.getElementById('lmi-mode-attest').style.display='none';
+  document.getElementById('lmi-mode-na').style.display='none';
+  document.getElementById('lmi-mode-doc').style.display='flex';
+  setLmiMode('doc');
+  if(!state.lmi.nameOnDocument) state.lmi.nameOnDocument=(state.customer.first+' '+state.customer.last).trim();
+  document.getElementById('lmi-name-on-doc').value=state.lmi.nameOnDocument;
+  document.getElementById('lmi-relationship').value=state.lmi.relationship || 'self';
+  document.getElementById('lmi-format').value=state.lmi.documentFormat || '';
+  document.getElementById('lmi-submit-error').style.display='none';
   checkLmiReady();
 }
 function updateAmiThreshold(){
@@ -888,22 +1182,54 @@ async function handleLmiUpload(files){
   if(!files.length) return;
   if(state.lmi.mode !== 'doc') setLmiMode('doc');
   const f = files[0];
+  if(f.size > 4 * 1024 * 1024){
+    removeLmi();
+    const errEl=document.getElementById('lmi-submit-error');
+    errEl.textContent='Perch accepts proof documents up to 4 MB. Choose a smaller file.';
+    errEl.style.display='block';
+    return;
+  }
+  const generation = ++lmiUploadGeneration;
+  lmiRuntimeFile=f;
   state.lmi.fileName = f.name;
+  state.lmi.documentId=null;
+  state.lmi.uploadError=null;
   showLmiChip(f.name);
+  lmiUploadPromise = uploadDocumentToDalton(f, 'lmi_document')
+    .then(saved => {
+      if(generation === lmiUploadGeneration) state.lmi.documentId=saved.document_id;
+      return saved;
+    })
+    .catch(err => {
+      if(generation === lmiUploadGeneration) state.lmi.uploadError=err.message;
+      throw err;
+    });
   const c = document.getElementById('lmi-check-container');
   c.innerHTML = '<div class="ocr-panel"><div class="ocr-analyzing"><div class="spinner"></div>Reading the document…</div></div>';
   try{
     const text = await extractTextFromFile(f);
+    if(generation !== lmiUploadGeneration) return;
     const analysis = classifyLmiDoc(text);
-    if(analysis.matched){ document.getElementById('lmi-doctype').value = analysis.matched.label; }
+    if(analysis.matched){
+      document.getElementById('lmi-doctype').value = analysis.matched.label;
+      state.lmi.docType=analysis.matched.label;
+      if(analysis.matched.defaultDocType){
+        document.getElementById('lmi-format').value=analysis.matched.defaultDocType;
+        state.lmi.documentFormat=analysis.matched.defaultDocType;
+      }
+    }
     renderLmiCheckPanel(analysis);
   } catch(err){
+    if(generation !== lmiUploadGeneration) return;
     c.innerHTML = '<div class="ocr-panel"><div class="ocr-analyzing">Couldn\'t read this file automatically — select the document type manually.</div></div>';
   }
+  lmiUploadPromise.catch(()=>{});
   checkLmiReady();
 }
 function removeLmi(){
-  state.lmi.fileName='';
+  lmiUploadGeneration += 1;
+  lmiRuntimeFile=null; lmiUploadPromise=null;
+  state.lmi.fileName=''; state.lmi.documentId=null; state.lmi.uploadError=null;
   document.getElementById('lmi-file-chip').innerHTML='';
   document.getElementById('lmi-check-container').innerHTML='';
   document.getElementById('lmi-file').value='';
@@ -911,35 +1237,135 @@ function removeLmi(){
 }
 function checkLmiReady(){
   state.lmi.docType = document.getElementById('lmi-doctype').value;
+  state.lmi.nameOnDocument = document.getElementById('lmi-name-on-doc').value.trim();
+  state.lmi.relationship = document.getElementById('lmi-relationship').value;
+  state.lmi.documentFormat = document.getElementById('lmi-format').value;
   let ready = false;
-  if(state.lmi.mode === 'na') ready = true;
+  if(perchContext.nextStepKey === 'proof_docs'){
+    const type=lmiTypeForLabel(state.lmi.docType);
+    ready=!!(state.lmi.mode==='doc' && type && type.sourceType && state.lmi.fileName && state.lmi.nameOnDocument && state.lmi.relationship && state.lmi.documentFormat);
+  } else if(state.lmi.mode === 'na') ready = true;
   else if(state.lmi.mode === 'attest') ready = !!(state.lmi.householdSize && (state.lmi.incomeBelow === true || state.lmi.incomeBelow === false));
   else ready = !!(state.lmi.docType && state.lmi.fileName);
   document.getElementById('btn-lmi-next').disabled = !ready;
 }
-function submitLmi(){ upsertCustomerRecord({status:'Opportunity - Contract'}); goStep(5); }
+async function submitLmi(){
+  const errEl=document.getElementById('lmi-submit-error');
+  errEl.style.display='none';
+  const btn=document.getElementById('btn-lmi-next');
+  if(btn.disabled) return;
+  if(perchContext.proofSubmitted){
+    await generateContractsAndOpenAgreement(4);
+    return;
+  }
+  const type=lmiTypeForLabel(document.getElementById('lmi-doctype').value);
+  if(!type || !type.sourceType){
+    errEl.textContent='That legacy Dalton document label does not map to a published Perch proof source type. Choose a supported proof document instead of guessing.';
+    errEl.style.display='block'; return;
+  }
+  state.lmi.docType=document.getElementById('lmi-doctype').value;
+  state.lmi.nameOnDocument=document.getElementById('lmi-name-on-doc').value.trim();
+  state.lmi.relationship=document.getElementById('lmi-relationship').value;
+  state.lmi.documentFormat=document.getElementById('lmi-format').value;
+  btn.disabled=true; btn.textContent='Submitting to Perch…';
+  try{
+    if(lmiUploadPromise) await lmiUploadPromise;
+    if(!state.lmi.documentId) throw new Error('The LMI document has not finished saving. Please try again.');
+    await apiFetch('/api/enrollments/' + currentDraft.enrollment_id + '/lmi', {
+      method:'POST', body:JSON.stringify({path:'document',qualification_type:state.lmi.docType,document_id:state.lmi.documentId})
+    });
+    const body=await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/lmi/proof_docs', {
+      method:'POST', body:JSON.stringify({document_id:state.lmi.documentId,source_type:type.sourceType,
+        name_on_document:state.lmi.nameOnDocument,relationship:state.lmi.relationship,document_type:state.lmi.documentFormat})
+    });
+    perchContext.proofSubmitted=true;
+    perchContext.nextStepKey=body.next_step_key;
+    if(perchContext.nextStepKey!=='contracts') throw new Error('Perch accepted the proof document but returned an unexpected next step. Dalton stopped rather than guessing.');
+    await generateContractsAndOpenAgreement(4);
+  }catch(err){
+    errEl.textContent=err.message; errEl.style.display='block';
+  }finally{
+    btn.textContent='Continue'; checkLmiReady();
+  }
+}
 
 function fillReview(){
   document.getElementById('rv-name').textContent = state.customer.first+' '+state.customer.last;
   document.getElementById('rv-email').textContent = state.customer.email;
   document.getElementById('rv-phone').textContent = state.customer.phone;
   document.getElementById('rv-acct').textContent = state.customer.acct;
-  document.getElementById('rv-project').textContent = state.project.name;
-  document.getElementById('rv-utility').textContent = state.project.utility;
+  document.getElementById('rv-project').textContent = state.project.name || 'Assigned by Perch';
+  document.getElementById('rv-utility').textContent = state.project.utility || perchContext.utilityDisplay || perchContext.utilitySlug;
   document.getElementById('rv-address').textContent = state.address.street+(state.address.unit ? ', '+state.address.unit : '')+', '+state.address.city+', NY '+state.address.zip;
   document.getElementById('rv-bill').textContent = state.bill.amount;
-  document.getElementById('rv-lmi').textContent =
-    state.lmi.mode === 'na' ? 'N/A' :
-    state.lmi.mode === 'attest' ? ('Self-attested — household of '+state.lmi.householdSize+', income '+(state.lmi.incomeBelow ? 'below' : 'above')+' 80% AMI') :
-    (state.lmi.docType+' — '+state.lmi.fileName);
+  document.getElementById('rv-lmi').textContent = perchContext.proofSubmitted
+    ? (state.lmi.docType+' — '+state.lmi.fileName)
+    : 'Not required by Perch for this enrollment';
 }
+
+async function generateContractsAndOpenAgreement(backStep){
+  const sourceErr = backStep===4 ? document.getElementById('lmi-submit-error') : document.getElementById('contact-submit-error');
+  if(sourceErr) sourceErr.style.display='none';
+  if(!perchContext.contractsGenerated){
+    try{
+      const body=await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/contracts', {method:'POST', body:JSON.stringify({})});
+      perchContracts=body.contracts || [];
+      perchContext.contractsGenerated=true;
+      perchContext.contractsNextStepKey=body.next_step_key;
+    }catch(err){
+      if(sourceErr){ sourceErr.textContent=err.message; sourceErr.style.display='block'; }
+      throw err;
+    }
+  }
+  perchContext.agreementBackStep=backStep || 3;
+  goStep(5);
+  renderPerchContracts();
+}
+
+function renderPerchContracts(){
+  const wrap=document.getElementById('perch-contract-list');
+  if(!wrap) return;
+  if(!perchContracts.length){
+    wrap.innerHTML='<p class="helper">Perch did not return any contract documents.</p>';
+    return;
+  }
+  wrap.innerHTML=perchContracts.map((c,i)=>{
+    const expiry=c.expires_at ? ('Expires '+esc(String(c.expires_at))) : 'Review link generated on demand';
+    return '<div class="review-line"><span class="rl-label" style="max-width:72%;">'+esc(c.contract_name || ('Contract '+(i+1)))+'<br><span class="helper">'+expiry+'</span></span>'+
+      '<span class="rl-val"><button class="btn btn-ghost btn-sm" onclick="reviewPerchContract('+i+')">Review</button></span></div>';
+  }).join('');
+}
+
+async function reviewPerchContract(index){
+  const errEl=document.getElementById('contract-review-error');
+  errEl.style.display='none';
+  // Open synchronously so the browser treats this as the user's Review click.
+  // The authenticated POST returns only a short-lived *Dalton* one-time URL;
+  // that same-origin URL then regenerates the Perch packet server-side and
+  // redirects. A Perch presigned URL never enters application JSON/state.
+  const reviewWindow=window.open('about:blank','_blank');
+  if(!reviewWindow){
+    errEl.textContent='Your browser blocked the contract review window. Allow pop-ups for this Dalton page and click Review again.';
+    errEl.style.display='block'; return;
+  }
+  try{
+    const body=await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/contracts/review', {
+      method:'POST', body:JSON.stringify({index:index})
+    });
+    if(!body.review_url || !String(body.review_url).startsWith('/api/perch/contract-reviews/')){
+      throw new Error('Dalton did not return a valid contract review link.');
+    }
+    reviewWindow.location=body.review_url;
+  }catch(err){
+    reviewWindow.close();
+    errEl.textContent=err.message; errEl.style.display='block';
+  }
+}
+function backFromAgreement(){ goStep(perchContext.agreementBackStep || 3); }
 function sendAgreement(){
-  document.getElementById('pre-send').style.display = 'none';
-  document.getElementById('post-send').style.display = 'block';
-  document.getElementById('post-send-contact').textContent = state.customer.phone || state.customer.email;
-  const token = Math.random().toString(36).slice(2,10);
-  document.getElementById('magic-link-text').textContent = 'https://sign.daltonsolar.com/a/'+token;
-  upsertCustomerRecord({status:'Opportunity - Review'});
+  const errEl=document.getElementById('contract-review-error');
+  errEl.textContent='Contract acceptance is intentionally disabled in this milestone.';
+  errEl.style.display='block';
 }
 
 function todayStr(){ return new Date().toISOString().slice(0,10); }

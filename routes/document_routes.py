@@ -1,5 +1,6 @@
 import os
 import json
+import uuid
 
 from flask import Blueprint, request, jsonify, g, send_file
 
@@ -36,7 +37,7 @@ def upload_document(enrollment_id):
 
     enrollment_dir = os.path.join(UPLOAD_DIR, str(enrollment_id))
     os.makedirs(enrollment_dir, exist_ok=True)
-    stored_name = f"{category}_{file.filename}".replace(" ", "_")
+    stored_name = f"{category}_{uuid.uuid4().hex[:12]}_{file.filename}".replace(" ", "_")
     stored_path_abs = os.path.join(enrollment_dir, stored_name)
     with open(stored_path_abs, "wb") as f:
         f.write(raw)

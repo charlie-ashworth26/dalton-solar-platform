@@ -332,28 +332,42 @@ def main():
     check("proof-document requirement surfaced as a notice",
           any("proof documents" in n["text"] for n in wf2["step"]["panels"][0]["notices"]))
     check("Perch's next_step exposed to the UI", wf2["step"]["perch_next_step"]["resolved_step"] == "enroll")
-    check("continue is disabled because /enroll is Milestone 3",
-          wf2["step"]["primary_action"]["enabled"] is False)
-    check("and it says why", "Milestone 3" in wf2["step"]["primary_action"]["disabled_reason"])
+    check("continue is enabled now that the existing Dalton bill/OCR screen owns the enroll UX",
+          wf2["step"]["primary_action"]["enabled"] is True)
+    check("continue bridges out of the descriptor renderer into the existing Dalton wizard",
+          wf2["step"]["primary_action"]["operation"] == "advance")
     with app.app_context():
         st = query_one("SELECT * FROM perch_workflow_state WHERE enrollment_id=?", (eid4,))
     check("workflow state persisted", st["current_step_key"] == "capacity_result")
     check("Perch's next_step URL persisted", st["perch_next_step_url"].endswith("/enroll"))
     check("recognized flag persisted", st["next_step_recognized"] == 1)
 
-    section("FRONTEND IS A RENDERER, not a page sequence")
+    section("FRONTEND RENDERER STOPS AT CAPACITY; EXISTING DALTON WIZARD IS PRESERVED")
     html = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              "templates", "index.html"), encoding="utf-8").read()
     check("workflow mount point present", 'id="workflow-root"' in html)
     check("no hardcoded ZIP input in markup", 'id="perch-zip"' not in html)
     check("no hardcoded utility select in markup", 'id="perch-utility"' not in html)
     check("no hardcoded product container in markup", 'perch-products-wrap' not in html)
+    check("existing utility-bill dropzone is preserved", 'id="bill-dropzone"' in html and 'id="bill-file"' in html)
+    check("existing Contact/password screen is preserved", 'id="step-contact"' in html and 'id="c-pass"' in html and 'id="c-pass-confirm"' in html)
+    check("Contact email is displayed but not requested a second time", 'id="c-email"' in html and 'id="c-email" placeholder="name@email.com" readonly' in html)
+    check("existing LMI upload screen is preserved", 'id="lmi-dropzone"' in html and 'id="lmi-file"' in html)
+    check("existing Agreement screen is reused for Perch contract review", 'id="perch-contract-list"' in html and 'Acceptance not enabled' in html)
     check("renderer builds fields from the descriptor", "function renderField" in js)
     check("renderer builds panels from the descriptor", "function renderPanel" in js)
     check("validation is descriptor-driven", "f.validation.pattern" in js)
     check("no product-selection logic remains", "selectPerchProduct" not in js)
     check("no hardcoded savings/capacity strings in JS",
           "savings_percent_for_lmi_customers" not in js and "available_capacity_kw" not in js)
+    check("bill OCR handler still uses the original extraction/parser path",
+          "async function handleBillUpload" in js and "extractTextFromFile(f)" in js and "parseUtilityBill(text)" in js)
+    check("same saved bill document ID is sent to /enroll",
+          "document_id:state.bill.documentId" in js)
+    check("/enroll branches on Perch next_step instead of a hardcoded LMI page",
+          "continueFromPerchNextStep" in js and "next_step_key" in js)
+    check("contract review is explicit and acceptance stays disabled",
+          "/contracts/review" in js and "/contracts/accept" not in js)
 
     section("ADAPTER BOUNDARY still holds")
     routes_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

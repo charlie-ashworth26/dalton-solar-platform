@@ -20,6 +20,8 @@ Auth (documented):
     token. The signing scheme is not published; get_market_capacity() therefore
     raises rather than guessing.
 """
+import os
+import json
 from abc import ABC, abstractmethod
 
 from services.perch import hmac_auth
@@ -75,13 +77,274 @@ def normalize_capacity_response(data: dict) -> dict:
     }
 
 
+def build_enrollment_multipart(enrollment: dict):
+    """Builds the EXACT multipart field names POST /enroll requires.
+
+    Returns (form_fields, file_fields) ready for requests' data=/files=.
+
+    CRITICAL - the indexing format. An earlier spec revision used bare `[]`
+    repeated keys; the current spec uses EXPLICIT NUMERIC INDICES:
+
+        utility_accounts[0][utility_account_number]
+        utility_accounts[0][service_address][city]
+        utility_accounts[0][meter_numbers][0]
+        utility_accounts[0][utility_bills][0]
+        utility_accounts[1][utility_bills][0]
+
+    Both the account index [n] and the inner list indices [m] are explicit.
+    Getting this wrong yields a 422 that does not say why, so it is built in one
+    place and unit-tested against the spec's own cURL example.
+
+    Input shape (already validated by the caller):
+        {
+          "email_address", "first_name", "last_name", "phone_number",
+          "customer_type", "utility_name", "zip_code",
+          "billing_address": {address_1, address_2?, city, state, zip},
+          "home_address": {...}?,          # Business only
+          "business_name"?, "business_title"?, "business_phone"?,
+          "utility_accounts": [
+             {"utility_account_number", "service_address": {...},
+              "secondary_account_identifier"?, "meter_numbers": [...]?,
+              "utility_bills": ["/path/to/bill.pdf", ...]}
+          ]
+        }
+    """
+    form = {}
+    files = {}
+
+    # Flat top-level fields
+    for key in ("email_address", "first_name", "last_name", "phone_number",
+                "customer_type", "utility_name", "zip_code",
+                "business_name", "business_title", "business_phone"):
+        val = enrollment.get(key)
+        if val not in (None, ""):
+            form[key] = str(val)
+
+    # Nested address objects: bracket notation, no index
+    for addr_key in ("billing_address", "home_address"):
+        addr = enrollment.get(addr_key)
+        if addr:
+            for part in ("address_1", "address_2", "city", "state", "zip"):
+                v = addr.get(part)
+                if v not in (None, ""):
+                    form[f"{addr_key}[{part}]"] = str(v)
+
+    # utility_accounts: EXPLICIT numeric indices at every level
+    for n, account in enumerate(enrollment.get("utility_accounts") or []):
+        base = f"utility_accounts[{n}]"
+
+        num = account.get("utility_account_number")
+        if num not in (None, ""):
+            form[f"{base}[utility_account_number]"] = str(num)
+
+        sec = account.get("secondary_account_identifier")
+        if sec not in (None, ""):
+            form[f"{base}[secondary_account_identifier]"] = str(sec)
+
+        svc = account.get("service_address") or {}
+        for part in ("address_1", "address_2", "city", "state", "zip"):
+            v = svc.get(part)
+            if v not in (None, ""):
+                form[f"{base}[service_address][{part}]"] = str(v)
+
+        for m, meter in enumerate(account.get("meter_numbers") or []):
+            form[f"{base}[meter_numbers][{m}]"] = str(meter)
+
+        # Bills are PDF ONLY per the spec. The caller supplies file paths;
+        # the tuple is (filename, fileobj, content_type) for requests.
+        for m, bill_path in enumerate(account.get("utility_bills") or []):
+            files[f"{base}[utility_bills][{m}]"] = (
+                os.path.basename(bill_path), open(bill_path, "rb"), "application/pdf")
+
+    return form, files
+
+
+
+def build_proof_docs_multipart(utility_account_number: str, documents: list):
+    """Build POST /lmi/proof_docs multipart parts from the published contract.
+
+    `proof_doc` is a JSON multipart part with Content-Type application/json.
+    Binary files are separate indexed parts named documents[0][file], etc.,
+    correlated to proof_doc.documents by array index.
+    """
+    if not utility_account_number:
+        raise ValueError("utility_account_number is required")
+    if not documents:
+        raise ValueError("at least one proof document is required")
+
+    mime_by_ext = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+        ".heic": "image/heic", ".pdf": "application/pdf",
+    }
+    metadata = []
+    files = {}
+    opened = []
+    try:
+        for i, doc in enumerate(documents):
+            required = ("source_type", "name_on_document", "relationship",
+                        "document_type", "file_path")
+            missing = [k for k in required if not doc.get(k)]
+            if missing:
+                raise ValueError(
+                    f"proof document {i} missing required fields: {', '.join(missing)}")
+            path = str(doc["file_path"])
+            ext = os.path.splitext(path)[1].lower()
+            content_type = mime_by_ext.get(ext)
+            if not content_type:
+                raise ValueError(
+                    f"unsupported proof document type {ext!r}; use JPEG, PNG, HEIC, or PDF")
+            fh = open(path, "rb")
+            opened.append(fh)
+            metadata.append({
+                "source_type": str(doc["source_type"]),
+                "name_on_document": str(doc["name_on_document"]),
+                "relationship": str(doc["relationship"]),
+                "document_type": str(doc["document_type"]),
+            })
+            files[f"documents[{i}][file]"] = (
+                os.path.basename(path), fh, content_type)
+
+        proof_doc = {
+            "utility_account_number": str(utility_account_number),
+            "documents": metadata,
+        }
+        files["proof_doc"] = (
+            None, json.dumps(proof_doc, separators=(",", ":")), "application/json")
+        return files, proof_doc
+    except Exception:
+        for fh in opened:
+            try:
+                fh.close()
+            except Exception:
+                pass
+        raise
+
+
+def normalize_proof_docs_response(data: dict) -> dict:
+    """Normalize proof-doc success response while preserving the raw body."""
+    data = data or {}
+    next_step = data.get("next_step") or data.get("next_step_url")
+    return {
+        "next_step": next_step,
+        "response_shape": "documented" if "next_step" in data else (
+            "staging_alias" if "next_step_url" in data else "no_next_step"),
+        "raw": data,
+    }
+
+def normalize_enroll_response(data: dict) -> dict:
+    """Normalizes the POST /enroll response.
+
+    Staging has used `*_url` aliases on both /token and /capacity, so the same
+    tolerance is applied here rather than assuming /enroll differs.
+    `next_step` drives which endpoint comes next:
+        non-LMI            -> /contracts
+        LMI IRA            -> /lmi/proof_docs
+        LMI self-attest    -> /lmi/self_attestation
+    """
+    data = data or {}
+    next_step = data.get("next_step") or data.get("next_step_url")
+    return {
+        "next_step": next_step,
+        "response_shape": "documented" if "next_step" in data else (
+            "staging_alias" if "next_step_url" in data else "no_next_step"),
+        "raw": data,
+    }
+
+
+def attach_response_diagnostics(exc, resp):
+    """Attaches the raw response to an exception for diagnostics, then returns it.
+
+    DIAGNOSTIC ONLY - this changes no request, no control flow, and no error
+    message. It exists because _msg() collapses a response into one string and
+    the response object is otherwise discarded when we raise, leaving callers
+    unable to see what Perch actually said.
+
+    Known gap this exposes: _msg() assumes the standard {error, message}
+    envelope, but POST /enroll returns {"errors": [{field, message}, ...]}
+    (ValidationErrorsResponse). Against that shape _msg() yields the useless
+    string "None: None". Left as-is deliberately - fix the message formatting
+    only after the real staging body has been captured.
+
+    Nothing sensitive is attached: only the response Perch sent us. Request
+    headers (which carry our credentials) are never touched.
+    """
+    exc.status_code = getattr(resp, "status_code", None)
+    try:
+        exc.content_type = resp.headers.get("Content-Type")
+    except Exception:
+        exc.content_type = None
+
+    # Correlation IDs, if the gateway or app supplies one. An allowlist rather
+    # than all headers, so nothing unexpected (cookies, auth echoes) is printed.
+    exc.request_id = None
+    for header in ("X-Request-Id", "X-Request-ID", "x-request-id",
+                   "X-Amzn-RequestId", "x-amzn-requestid", "X-Amzn-Trace-Id",
+                   "Request-Id", "CF-RAY"):
+        try:
+            val = resp.headers.get(header)
+        except Exception:
+            val = None
+        if val:
+            exc.request_id = f"{header}: {val}"
+            break
+
+    try:
+        exc.body_text = resp.text
+    except Exception:
+        exc.body_text = None
+    try:
+        exc.body_json = resp.json()
+    except Exception:
+        exc.body_json = None
+    return exc
+
+
 def _msg(resp):
-    """Perch returns a standard {error, message} envelope on every non-2xx."""
+    """Formats a Perch error body into a readable message.
+
+    Perch uses TWO error envelopes, both now observed live:
+
+      1. ErrorResponse            {"error": "...", "message": "..."}
+      2. ValidationErrorsResponse {"errors": [{"field","code","message"}, ...]}
+
+    The original implementation only handled (1), so a real /enroll 422 in
+    envelope (2) rendered as the useless string "None: None". Both are handled
+    now. The full response is still attached to the exception by
+    attach_response_diagnostics() regardless of shape.
+    """
     try:
         body = resp.json()
-        return f"{body.get('error')}: {body.get('message')}"
     except Exception:
         return (resp.text or "")[:200]
+
+    if isinstance(body, dict):
+        errors = body.get("errors")
+        if isinstance(errors, list) and errors:
+            parts = []
+            for item in errors:
+                if not isinstance(item, dict):
+                    parts.append(str(item))
+                    continue
+                field = item.get("field") or item.get("name") or "(no field)"
+                code = item.get("code")
+                message = item.get("message") or item.get("detail") or ""
+                # Include the utility account number when Perch scopes an error
+                # to one account, so a multi-account failure is attributable.
+                acct = item.get("utility_account_number")
+                seg = f"{field}"
+                if code:
+                    seg += f" [{code}]"
+                if message:
+                    seg += f": {message}"
+                if acct:
+                    seg += f" (utility_account_number={acct})"
+                parts.append(seg)
+            return "; ".join(parts)
+
+        if body.get("error") is not None or body.get("message") is not None:
+            return f"{body.get('error')}: {body.get('message')}"
+
+    return (resp.text or "")[:200]
 
 # Documented path suffixes, relative to the enrollment base URL.
 PATH_TOKEN = "/token"
@@ -90,6 +353,7 @@ TOKEN_CREATED_STATUS = 201
 PATH_REFRESH_TOKEN = "/refresh_token"
 PATH_CAPACITY = "/capacity"
 PATH_ENROLL = "/enroll"          # Milestone 3
+PATH_LMI_PROOF_DOCS = "/lmi/proof_docs"
 PATH_STATUS = "/status"          # Milestone 6
 PATH_MARKETS_CAPACITY = "/capacity"   # relative to the MARKETS base URL
 
@@ -146,6 +410,20 @@ class PerchClient(ABC):
             PerchUnavailableError   on 5xx other than 503, or transport failure
         """
         raise NotImplementedError
+
+    def create_enrollment(self, enrollment_token: str, form: dict, files: dict) -> dict:
+        """POST /enroll - create the enrollment.
+
+        `form` and `files` come from build_enrollment_multipart(), which encodes
+        the exact indexed field names the spec requires.
+
+        Returns the normalized response (see normalize_enroll_response).
+        """
+        raise PerchNotImplementedError("Not implemented by this client.")
+
+    def submit_proof_docs(self, enrollment_token: str, files: dict) -> dict:
+        """POST /lmi/proof_docs - submit LMI proof documents for this session."""
+        raise PerchNotImplementedError("Not implemented by this client.")
 
     def get_market_capacity(self, zip_code: str, utility_slug: str) -> dict:
         """GET /markets/capacity - pre-enrollment targeting before a signup exists.
@@ -346,3 +624,65 @@ class PerchHTTPClient(PerchClient):
         # Normalize here, at the same layer as _parse_token_response, so nothing
         # downstream needs to know which spelling arrived.
         return normalize_capacity_response(resp.json())
+
+    def create_enrollment(self, enrollment_token: str, form: dict, files: dict) -> dict:
+        """POST /enroll - multipart, X-Enrollment-Token auth, NO HMAC headers.
+
+        Content-Type is deliberately NOT set: requests must generate the
+        multipart boundary itself. Setting it manually breaks the encoding.
+        """
+        requests = self._requests()
+        url = f"{self.enrollment_base_url}{PATH_ENROLL}"
+        headers = {ENROLLMENT_TOKEN_HEADER: enrollment_token}
+        try:
+            resp = requests.post(url, data=form, files=files,
+                                 headers=headers, timeout=max(self.timeout, 60))
+        except Exception as e:
+            raise PerchUnavailableError(f"Could not reach Perch at {url}: {e}") from e
+
+        # Error messages are unchanged; the raw response is attached so callers
+        # can inspect what Perch actually returned (see attach_response_diagnostics).
+        if resp.status_code == 403:
+            raise attach_response_diagnostics(PerchTokenExpiredError(
+                "Perch returned 403 on /enroll - the enrollment token is expired or invalid."), resp)
+        if resp.status_code == 413:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the upload as too large (413): {_msg(resp)}"), resp)
+        if resp.status_code == 422:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the enrollment (422): {_msg(resp)}"), resp)
+        if resp.status_code >= 500:
+            raise attach_response_diagnostics(PerchUnavailableError(
+                f"Perch {PATH_ENROLL} returned {resp.status_code}."), resp)
+        if resp.status_code >= 400:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the enrollment: {_msg(resp)}"), resp)
+        return normalize_enroll_response(resp.json())
+
+    def submit_proof_docs(self, enrollment_token: str, files: dict) -> dict:
+        """POST /lmi/proof_docs - JSON metadata part + indexed proof files."""
+        requests = self._requests()
+        url = f"{self.enrollment_base_url}{PATH_LMI_PROOF_DOCS}"
+        headers = {ENROLLMENT_TOKEN_HEADER: enrollment_token}
+        try:
+            resp = requests.post(url, files=files, headers=headers,
+                                 timeout=max(self.timeout, 60))
+        except Exception as e:
+            raise PerchUnavailableError(f"Could not reach Perch at {url}: {e}") from e
+
+        if resp.status_code == 403:
+            raise attach_response_diagnostics(PerchTokenExpiredError(
+                "Perch returned 403 on /lmi/proof_docs - the enrollment token is expired or invalid."), resp)
+        if resp.status_code == 413:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the proof upload as too large (413): {_msg(resp)}"), resp)
+        if resp.status_code == 422:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the proof documents (422): {_msg(resp)}"), resp)
+        if resp.status_code >= 500:
+            raise attach_response_diagnostics(PerchUnavailableError(
+                f"Perch {PATH_LMI_PROOF_DOCS} returned {resp.status_code}."), resp)
+        if resp.status_code >= 400:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the proof documents: {_msg(resp)}"), resp)
+        return normalize_proof_docs_response(resp.json())

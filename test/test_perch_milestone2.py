@@ -784,6 +784,258 @@ def main():
           normalize_capacity_response({"project_details": {}, "next_step": "https://y"})["response_shape"]
           == "documented")
 
+    # ───────────────────────────────────────────────────────────
+    section("POST /enroll - multipart encoding matches the spec cURL exactly")
+    from services.perch.client import build_enrollment_multipart, normalize_enroll_response
+    import os as _os
+    _bill = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                          "test", "sample_utility_bill.pdf")
+
+    # Reproduces the spec's own Residential single-account cURL example.
+    form, files = build_enrollment_multipart({
+        "email_address": "john.doe@example.com", "first_name": "John", "last_name": "Doe",
+        "phone_number": "2125551234", "customer_type": "Residential",
+        "utility_name": "consolidated-edison-ny", "zip_code": "10001",
+        "billing_address": {"address_1": "123 Main St", "city": "New York",
+                             "state": "NY", "zip": "10001"},
+        "utility_accounts": [{
+            "utility_account_number": "12345678901",
+            "service_address": {"address_1": "123 Main St", "city": "New York",
+                                 "state": "NY", "zip": "10001"},
+            "utility_bills": [_bill]}]})
+    try:
+        expected_form = {
+            "email_address", "first_name", "last_name", "phone_number", "customer_type",
+            "utility_name", "zip_code",
+            "billing_address[address_1]", "billing_address[city]",
+            "billing_address[state]", "billing_address[zip]",
+            "utility_accounts[0][utility_account_number]",
+            "utility_accounts[0][service_address][address_1]",
+            "utility_accounts[0][service_address][city]",
+            "utility_accounts[0][service_address][state]",
+            "utility_accounts[0][service_address][zip]"}
+        check("form fields match the spec cURL exactly", set(form) == expected_form)
+        check("bill uses EXPLICIT index [0], not bare []",
+              list(files) == ["utility_accounts[0][utility_bills][0]"])
+        check("no bare [] indexing anywhere",
+              not any("[]" in k for k in list(form) + list(files)))
+        check("bill is sent as application/pdf (spec: PDF only)",
+              list(files.values())[0][2] == "application/pdf")
+        check("all form values are strings", all(isinstance(v, str) for v in form.values()))
+    finally:
+        for v in files.values():
+            v[1].close()
+
+    # Multi-account / multi-bill / meter numbers - every index must be explicit.
+    form2, files2 = build_enrollment_multipart({
+        "email_address": "a@b.com", "first_name": "A", "last_name": "B",
+        "phone_number": "5185550142", "customer_type": "Residential",
+        "utility_name": "nyseg", "zip_code": "12202",
+        "billing_address": {"address_1": "1 X St", "city": "Albany", "state": "NY", "zip": "12202"},
+        "utility_accounts": [
+            {"utility_account_number": "11111111111",
+             "secondary_account_identifier": "N01123456789012",
+             "meter_numbers": ["M1", "M2"],
+             "service_address": {"address_1": "1 X St", "city": "Albany",
+                                  "state": "NY", "zip": "12202"},
+             "utility_bills": [_bill]},
+            {"utility_account_number": "22222222222",
+             "service_address": {"address_1": "2 Y St", "city": "Albany",
+                                  "state": "NY", "zip": "12202"},
+             "utility_bills": [_bill, _bill]}]})
+    try:
+        check("second account uses index [1]",
+              "utility_accounts[1][utility_account_number]" in form2)
+        check("meter numbers are indexed [0] and [1]",
+              form2.get("utility_accounts[0][meter_numbers][0]") == "M1"
+              and form2.get("utility_accounts[0][meter_numbers][1]") == "M2")
+        check("POD ID sent as secondary_account_identifier",
+              form2.get("utility_accounts[0][secondary_account_identifier]") == "N01123456789012")
+        check("multiple bills on one account are indexed [0] and [1]",
+              "utility_accounts[1][utility_bills][0]" in files2
+              and "utility_accounts[1][utility_bills][1]" in files2)
+        check("three bill uploads across two accounts", len(files2) == 3)
+        check("still no bare [] anywhere",
+              not any("[]" in k for k in list(form2) + list(files2)))
+    finally:
+        for v in files2.values():
+            v[1].close()
+
+    # Business customer requires the business fields + home_address.
+    form3, files3 = build_enrollment_multipart({
+        "email_address": "j@acme.com", "first_name": "Jane", "last_name": "Smith",
+        "phone_number": "2125555678", "customer_type": "Business",
+        "business_name": "Acme Corporation", "business_title": "Facilities Manager",
+        "business_phone": "2125559999",
+        "utility_name": "consolidated-edison-ny", "zip_code": "10002",
+        "billing_address": {"address_1": "456 Business Blvd", "city": "New York",
+                             "state": "NY", "zip": "10002"},
+        "home_address": {"address_1": "789 Home Ave", "city": "Brooklyn",
+                          "state": "NY", "zip": "11201"},
+        "utility_accounts": []})
+    check("business fields included for customer_type=Business",
+          form3.get("business_name") == "Acme Corporation"
+          and form3.get("business_title") == "Facilities Manager"
+          and form3.get("business_phone") == "2125559999")
+    check("home_address uses bracket notation without an index",
+          form3.get("home_address[city]") == "Brooklyn")
+    check("empty/absent optional fields are omitted, not sent blank",
+          "address_2" not in " ".join(form3.keys()))
+
+    section("POST /enroll - response normalization + next_step branching")
+    nd = normalize_enroll_response({"next_step": "https://x/affiliate_partners/v1/enrollments/contracts"})
+    check("documented next_step read", nd["next_step"].endswith("/contracts"))
+    check("tagged documented", nd["response_shape"] == "documented")
+    na = normalize_enroll_response({"next_step_url": "https://x/enrollments/lmi/proof_docs"})
+    check("staging next_step_url alias accepted", na["next_step"].endswith("/lmi/proof_docs"))
+    check("tagged staging_alias", na["response_shape"] == "staging_alias")
+    nb = normalize_enroll_response({"next_step": "https://DOC", "next_step_url": "https://ALIAS"})
+    check("documented wins when both present", nb["next_step"] == "https://DOC")
+    check("raw preserved", nb["raw"]["next_step_url"] == "https://ALIAS")
+    nn = normalize_enroll_response({})
+    check("missing both is flagged", nn["response_shape"] == "no_next_step")
+
+    section("POST /enroll - National Grid needs no POD ID (published rules)")
+    with app.app_context():
+        check("national-grid-ny requires no secondary identifier",
+              U.pod_id_rule("national-grid-ny") is None)
+        check("national-grid-ny account numbers are 10 digits",
+              query_one("SELECT account_number_length FROM perch_utilities WHERE slug=?",
+                        ("national-grid-ny",))["account_number_length"] == 10)
+
+    section("POST /enroll - _msg() formats the OBSERVED validation envelope")
+    from services.perch.client import _msg as _fmt
+
+    class _ErrResp:
+        status_code = 422
+        headers = {"Content-Type": "application/json"}
+        def __init__(self, text): self.text = text
+        def json(self): return json.loads(self.text)
+
+    # The exact 422 captured from live staging.
+    observed = _ErrResp(json.dumps({"errors": [{
+        "field": "customer_type", "code": "capacity_unavailable",
+        "message": "Residential or Small CS capacity is not available. "
+                   "Contact Perch Energy and fetch capacity using the /capacity endpoint"}]}))
+    msg = _fmt(observed)
+    check("no longer renders as the useless 'None: None'", msg != "None: None")
+    check("field name surfaced", "customer_type" in msg)
+    check("error code surfaced", "capacity_unavailable" in msg)
+    check("human message surfaced", "capacity is not available" in msg)
+
+    # Multiple errors, including one scoped to a utility account.
+    multi = _ErrResp(json.dumps({"errors": [
+        {"field": "customer_type", "code": "too_many_utility_accounts",
+         "message": "Only one utility account can be processed when LMI capacity is available"},
+        {"utility_account_number": "1234567890", "field": "Utility bill size",
+         "code": "file_too_large", "message": "Utility bill size must be less than 4MB"}]}))
+    mmsg = _fmt(multi)
+    check("multiple validation errors are all reported",
+          "too_many_utility_accounts" in mmsg and "file_too_large" in mmsg)
+    check("account-scoped errors name the account",
+          "utility_account_number=1234567890" in mmsg)
+
+    # The other documented envelope must still work.
+    env = _ErrResp(json.dumps({"error": "unprocessable_entity", "message": "Email is invalid"}))
+    check("standard {error,message} envelope still formats",
+          _fmt(env) == "unprocessable_entity: Email is invalid")
+
+    class _HtmlResp:
+        status_code = 422
+        headers = {"Content-Type": "text/html"}
+        text = "<html>gateway error</html>"
+        def json(self): raise ValueError("not json")
+    check("non-JSON body falls back to raw text", "gateway error" in _fmt(_HtmlResp()))
+
+    section("POST /enroll - customer_type is derived from capacity, per the spec enum")
+    import importlib.util as _ilu
+    _vspec = _ilu.spec_from_file_location(
+        "_verify_enroll",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "scripts", "verify_enroll_live.py"))
+    _v = _ilu.module_from_spec(_vspec)
+    _vspec.loader.exec_module(_v)
+
+    # Spec enum is [Residential, Business, LMI]; there is no separate LMI selector field.
+    t, _ = _v.choose_customer_type({"lmi_capacity_available": True,
+                                     "residential_capacity_available": False,
+                                     "small_commercial_capacity_available": False})
+    check("LMI-only capacity selects customer_type='LMI'", t == "LMI")
+    t, _ = _v.choose_customer_type({"lmi_capacity_available": False,
+                                     "residential_capacity_available": True,
+                                     "small_commercial_capacity_available": False})
+    check("residential-only capacity selects 'Residential'", t == "Residential")
+    t, _ = _v.choose_customer_type({"lmi_capacity_available": True,
+                                     "residential_capacity_available": True,
+                                     "small_commercial_capacity_available": False})
+    check("LMI is preferred when both are available", t == "LMI")
+    t, why = _v.choose_customer_type({"lmi_capacity_available": False,
+                                       "residential_capacity_available": False,
+                                       "small_commercial_capacity_available": True})
+    check("small-commercial-only does NOT auto-select (needs Business fields)", t is None)
+    check("and it explains why", "Business" in why)
+    t, why = _v.choose_customer_type({"lmi_capacity_available": False,
+                                       "residential_capacity_available": False,
+                                       "small_commercial_capacity_available": False})
+    check("no capacity selects nothing", t is None)
+    check("chosen values are all within the spec enum",
+          {"Residential", "Business", "LMI"} >= {
+              x for x in [
+                  _v.choose_customer_type({"lmi_capacity_available": True})[0],
+                  _v.choose_customer_type({"residential_capacity_available": True})[0],
+              ] if x})
+
+    section("POST /lmi/proof_docs - multipart contract + response normalization")
+    from services.perch.client import (
+        build_proof_docs_multipart, normalize_proof_docs_response,
+        PATH_LMI_PROOF_DOCS,
+    )
+    proof_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "test_snap_proof_letter.pdf")
+    check("proof-doc endpoint path matches the published spec",
+          PATH_LMI_PROOF_DOCS == "/lmi/proof_docs")
+    check("fictional SNAP proof fixture is present", os.path.exists(proof_path))
+
+    pf, metadata = build_proof_docs_multipart("1234567890", [{
+        "source_type": "proof_doc_snap",
+        "name_on_document": "Dalton Testcustomer",
+        "relationship": "self",
+        "document_type": "letter",
+        "file_path": proof_path,
+    }])
+    try:
+        check("proof_doc JSON part is application/json",
+              pf["proof_doc"][0] is None and pf["proof_doc"][2] == "application/json")
+        encoded = json.loads(pf["proof_doc"][1])
+        check("proof_doc carries the matching utility account",
+              encoded["utility_account_number"] == "1234567890")
+        check("SNAP source type is encoded per document",
+              encoded["documents"][0]["source_type"] == "proof_doc_snap")
+        check("proof metadata includes all four required fields",
+              set(encoded["documents"][0]) == {
+                  "source_type", "name_on_document", "relationship", "document_type"})
+        check("binary file is indexed as documents[0][file]",
+              "documents[0][file]" in pf)
+        check("proof PDF is sent as application/pdf",
+              pf["documents[0][file]"][2] == "application/pdf")
+        check("JSON metadata and binary file arrays have matching length",
+              len(encoded["documents"]) == len([k for k in pf if k.startswith("documents[")]))
+    finally:
+        for key, value in pf.items():
+            if key != "proof_doc":
+                try: value[1].close()
+                except Exception: pass
+
+    pr = normalize_proof_docs_response({"next_step": "https://x/enrollments/contracts"})
+    check("proof-doc documented next_step is read", pr["next_step"].endswith("/contracts"))
+    check("proof-doc documented response is tagged", pr["response_shape"] == "documented")
+    pa = normalize_proof_docs_response({"next_step_url": "https://x/enrollments/contracts"})
+    check("proof-doc staging next_step_url alias is tolerated",
+          pa["next_step"].endswith("/contracts") and pa["response_shape"] == "staging_alias")
+    pb = normalize_proof_docs_response({"next_step": "https://DOC", "next_step_url": "https://ALIAS"})
+    check("proof-doc documented key wins when both are present", pb["next_step"] == "https://DOC")
+    check("proof-doc raw response is preserved", pb["raw"]["next_step_url"] == "https://ALIAS")
+
     print(f"\n{'='*74}\nMILESTONE 2.5 + STAGING SHAPE - ALL CHECKS PASSED\n{'='*74}")
 
 

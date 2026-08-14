@@ -123,7 +123,8 @@ def check_capacity(enrollment_id, zip_code, utility_input, email=None, user_id=N
     duration_ms = int((datetime.now() - started).total_seconds() * 1000)
     api_call_id = record_api_call(
         enrollment_id=enrollment_id, operation="check_capacity", endpoint=PATH_CAPACITY,
-        http_method="POST", request_json=payload, response_json=response,
+        http_method="POST", request_json=payload,
+        response_json=(response or {}).get("raw", response),
         status_code=status_for_log, duration_ms=duration_ms, error_message=error_for_log,
         initiated_by_user_id=user_id,
     )
@@ -147,7 +148,10 @@ def check_capacity(enrollment_id, zip_code, utility_input, email=None, user_id=N
          details.get("savings_percent_for_residential_and_commercial_customers"),
          details.get("savings_percent_for_lmi_customers"),
          next_step_url,
-         _json(response if response is not None else {"no_capacity": True, "detail": error_for_log}),
+         # Store what PERCH actually sent, not our normalized wrapper, so the
+         # audit record stays a faithful copy of the wire response.
+         _json((response or {}).get("raw", response) if response is not None
+               else {"no_capacity": True, "detail": error_for_log}),
          get_api_mode()),
     )
 

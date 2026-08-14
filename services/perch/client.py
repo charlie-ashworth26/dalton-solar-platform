@@ -45,6 +45,36 @@ def _is_enrollment_in_progress(resp):
         return False
 
 
+def normalize_capacity_response(data: dict) -> dict:
+    """Normalizes BOTH the documented and the observed staging capacity response.
+
+    The published YAML documents:
+        {"project_details": {...six fields...}, "next_step": "<url>"}
+
+    Observed Perch staging (2026-08, verified live with zip 12202 /
+    national-grid-ny) returns:
+        {"project_details": {...six fields...}, "next_step_url": "<url>"}
+
+    Same alias discrepancy already confirmed on POST /token, so this mirrors
+    _parse_token_response(): accept either spelling, normalize to the documented
+    name, and keep the untouched original under "raw" so the audit record stores
+    exactly what Perch sent.
+
+    `project_details` is passed through UNCHANGED - we never reshape Perch's
+    business facts, only the envelope key we read the next step from.
+    """
+    data = data or {}
+    # Documented name wins when both are present.
+    next_step = data.get("next_step") or data.get("next_step_url")
+    return {
+        "project_details": data.get("project_details"),
+        "next_step": next_step,
+        "response_shape": "documented" if "next_step" in data else (
+            "staging_alias" if "next_step_url" in data else "no_next_step"),
+        "raw": data,
+    }
+
+
 def _msg(resp):
     """Perch returns a standard {error, message} envelope on every non-2xx."""
     try:
@@ -255,19 +285,40 @@ class PerchHTTPClient(PerchClient):
 
     @staticmethod
     def _parse_token_response(resp):
+        """Normalizes BOTH the documented and the observed staging response.
+
+        The published YAML documents, with all three marked `required`:
+            {"enrollment_token": "...", "expires_at": "...", "next_step": "..."}
+
+        Observed Perch staging (2026-08, verified from Mac and Windows, HTTP 201):
+            {"token": "...", "next_step_url": "..."}
+        i.e. different key names, and NO expires_at at all.
+
+        Rather than guess which is authoritative, accept either and normalize to
+        the documented names so the rest of the codebase only ever sees the YAML
+        shape. `expires_at` is passed through as None when absent - this method
+        never invents one. Deriving a local expiry, and recording that it was
+        derived, is token_manager's responsibility.
+        """
         data = resp.json()
-        token = data.get("enrollment_token")
+
+        # Documented name first, observed staging alias second.
+        token = data.get("enrollment_token") or data.get("token")
         if not token:
             raise PerchAuthError(
-                "Perch token response did not contain an enrollment_token. "
-                f"Received keys: {sorted(data.keys())}")
-        # NEW YAML: enrollment_token, expires_at AND next_step are all `required`
-        # on the token response. expires_at is authoritative - prefer Perch's
-        # clock over ours. next_step is how an interrupted flow resumes.
+                "Perch token response contained neither 'enrollment_token' (documented) "
+                f"nor 'token' (observed staging). Received keys: {sorted(data.keys())}")
+
+        next_step = data.get("next_step") or data.get("next_step_url")
+
         return {
             "enrollment_token": token,
+            # May legitimately be absent on staging. Never fabricated here.
             "expires_at": data.get("expires_at"),
-            "next_step": data.get("next_step"),
+            "next_step": next_step,
+            # Lets callers and tests see which shape actually arrived without
+            # re-parsing, and keeps the discrepancy visible in the audit trail.
+            "response_shape": "documented" if "enrollment_token" in data else "staging_alias",
             "raw": data,
         }
 
@@ -291,4 +342,7 @@ class PerchHTTPClient(PerchClient):
             raise PerchUnavailableError(f"Perch {PATH_CAPACITY} returned {resp.status_code}.")
         if resp.status_code >= 400:
             raise PerchValidationError(f"Perch rejected the capacity request: {_msg(resp)}")
-        return resp.json()
+        # Staging returns next_step_url where the YAML documents next_step.
+        # Normalize here, at the same layer as _parse_token_response, so nothing
+        # downstream needs to know which spelling arrived.
+        return normalize_capacity_response(resp.json())

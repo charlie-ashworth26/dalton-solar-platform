@@ -24,7 +24,9 @@ projects with priority stacking and we deliberately do not model them.
 import uuid
 from datetime import datetime, timedelta
 
-from services.perch.client import PerchClient, TOKEN_TTL_SECONDS
+from services.perch.client import (
+    PerchClient, TOKEN_TTL_SECONDS, normalize_capacity_response,
+)
 from services.perch.errors import (
     PerchValidationError, PerchUnavailableError,
     PerchNoCapacityError, PerchTokenExpiredError, PerchNotFoundError,
@@ -90,6 +92,10 @@ UPSTREAM_FAILURE_ZIP = "00000"  # -> genuine 5xx, distinct from 503
 
 class PerchMockClient(PerchClient):
     mode = "mock"
+
+    # Test hook: when True, check_capacity emits the observed staging envelope
+    # (next_step_url) instead of the documented one (next_step).
+    emit_staging_alias_shape = False
 
     # Issued tokens: {token: expires_at}. Module-level so the same mock state
     # survives across the per-request client instances the factory hands out.
@@ -179,7 +185,14 @@ class PerchMockClient(PerchClient):
                 f"No open solar project capacity for {utility_slug} in ZIP {zip_code}.")
 
         # Exactly the documented response body - nothing added.
-        return {
+        body = {
             "project_details": dict(fixture["project_details"]),
             "next_step": DOCUMENTED_NEXT_STEP_ENROLL,
         }
+        # Real staging returns `next_step_url` instead. Flipping this flag lets
+        # tests drive the full stack through the observed staging shape rather
+        # than only unit-testing the normalizer.
+        if PerchMockClient.emit_staging_alias_shape:
+            body = {"project_details": body["project_details"],
+                    "next_step_url": body.pop("next_step")}
+        return normalize_capacity_response(body)

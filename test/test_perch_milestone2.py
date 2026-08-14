@@ -627,7 +627,164 @@ def main():
           H.canonical_query_string({"zip_code": "10001", "utility_name": "consolidated-edison-ny"})
           == "utility_name=consolidated-edison-ny&zip_code=10001")
 
-    print(f"\n{'='*74}\nMILESTONE 2.5 - NEWEST YAML ALIGNMENT - ALL CHECKS PASSED\n{'='*74}")
+    # ───────────────────────────────────────────────────────────
+    section("OBSERVED STAGING - token response shape normalization")
+    from services.perch.client import PerchHTTPClient
+
+    class _FakeResp:
+        def __init__(self, payload): self._p = payload
+        def json(self): return self._p
+
+    # (a) The documented YAML shape must still parse exactly as before.
+    doc = PerchHTTPClient._parse_token_response(_FakeResp({
+        "enrollment_token": "550e8400-e29b-41d4-a716-446655440000",
+        "expires_at": "2026-07-09T16:12:00Z",
+        "next_step": "https://api.perchenergy.com/affiliate_partners/v1/enrollments/capacity",
+    }))
+    check("documented shape: enrollment_token parsed",
+          doc["enrollment_token"] == "550e8400-e29b-41d4-a716-446655440000")
+    check("documented shape: expires_at preserved", doc["expires_at"] == "2026-07-09T16:12:00Z")
+    check("documented shape: next_step preserved", doc["next_step"].endswith("/capacity"))
+    check("documented shape: tagged as documented", doc["response_shape"] == "documented")
+
+    # (b) The ACTUAL staging shape (verified against real staging, HTTP 201).
+    stg = PerchHTTPClient._parse_token_response(_FakeResp({
+        "token": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+        "next_step_url": "https://staging.api.perchenergy.com/affiliate_partners/v1/enrollments/capacity",
+    }))
+    check("staging shape: 'token' accepted as enrollment_token alias",
+          stg["enrollment_token"] == "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0")
+    check("staging shape: 'next_step_url' accepted as next_step alias",
+          stg["next_step"].endswith("/enrollments/capacity"))
+    check("staging shape: absent expires_at stays None - never fabricated",
+          stg["expires_at"] is None)
+    check("staging shape: tagged as staging_alias", stg["response_shape"] == "staging_alias")
+
+    # (c) Neither key present -> actionable error naming both.
+    try:
+        PerchHTTPClient._parse_token_response(_FakeResp({"unexpected": "x"}))
+        no_key_raised = False
+    except Exception as e:
+        no_key_raised, no_key_msg = True, str(e)
+    check("a response with neither key raises", no_key_raised)
+    check("the error names both accepted keys",
+          "enrollment_token" in no_key_msg and "token" in no_key_msg)
+    check("and lists the keys actually received", "unexpected" in no_key_msg)
+
+    section("OBSERVED STAGING - expiry provenance when expires_at is absent")
+    from services.perch.token_manager import _resolve_expiry
+    from datetime import datetime as _d, timedelta as _td
+    exp_api, src_api = _resolve_expiry("2026-07-09T16:12:00Z")
+    check("Perch-provided expires_at is marked authoritative", src_api == "api")
+    check("Perch-provided value is used verbatim", exp_api.year == 2026 and exp_api.hour == 16)
+    exp_der, src_der = _resolve_expiry(None)
+    check("absent expires_at yields a DERIVED expiry, not an error", src_der == "derived")
+    delta = (exp_der - _d.now()).total_seconds()
+    check("derived expiry uses the documented 1-hour TTL", 3500 < delta <= 3600)
+    exp_bad, src_bad = _resolve_expiry("not-a-timestamp")
+    check("an unparseable expires_at is treated as absent, not trusted", src_bad == "derived")
+
+    # Provenance must survive into the database and diagnostics, so a derived
+    # value can never be mistaken for something Perch told us.
+    eid_prov = new_draft(c, rep)
+    r = c.post(f"/api/perch/enrollments/{eid_prov}/capacity", headers=rep,
+               json={"email": email_for(eid_prov), "zip_code": "13348",
+                     "utility_name": "national-grid-ny"})
+    check("capacity succeeds", r.status_code == 200)
+    with app.app_context():
+        prov = query_one("SELECT * FROM perch_tokens WHERE enrollment_id=? AND is_active=1",
+                         (eid_prov,))
+    check("expires_at_source persisted", prov["expires_at_source"] in ("api", "derived"))
+    check("mock returns expires_at, so it is marked authoritative",
+          prov["expires_at_source"] == "api")
+    ts = c.get(f"/api/perch/enrollments/{eid_prov}/token-status", headers=admin).get_json()
+    check("token-status exposes expiry provenance", "expires_at_source" in ts)
+    check("token-status flags whether expiry is authoritative",
+          ts["expires_at_is_authoritative"] is True)
+
+    # ───────────────────────────────────────────────────────────
+    section("OBSERVED STAGING - capacity response shape normalization")
+    from services.perch.client import normalize_capacity_response
+
+    _DETAILS = {
+        "small_commercial_capacity_available": False,
+        "lmi_capacity_available": True,
+        "residential_capacity_available": False,
+        "proof_documents_required": True,
+        "savings_percent_for_residential_and_commercial_customers": 25.0,
+        "savings_percent_for_lmi_customers": 25.0,
+    }
+
+    # (a) Documented YAML envelope.
+    ndoc = normalize_capacity_response(
+        {"project_details": dict(_DETAILS), "next_step": "https://api.perchenergy.com/x/enroll"})
+    check("documented envelope: next_step read", ndoc["next_step"].endswith("/enroll"))
+    check("documented envelope: tagged documented", ndoc["response_shape"] == "documented")
+    check("documented envelope: project_details unchanged", ndoc["project_details"] == _DETAILS)
+
+    # (b) The ACTUAL staging envelope, captured from live staging
+    #     (zip 12202 / national-grid-ny).
+    nstg = normalize_capacity_response({
+        "next_step_url": "https://staging.api.perchenergy.com/affiliate_partners/v1/enrollments/enroll",
+        "project_details": dict(_DETAILS),
+    })
+    check("staging envelope: next_step_url accepted as next_step alias",
+          nstg["next_step"].endswith("/enrollments/enroll"))
+    check("staging envelope: tagged staging_alias", nstg["response_shape"] == "staging_alias")
+    check("staging envelope: project_details preserved UNCHANGED",
+          nstg["project_details"] == _DETAILS)
+    check("staging envelope: raw response preserved verbatim",
+          sorted(nstg["raw"].keys()) == ["next_step_url", "project_details"])
+
+    # (c) Both present -> documented wins.
+    nboth = normalize_capacity_response({
+        "project_details": dict(_DETAILS),
+        "next_step": "https://DOCUMENTED", "next_step_url": "https://ALIAS"})
+    check("when both keys are present, the DOCUMENTED one wins",
+          nboth["next_step"] == "https://DOCUMENTED")
+
+    # (d) Neither present -> surfaced, not silently None.
+    nnone = normalize_capacity_response({"project_details": dict(_DETAILS)})
+    check("missing both keys is flagged as no_next_step",
+          nnone["response_shape"] == "no_next_step" and nnone["next_step"] is None)
+
+    section("OBSERVED STAGING - full stack drives the staging envelope end to end")
+    # Not just the normalizer in isolation: push the whole adapter -> workflow
+    # path through the observed staging shape.
+    from services.perch.mock_client import PerchMockClient as _PMC
+    _PMC.emit_staging_alias_shape = True
+    try:
+        eid_alias = new_draft(c, rep)
+        r = c.post(f"/api/perch/enrollments/{eid_alias}/capacity", headers=rep,
+                   json={"email": email_for(eid_alias), "zip_code": "13348",
+                         "utility_name": "national-grid-ny"})
+        check("capacity succeeds when staging uses next_step_url", r.status_code == 200)
+        body = r.get_json()
+        check("capacity_available still True", body["result"]["capacity_available"] is True)
+        check("next_step_url normalized into next_step_url result field",
+              (body["result"]["next_step_url"] or "").endswith("/enroll"))
+        check("workflow still advances to capacity_result",
+              body["workflow"]["step"]["key"] == "capacity_result")
+        check("workflow still resolves Perch's next step to 'enroll'",
+              body["workflow"]["step"]["perch_next_step"]["resolved_step"] == "enroll")
+        check("and it is marked RECOGNIZED, not an unknown step",
+              body["workflow"]["step"]["perch_next_step"]["recognized"] is True)
+        with app.app_context():
+            chk = query_one("SELECT * FROM perch_capacity_checks WHERE enrollment_id=?", (eid_alias,))
+        check("next_step_url persisted", (chk["next_step_url"] or "").endswith("/enroll"))
+        raw_stored = json.loads(chk["raw_response_json"])
+        check("audit stores the GENUINE Perch envelope, not our wrapper",
+              "next_step_url" in raw_stored and "response_shape" not in raw_stored)
+        check("all six project_details survive into storage",
+              chk["savings_percent_lmi"] is not None and chk["proof_documents_required"] == 1)
+    finally:
+        _PMC.emit_staging_alias_shape = False
+
+    check("documented envelope still works after the flag is reset",
+          normalize_capacity_response({"project_details": {}, "next_step": "https://y"})["response_shape"]
+          == "documented")
+
+    print(f"\n{'='*74}\nMILESTONE 2.5 + STAGING SHAPE - ALL CHECKS PASSED\n{'='*74}")
 
 
 if __name__ == "__main__":

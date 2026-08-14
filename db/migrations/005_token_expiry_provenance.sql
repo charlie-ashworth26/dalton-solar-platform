@@ -1,0 +1,19 @@
+-- 005_token_expiry_provenance.sql
+-- Records WHERE a token's expiry came from.
+--
+-- Perch's published YAML marks `expires_at` as a REQUIRED field on the token
+-- response. Observed staging behaviour (2026-08) does NOT return it, and uses
+-- `token` / `next_step_url` instead of `enrollment_token` / `next_step`.
+--
+-- Our proactive-refresh logic needs an expiry, so when the field is absent we
+-- derive one locally. This column exists so a derived value can never be
+-- mistaken for something Perch told us: it is surfaced in token diagnostics
+-- and is the difference between "Perch says this expires at X" and "we are
+-- assuming this expires at X".
+--
+--   'api'     - Perch returned expires_at; value is authoritative
+--   'derived' - Perch omitted it; value is issued_at + the documented TTL,
+--               used only to schedule proactive refresh. The authoritative
+--               expiry signal remains a 403 from Perch, which triggers
+--               refresh-and-retry.
+ALTER TABLE perch_tokens ADD COLUMN expires_at_source TEXT NOT NULL DEFAULT 'api';

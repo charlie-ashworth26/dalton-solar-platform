@@ -64,16 +64,27 @@ def _is_usable(row):
     return expires > (_now() + timedelta(seconds=TOKEN_REFRESH_SKEW_SECONDS))
 
 
-def _server_expiry(expires_at_iso):
-    """Prefer Perch's own expires_at over our local clock. Falls back to
-    now+TTL only if the field is absent, which the spec says it never is."""
+def _resolve_expiry(expires_at_iso):
+    """Returns (expiry_datetime, source).
+
+    source == 'api'     -> Perch returned expires_at; authoritative.
+    source == 'derived' -> Perch omitted it (observed staging behaviour), so we
+                           estimate issued_at + the documented TTL.
+
+    IMPORTANT: a derived value is NOT a claim about Perch's state. It only
+    schedules PROACTIVE refresh. The authoritative expiry signal is a 403 from
+    Perch, which triggers refresh-and-retry - so an over-long estimate is
+    self-correcting and an over-short one costs at most one extra refresh call.
+    The provenance is persisted so the two can never be confused.
+    """
     if expires_at_iso:
         try:
-            return datetime.fromisoformat(str(expires_at_iso).replace("Z", "+00:00")) \
-                .replace(tzinfo=None)
+            return (datetime.fromisoformat(str(expires_at_iso).replace("Z", "+00:00"))
+                    .replace(tzinfo=None), "api")
         except ValueError:
+            # Present but unparseable: treat as absent rather than trusting it.
             pass
-    return _now() + timedelta(seconds=TOKEN_TTL_SECONDS)
+    return _now() + timedelta(seconds=TOKEN_TTL_SECONDS), "derived"
 
 
 def _store(enrollment_id, token, refresh_count=0, expires_at_iso=None):
@@ -81,12 +92,14 @@ def _store(enrollment_id, token, refresh_count=0, expires_at_iso=None):
         "UPDATE perch_tokens SET is_active = 0 WHERE api_mode = ? AND enrollment_id = ?",
         (get_api_mode(), enrollment_id),
     )
-    expires_at = _server_expiry(expires_at_iso).isoformat()
+    expiry_dt, expiry_source = _resolve_expiry(expires_at_iso)
+    expires_at = expiry_dt.isoformat()
     cur = execute(
         """INSERT INTO perch_tokens
-           (access_token, token_type, scope, expires_at, is_active, api_mode, enrollment_id, refresh_count)
-           VALUES (?, 'enrollment_token', NULL, ?, 1, ?, ?, ?)""",
-        (token, expires_at, get_api_mode(), enrollment_id, refresh_count),
+           (access_token, token_type, scope, expires_at, is_active, api_mode,
+            enrollment_id, refresh_count, expires_at_source)
+           VALUES (?, 'enrollment_token', NULL, ?, 1, ?, ?, ?, ?)""",
+        (token, expires_at, get_api_mode(), enrollment_id, refresh_count, expiry_source),
     )
     return query_one("SELECT * FROM perch_tokens WHERE id = ?", (cur.lastrowid,))
 
@@ -221,4 +234,8 @@ def token_status(enrollment_id):
         "is_usable": _is_usable(row),
         "refresh_count": row["refresh_count"],
         "ttl_seconds": TOKEN_TTL_SECONDS,
+        # 'derived' means Perch did not return expires_at and this is our local
+        # estimate - never present it to anyone as Perch-provided.
+        "expires_at_source": row["expires_at_source"],
+        "expires_at_is_authoritative": row["expires_at_source"] == "api",
     }

@@ -220,6 +220,90 @@ def build_proof_docs_multipart(utility_account_number: str, documents: list):
         raise
 
 
+def normalize_contracts_response(data: dict) -> dict:
+    """Normalize the POST /contracts response while preserving the raw body.
+
+    Spec (GetContractsResponse), both fields `required`:
+        {"contract_urls": [{"contract_name","url","expires_at"}, ...],
+         "next_step": "<url>"}
+
+    PRESIGNED URL HANDLING - the spec is explicit:
+        "Do not log URLs in application logs"
+        "Do not store or cache these URLs in your own systems beyond their TTL"
+
+    So the normalized view deliberately does NOT carry `url`. Each contract is
+    exposed as {contract_name, expires_at, url_present} - everything needed for
+    diagnostics, audit, and UI, with none of the secret. The presigned URLs stay
+    only inside `raw`, which callers must treat as ephemeral: use it to download
+    immediately, never persist it, never log it.
+
+    contracts_safe() below is the accessor that guarantees redaction; prefer it
+    over touching `raw` unless you are actually performing the download.
+    """
+    data = data or {}
+    next_step = data.get("next_step") or data.get("next_step_url")
+    raw_contracts = data.get("contract_urls")
+    if not isinstance(raw_contracts, list):
+        raw_contracts = []
+
+    safe = []
+    for item in raw_contracts:
+        if not isinstance(item, dict):
+            # Malformed entry - record its presence without inventing fields.
+            safe.append({"contract_name": None, "expires_at": None,
+                         "url_present": False, "malformed": True})
+            continue
+        url = item.get("url")
+        safe.append({
+            "contract_name": item.get("contract_name"),
+            "expires_at": item.get("expires_at"),
+            # Structural check only. The value never leaves `raw`.
+            "url_present": bool(url) and isinstance(url, str) and url.strip() != "",
+        })
+
+    return {
+        "contracts": safe,
+        "contract_count": len(safe),
+        "next_step": next_step,
+        "response_shape": "documented" if "next_step" in data else (
+            "staging_alias" if "next_step_url" in data else "no_next_step"),
+        "contract_urls_present": "contract_urls" in data,
+        "raw": data,
+    }
+
+
+def contracts_safe(normalized: dict) -> list:
+    """Redacted contract list: never contains a presigned URL.
+
+    Use this for logging, printing, audit records, and anything persisted.
+    """
+    return [dict(c) for c in (normalized or {}).get("contracts", [])]
+
+
+def redact_contract_urls(data):
+    """Returns a deep copy of a /contracts body with every presigned URL replaced.
+
+    For the rare case where the raw body must be recorded (a support ticket, a
+    diagnostic dump) - the shape survives, the secret does not.
+    """
+    if not isinstance(data, dict):
+        return data
+    out = dict(data)
+    items = out.get("contract_urls")
+    if isinstance(items, list):
+        redacted = []
+        for item in items:
+            if isinstance(item, dict):
+                copy = dict(item)
+                if "url" in copy:
+                    copy["url"] = "[REDACTED_PRESIGNED_URL]"
+                redacted.append(copy)
+            else:
+                redacted.append(item)
+        out["contract_urls"] = redacted
+    return out
+
+
 def normalize_proof_docs_response(data: dict) -> dict:
     """Normalize proof-doc success response while preserving the raw body."""
     data = data or {}
@@ -354,6 +438,7 @@ PATH_REFRESH_TOKEN = "/refresh_token"
 PATH_CAPACITY = "/capacity"
 PATH_ENROLL = "/enroll"          # Milestone 3
 PATH_LMI_PROOF_DOCS = "/lmi/proof_docs"
+PATH_CONTRACTS = "/contracts"
 PATH_STATUS = "/status"          # Milestone 6
 PATH_MARKETS_CAPACITY = "/capacity"   # relative to the MARKETS base URL
 
@@ -423,6 +508,18 @@ class PerchClient(ABC):
 
     def submit_proof_docs(self, enrollment_token: str, files: dict) -> dict:
         """POST /lmi/proof_docs - submit LMI proof documents for this session."""
+        raise PerchNotImplementedError("Not implemented by this client.")
+
+    def generate_contracts(self, enrollment_token: str) -> dict:
+        """POST /contracts - generate personalised contract documents.
+
+        Spec: X-Enrollment-Token auth, NO request body. Perch generates and
+        personalises the contracts internally and returns presigned S3 URLs
+        valid for 1 hour.
+
+        Returns the normalized response (see normalize_contracts_response),
+        whose `contracts` list is URL-free by design.
+        """
         raise PerchNotImplementedError("Not implemented by this client.")
 
     def get_market_capacity(self, zip_code: str, utility_slug: str) -> dict:
@@ -686,3 +783,32 @@ class PerchHTTPClient(PerchClient):
             raise attach_response_diagnostics(PerchValidationError(
                 f"Perch rejected the proof documents: {_msg(resp)}"), resp)
         return normalize_proof_docs_response(resp.json())
+
+    def generate_contracts(self, enrollment_token: str) -> dict:
+        """POST /contracts - no request body, X-Enrollment-Token auth only.
+
+        The spec's cURL sends no -d/--form payload, so nothing is transmitted
+        beyond the auth header. Documented statuses are 200, 403, and 500;
+        there is no documented 422 for this endpoint.
+        """
+        requests = self._requests()
+        url = f"{self.enrollment_base_url}{PATH_CONTRACTS}"
+        headers = {ENROLLMENT_TOKEN_HEADER: enrollment_token}
+        try:
+            # No body: the spec documents none.
+            resp = requests.post(url, headers=headers, timeout=max(self.timeout, 60))
+        except Exception as e:
+            raise PerchUnavailableError(f"Could not reach Perch at {url}: {e}") from e
+
+        if resp.status_code == 403:
+            raise attach_response_diagnostics(PerchTokenExpiredError(
+                "Perch returned 403 on /contracts - the enrollment token is expired or invalid."), resp)
+        if resp.status_code >= 500:
+            # Spec: "Contract generation failed. Retry the request."
+            raise attach_response_diagnostics(PerchUnavailableError(
+                f"Perch {PATH_CONTRACTS} returned {resp.status_code} - contract generation "
+                f"failed, retry the request. {_msg(resp)}"), resp)
+        if resp.status_code >= 400:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the contract request: {_msg(resp)}"), resp)
+        return normalize_contracts_response(resp.json())

@@ -1036,6 +1036,117 @@ def main():
     check("proof-doc documented key wins when both are present", pb["next_step"] == "https://DOC")
     check("proof-doc raw response is preserved", pb["raw"]["next_step_url"] == "https://ALIAS")
 
+    # ───────────────────────────────────────────────────────────
+    section("POST /contracts - response normalization")
+    from services.perch.client import (
+        normalize_contracts_response, contracts_safe, redact_contract_urls,
+        PATH_CONTRACTS,
+    )
+
+    _SECRET = ("https://s3.amazonaws.com/perch-contracts/esign-abc"
+               "?X-Amz-Signature=DEADBEEFSECRETSIGNATURE&X-Amz-Expires=3600")
+    _ACCEPT = ("https://staging.api.perchenergy.com/affiliate_partners/v1/"
+               "enrollments/contracts/accept")
+    _documented = {
+        "contract_urls": [
+            {"contract_name": "ESIGN Consent Policy",
+             "url": _SECRET, "expires_at": "2026-05-15T11:30:00Z"},
+            {"contract_name": "Community Solar Garden Subscription Agreement",
+             "url": _SECRET + "-2", "expires_at": "2026-05-15T11:30:00Z"},
+            {"contract_name": "Consent to Disclose Utility Customer Data",
+             "url": _SECRET + "-3", "expires_at": "2026-05-15T11:31:00Z"},
+        ],
+        "next_step": _ACCEPT,
+    }
+
+    n = normalize_contracts_response(_documented)
+    check("endpoint path constant is /contracts", PATH_CONTRACTS == "/contracts")
+    check("multiple contracts counted", n["contract_count"] == 3)
+    check("contract_urls presence flagged", n["contract_urls_present"] is True)
+    check("contract names preserved in order",
+          [c["contract_name"] for c in n["contracts"]] == [
+              "ESIGN Consent Policy",
+              "Community Solar Garden Subscription Agreement",
+              "Consent to Disclose Utility Customer Data"])
+    check("expiration timestamps preserved per contract",
+          [c["expires_at"] for c in n["contracts"]] ==
+          ["2026-05-15T11:30:00Z", "2026-05-15T11:30:00Z", "2026-05-15T11:31:00Z"])
+    check("each URL confirmed structurally present",
+          all(c["url_present"] for c in n["contracts"]))
+    check("next_step normalized", n["next_step"] == _ACCEPT)
+    check("tagged documented", n["response_shape"] == "documented")
+
+    section("POST /contracts - presigned URLs never leak")
+    check("normalized contracts carry NO url key",
+          all("url" not in c for c in n["contracts"]))
+    check("secret absent from the normalized contract list",
+          "DEADBEEFSECRETSIGNATURE" not in json.dumps(n["contracts"]))
+    check("secret absent from contracts_safe() output",
+          "DEADBEEFSECRETSIGNATURE" not in json.dumps(contracts_safe(n)))
+    check("contracts_safe() returns copies, not references into raw",
+          contracts_safe(n) is not n["contracts"])
+    # raw intentionally retains the URLs so the caller can download immediately.
+    check("raw still holds the URLs for immediate download only",
+          "DEADBEEFSECRETSIGNATURE" in json.dumps(n["raw"]))
+    check("redact_contract_urls() scrubs them for safe recording",
+          "DEADBEEFSECRETSIGNATURE" not in json.dumps(redact_contract_urls(_documented)))
+    check("redaction keeps the shape intact",
+          len(redact_contract_urls(_documented)["contract_urls"]) == 3
+          and redact_contract_urls(_documented)["contract_urls"][0]["contract_name"]
+              == "ESIGN Consent Policy")
+    check("redaction leaves the original body untouched",
+          _documented["contract_urls"][0]["url"] == _SECRET)
+
+    section("POST /contracts - malformed and missing payloads")
+    _empty = normalize_contracts_response({"next_step": _ACCEPT})
+    check("missing contract_urls yields zero contracts", _empty["contract_count"] == 0)
+    check("and records that the key was absent", _empty["contract_urls_present"] is False)
+    _wrong = normalize_contracts_response({"contract_urls": "not-a-list", "next_step": _ACCEPT})
+    check("non-list contract_urls does not crash", _wrong["contract_count"] == 0)
+    _partial = normalize_contracts_response({"contract_urls": [
+        {"contract_name": "Missing URL", "expires_at": "2026-05-15T11:30:00Z"},
+        {"contract_name": "Blank URL", "url": "   ", "expires_at": "2026-05-15T11:30:00Z"},
+        "not-an-object"], "next_step": _ACCEPT})
+    check("contract with no url flagged url_present=False",
+          _partial["contracts"][0]["url_present"] is False)
+    check("contract with whitespace-only url flagged False",
+          _partial["contracts"][1]["url_present"] is False)
+    check("non-object entry flagged malformed", _partial["contracts"][2]["malformed"] is True)
+    check("malformed entries still counted", _partial["contract_count"] == 3)
+    check("empty body does not crash", normalize_contracts_response({})["contract_count"] == 0)
+    check("None body does not crash", normalize_contracts_response(None)["contract_count"] == 0)
+
+    section("POST /contracts - staging alias tolerance (existing convention)")
+    # /token, /capacity, /enroll and /lmi/proof_docs all needed this against real
+    # staging, so /contracts follows the same normalization design.
+    _alias = normalize_contracts_response({
+        "contract_urls": [{"contract_name": "X", "url": _SECRET, "expires_at": "Z"}],
+        "next_step_url": _ACCEPT})
+    check("next_step_url accepted as next_step alias", _alias["next_step"] == _ACCEPT)
+    check("tagged staging_alias", _alias["response_shape"] == "staging_alias")
+    _both = normalize_contracts_response({
+        "contract_urls": [], "next_step": "https://DOC", "next_step_url": "https://ALIAS"})
+    check("documented next_step wins when both present", _both["next_step"] == "https://DOC")
+    _neither = normalize_contracts_response({"contract_urls": []})
+    check("neither key is flagged", _neither["response_shape"] == "no_next_step")
+
+    section("POST /contracts - client sends no body, mock declines")
+    _csrc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "services", "perch", "client.py"), encoding="utf-8").read()
+    check("live client posts with no data= or files= payload",
+          "resp = requests.post(url, headers=headers, timeout=max(self.timeout, 60))" in _csrc)
+    check("live client sends X-Enrollment-Token",
+          "ENROLLMENT_TOKEN_HEADER: enrollment_token" in _csrc)
+    check("generate_contracts defined on the client", "def generate_contracts" in _csrc)
+    from services.perch.config import get_perch_client as _gpc2
+    from services.perch.errors import PerchNotImplementedError as _PNI2
+    try:
+        _gpc2().generate_contracts("tok")
+        _declined = False
+    except _PNI2:
+        _declined = True
+    check("mock declines /contracts (out of scope for the mock stack)", _declined)
+
     print(f"\n{'='*74}\nMILESTONE 2.5 + STAGING SHAPE - ALL CHECKS PASSED\n{'='*74}")
 
 

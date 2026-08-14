@@ -11,6 +11,7 @@ WORKFLOW STEP and renders whatever descriptor comes back.
 import json
 import secrets
 import time
+from datetime import datetime
 from urllib.parse import urlparse
 
 from flask import Blueprint, request, jsonify, g, redirect
@@ -20,8 +21,11 @@ from auth import require_auth, require_role
 from helpers import next_enrollment_code, resolve_stored_path
 from services import audit, status_machine
 from services.perch import adapter, workflow, utilities
-from services.perch.errors import PerchError, PerchNoCapacityError, PerchValidationError
+from services.perch.errors import (
+    PerchError, PerchNoCapacityError, PerchValidationError, PerchAmbiguousOutcomeError,
+)
 from services.perch.token_manager import token_status
+from services.perch.client import acceptance_timestamp
 
 bp = Blueprint("perch_routes", __name__, url_prefix="/api/perch")
 
@@ -509,7 +513,7 @@ def generate_perch_contracts(enrollment_id):
         "contract_count": len(safe),
         "next_step_url": result.get("next_step"),
         "next_step_key": step_key,
-        "acceptance_enabled": False,
+        "acceptance_enabled": True,
     })
 
 
@@ -597,3 +601,175 @@ def open_contract_review(token):
     response.headers["Cache-Control"] = "no-store, private"
     response.headers["Pragma"] = "no-cache"
     return response
+
+
+# ─────────────── Contract acceptance (POST /contracts/accept) ───────────────
+
+_MAX_USER_AGENT = 2048
+
+
+def _acceptance_metadata():
+    """Build Perch's required metadata SERVER-SIDE.
+
+    Never taken from browser JSON: a client-supplied IP or timestamp would be
+    unverifiable, and Perch requires the values captured at the moment the
+    customer agreed. Uses the app's existing request/IP behavior - no new
+    X-Forwarded-For trust is introduced here.
+
+    timestamp: delegated to client.acceptance_timestamp(), which applies a small
+    clock-skew allowance. Perch rejected a timestamp generated at the exact
+    instant of submission with 422 "Metadata timestamp cannot be in the future"
+    (observed live 2026-08-14). Sharing that helper with the staging verifier
+    keeps the two provably identical.
+    OPEN QUESTION for Perch: is timezone-aware ISO-8601 accepted/preferred?
+    """
+    user_agent = (request.headers.get("User-Agent") or "")[:_MAX_USER_AGENT]
+    return {
+        "ip_address": request.remote_addr,
+        "timestamp": acceptance_timestamp(),
+        "user_agent": user_agent,
+    }
+
+
+@bp.route("/enrollments/<int:enrollment_id>/contracts/accept", methods=["POST"])
+@require_auth
+@require_role("sales_rep", "admin")
+def accept_perch_contracts(enrollment_id):
+    """Record the customer's acceptance of the whole Perch contract packet.
+
+    Preconditions checked BEFORE any Perch call, so a bad request never reaches
+    Perch: authenticated, authorized, enrollment visible, workflow in the
+    contract-review state, and explicit customer confirmation present.
+    """
+    enrollment, err = _visible(enrollment_id)
+    if err:
+        return err
+
+    data = request.get_json(force=True, silent=True) or {}
+
+    # Dalton-side safety precondition only. NEVER forwarded to Perch - the spec
+    # requires no acknowledgment field; calling the endpoint IS the acceptance.
+    if data.get("customer_confirmed") is not True:
+        return jsonify({
+            "error": "The customer must explicitly confirm they reviewed and agree to the "
+                     "contracts before acceptance can be submitted.",
+            "code": "customer_confirmation_required",
+        }), 400
+
+    state = workflow.get_state(enrollment_id) or {}
+    step_key = state.get("current_step_key")
+
+    # Double-submission protection: if Dalton already definitively recorded a
+    # successful acceptance, do not call Perch again. Perch has not documented
+    # whether /contracts/accept is idempotent.
+    if step_key == "contracts_accepted":
+        try:
+            saved = json.loads(state.get("last_response_json") or "{}")
+        except (TypeError, ValueError):
+            saved = {}
+        return jsonify({
+            "already_accepted": True,
+            "message": saved.get("message"),
+            "perch_status": saved.get("perch_status"),
+            "note": "Contracts were already accepted for this enrollment. Perch was not called again.",
+        })
+
+    # An ambiguous prior attempt must NOT auto-retry. A human decides.
+    if step_key == "contracts_accept_uncertain":
+        return jsonify({
+            "error": "A previous acceptance attempt for this enrollment could not be confirmed. "
+                     "Perch may or may not have recorded it. Check enrollment status with Perch "
+                     "before submitting again.",
+            "code": "acceptance_outcome_uncertain",
+        }), 409
+
+    if step_key != "contracts_review":
+        return jsonify({
+            "error": "Contracts must be generated and under review before they can be accepted.",
+            "code": "wrong_workflow_state",
+            "current_step_key": step_key,
+        }), 409
+
+    metadata = _acceptance_metadata()
+
+    try:
+        result = adapter.accept_contracts(enrollment_id, metadata, user_id=g.current_user["id"])
+    except PerchAmbiguousOutcomeError as e:
+        # Do NOT mark accepted, do NOT mark failed, do NOT retry.
+        workflow.set_state(
+            enrollment_id, "contracts_accept_uncertain",
+            last_response={"uncertain": True, "detail": str(e),
+                           "attempted_at": metadata["timestamp"]},
+        )
+        audit.log("perch_contracts_accept_uncertain", enrollment_id=enrollment_id,
+                  user_id=g.current_user["id"], details={"detail": str(e)},
+                  ip_address=request.remote_addr)
+        status_payload = None
+        try:
+            # GET /status is side-effect free, so it is safe even here - and it
+            # is the only way to discover what actually happened.
+            status_payload = adapter.get_status(enrollment_id, user_id=g.current_user["id"])
+        except PerchError:
+            pass
+        return jsonify({
+            "error": str(e),
+            "perch_error": type(e).__name__,
+            "outcome": "uncertain",
+            "retry_safe": False,
+            "perch_status": _safe_status(status_payload),
+        }), 502
+    except PerchError as e:
+        return _perch_error_response(enrollment_id, "contracts_accept", e)
+
+    # 202 accepted. Perch processes asynchronously, so 202 alone does not mean
+    # every downstream step finished - confirm via GET /status.
+    status_payload = None
+    try:
+        status_payload = adapter.get_status(enrollment_id, user_id=g.current_user["id"])
+    except PerchError:
+        status_payload = None
+
+    safe_status = _safe_status(status_payload)
+    workflow.set_state(
+        enrollment_id, "contracts_accepted",
+        next_step_url=None, recognized=True,
+        last_response={"message": result.get("message"), "perch_status": safe_status},
+    )
+    audit.log("perch_contracts_accepted", enrollment_id=enrollment_id,
+              user_id=g.current_user["id"],
+              details={"message": result.get("message"),
+                       "perch_completed": (safe_status or {}).get("completed")},
+              ip_address=request.remote_addr)
+
+    return jsonify({
+        "accepted": True,
+        "message": result.get("message"),
+        "perch_status": safe_status,
+        "token_was_refreshed": result.get("token_was_refreshed", False),
+    })
+
+
+def _safe_status(status_payload):
+    """URL-free projection of GET /status for JSON, workflow and audit."""
+    if not status_payload:
+        return None
+    return {
+        "completed_steps": status_payload.get("completed_steps"),
+        "remaining_steps": status_payload.get("remaining_steps"),
+        "completed": status_payload.get("completed"),
+        "next_step_key": _next_key(status_payload.get("next_step"))[0],
+    }
+
+
+@bp.route("/enrollments/<int:enrollment_id>/perch-status", methods=["GET"])
+@require_auth
+def perch_enrollment_status(enrollment_id):
+    """Read-through to Perch GET /status. Side-effect free and safe to poll."""
+    enrollment, err = _visible(enrollment_id)
+    if err:
+        return err
+    try:
+        status_payload = adapter.get_status(enrollment_id, user_id=g.current_user["id"])
+    except PerchError as e:
+        return _perch_error_response(enrollment_id, "status", e)
+    return jsonify(_safe_status(status_payload) or {})

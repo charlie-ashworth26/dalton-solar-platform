@@ -381,6 +381,7 @@ let perchContracts = [];
 function freshPerchContext(){
   return {email:'', capacityZip:'', utilitySlug:'', utilityDisplay:'', projectDetails:null,
           nextStepKey:null, enrollmentSubmitted:false, proofSubmitted:false, contractsGenerated:false,
+          acceptanceEnabled:false, acceptanceSubmitted:false, acceptanceInFlight:false,
           agreementBackStep:3};
 }
 let perchContext = freshPerchContext();
@@ -754,7 +755,7 @@ function hydrateStep(n){
     if(perchContext.nextStepKey === 'proof_docs') prepareLmiForPerch();
     checkLmiReady();
   }
-  if(n===5 && perchContracts.length){ renderPerchContracts(); }
+  if(n===5 && perchContracts.length){ renderPerchContracts(); updateAcceptButtonState(); }
 }
 
 function currentUtilityRule(){ return utilityRules[perchContext.utilitySlug] || null; }
@@ -1312,6 +1313,7 @@ async function generateContractsAndOpenAgreement(backStep){
       perchContracts=body.contracts || [];
       perchContext.contractsGenerated=true;
       perchContext.contractsNextStepKey=body.next_step_key;
+      perchContext.acceptanceEnabled = body.acceptance_enabled === true;
     }catch(err){
       if(sourceErr){ sourceErr.textContent=err.message; sourceErr.style.display='block'; }
       throw err;
@@ -1361,6 +1363,72 @@ async function reviewPerchContract(index){
     errEl.textContent=err.message; errEl.style.display='block';
   }
 }
+function updateAcceptButtonState(){
+  const btn=document.getElementById('contract-accept-btn');
+  const chk=document.getElementById('contract-confirm-check');
+  if(!btn || !chk) return;
+  if(perchContext.acceptanceSubmitted){
+    btn.disabled=true; btn.textContent='Contracts accepted'; chk.disabled=true; return;
+  }
+  if(perchContext.acceptanceInFlight){ btn.disabled=true; return; }
+  // Enabled only when the backend says acceptance is available AND the customer
+  // has explicitly confirmed. The backend re-checks confirmation independently.
+  btn.disabled = !(perchContext.acceptanceEnabled && chk.checked);
+}
+
+async function acceptPerchContracts(){
+  const btn=document.getElementById('contract-accept-btn');
+  const chk=document.getElementById('contract-confirm-check');
+  const errEl=document.getElementById('contract-review-error');
+  const statusEl=document.getElementById('contract-accept-status');
+  errEl.style.display='none'; statusEl.style.display='none';
+
+  if(!chk || !chk.checked){
+    errEl.textContent='The customer must confirm they reviewed and agree to the contracts.';
+    errEl.style.display='block'; return;
+  }
+  // Double-submission protection: block re-entry for the whole request.
+  if(perchContext.acceptanceInFlight || perchContext.acceptanceSubmitted) return;
+  perchContext.acceptanceInFlight=true;
+  btn.disabled=true; btn.textContent='Submitting acceptance…';
+
+  let body;
+  try{
+    body=await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/contracts/accept', {
+      method:'POST', body:JSON.stringify({customer_confirmed:true})
+    });
+  }catch(err){
+    perchContext.acceptanceInFlight=false;
+    btn.textContent='Accept contracts';
+    errEl.textContent=err.message; errEl.style.display='block';
+    // Deliberately NOT re-enabling on an uncertain outcome: a second click
+    // could double-submit an acceptance Perch may already have recorded.
+    if(/uncertain|could not be confirmed/i.test(err.message || '')){
+      btn.disabled=true;
+      statusEl.textContent='Do not resubmit. Check this enrollment with Perch before trying again.';
+      statusEl.style.display='block';
+    }else{
+      updateAcceptButtonState();
+    }
+    return;
+  }
+
+  perchContext.acceptanceInFlight=false;
+  perchContext.acceptanceSubmitted=true;
+  btn.textContent='Contracts accepted'; btn.disabled=true; chk.disabled=true;
+
+  const st=body.perch_status || null;
+  let msg=body.message || 'Contracts accepted.';
+  if(st && st.completed===true){
+    msg += ' Perch reports this enrollment is complete.';
+  }else if(st){
+    const remaining=(st.remaining_steps||[]).join(', ');
+    msg += remaining ? (' Perch still has outstanding steps: '+remaining+'.')
+                     : ' Perch has not yet reported completion.';
+  }
+  statusEl.textContent=msg; statusEl.style.display='block';
+}
+
 function backFromAgreement(){ goStep(perchContext.agreementBackStep || 3); }
 function sendAgreement(){
   const errEl=document.getElementById('contract-review-error');

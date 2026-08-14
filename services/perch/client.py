@@ -23,12 +23,13 @@ Auth (documented):
 import os
 import json
 from abc import ABC, abstractmethod
+from datetime import datetime, timedelta
 
 from services.perch import hmac_auth
 from services.perch.errors import (
     PerchAuthError, PerchUnavailableError, PerchValidationError,
     PerchTokenExpiredError, PerchNoCapacityError, PerchNotImplementedError,
-    PerchNotFoundError, PerchEnrollmentInProgressError,
+    PerchNotFoundError, PerchEnrollmentInProgressError, PerchAmbiguousOutcomeError,
 )
 
 
@@ -304,6 +305,78 @@ def redact_contract_urls(data):
     return out
 
 
+# ─────────────── Contract acceptance timestamp ───────────────
+# Perch rejects a timestamp it considers to be in the future:
+#   422 {"error":"unprocessable_entity","message":"Metadata timestamp cannot be in the future"}
+# observed live on 2026-08-14 with a timestamp generated at the exact instant of
+# submission (2026-08-14 15:29:47.6065). Perch parsed it and applied the
+# not-in-the-future rule, so the FORMAT is accepted - only the value was wrong.
+#
+# Cause: ordinary clock skew between the Dalton host and Perch's server, plus
+# network latency, means "now" can land marginally ahead of Perch's clock.
+#
+# Fix: emit a timestamp a few seconds in the past. 10s comfortably absorbs
+# typical NTP skew while remaining far inside Perch's documented 24-hour
+# maximum age, so the value is still an honest record of when the customer
+# agreed (they clicked moments earlier, not 10 seconds in the future).
+ACCEPTANCE_CLOCK_SKEW_SECONDS = 10
+
+# Format matches the spec's own example ("2026-07-03 15:20:36.6717"): space
+# separated, no timezone, microseconds truncated to 4 digits. Confirmed
+# parseable by staging - do not change without evidence.
+ACCEPTANCE_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
+
+
+def acceptance_timestamp(now=None):
+    """Return the timestamp string for POST /contracts/accept.
+
+    Single source of truth: the Dalton route and the staging verifier both call
+    this, so the verifier provably exercises production behavior rather than a
+    near-copy that can drift.
+    """
+    base = now or datetime.now()
+    stamped = base - timedelta(seconds=ACCEPTANCE_CLOCK_SKEW_SECONDS)
+    return stamped.strftime(ACCEPTANCE_TIMESTAMP_FORMAT)[:-2]
+
+
+def normalize_accept_response(data: dict) -> dict:
+    """Normalize the POST /contracts/accept response.
+
+    Spec (AcceptContractsResponse): {"message": "..."} with `message` required.
+    Deliberately NO next_step key - the spec states "No `next_step` is returned
+    - the enrollment is complete."
+    """
+    data = data or {}
+    return {"message": data.get("message"), "raw": data}
+
+
+def normalize_status_response(data: dict) -> dict:
+    """Normalize the GET /status response.
+
+    Spec (enrollmentStatusResponse) requires completed_steps, remaining_steps,
+    completed and next_step. next_step is nullable and becomes null once the
+    enrollment is complete, so a missing/None value is meaningful, not an error.
+
+    next_step/next_step_url alias tolerance matches every other endpoint - real
+    staging has used the *_url spelling on /token, /capacity, /enroll,
+    /lmi/proof_docs and /contracts.
+    """
+    data = data or {}
+    next_step = data.get("next_step") or data.get("next_step_url")
+    completed_steps = data.get("completed_steps")
+    remaining_steps = data.get("remaining_steps")
+    return {
+        "completed_steps": completed_steps if isinstance(completed_steps, list) else [],
+        "remaining_steps": remaining_steps if isinstance(remaining_steps, list) else [],
+        # Only a literal True counts as complete - never coerce a truthy value.
+        "completed": data.get("completed") is True,
+        "next_step": next_step,
+        "response_shape": "documented" if "next_step" in data else (
+            "staging_alias" if "next_step_url" in data else "no_next_step"),
+        "raw": data,
+    }
+
+
 def normalize_proof_docs_response(data: dict) -> dict:
     """Normalize proof-doc success response while preserving the raw body."""
     data = data or {}
@@ -440,6 +513,7 @@ PATH_ENROLL = "/enroll"          # Milestone 3
 PATH_LMI_PROOF_DOCS = "/lmi/proof_docs"
 PATH_CONTRACTS = "/contracts"
 PATH_STATUS = "/status"          # Milestone 6
+PATH_CONTRACTS_ACCEPT = "/contracts/accept"
 PATH_MARKETS_CAPACITY = "/capacity"   # relative to the MARKETS base URL
 
 # NEW YAML: "Expires 1 hour after issuance (see `expires_at` on the token
@@ -520,6 +594,18 @@ class PerchClient(ABC):
         Returns the normalized response (see normalize_contracts_response),
         whose `contracts` list is URL-free by design.
         """
+        raise PerchNotImplementedError("Not implemented by this client.")
+
+    def accept_contracts(self, enrollment_token: str, metadata: dict) -> dict:
+        """POST /contracts/accept - record acceptance of the WHOLE packet.
+
+        `metadata` must contain exactly ip_address, timestamp, user_agent. The
+        spec requires no contract list, no acknowledgment flag, no files.
+        """
+        raise PerchNotImplementedError("Not implemented by this client.")
+
+    def get_status(self, enrollment_token: str) -> dict:
+        """GET /status - which steps are done and which remain. Side-effect free."""
         raise PerchNotImplementedError("Not implemented by this client.")
 
     def get_market_capacity(self, zip_code: str, utility_slug: str) -> dict:
@@ -812,3 +898,72 @@ class PerchHTTPClient(PerchClient):
             raise attach_response_diagnostics(PerchValidationError(
                 f"Perch rejected the contract request: {_msg(resp)}"), resp)
         return normalize_contracts_response(resp.json())
+
+    def accept_contracts(self, enrollment_token: str, metadata: dict) -> dict:
+        """POST /contracts/accept - JSON body, X-Enrollment-Token auth, no HMAC.
+
+        Body is exactly {"metadata": {ip_address, timestamp, user_agent}}.
+
+        IDEMPOTENCY GUARDRAIL: Perch has not documented whether this endpoint is
+        idempotent, so a transport failure, timeout, or 5xx raises
+        PerchAmbiguousOutcomeError rather than a retryable error - the request
+        may already have been processed. The caller must resolve the true state
+        via GET /status instead of resending. A 403 still raises
+        PerchTokenExpiredError because that is a DEFINITE rejection (Perch did
+        not process it), so the documented refresh-and-retry-once path is safe.
+        """
+        requests = self._requests()
+        url = f"{self.enrollment_base_url}{PATH_CONTRACTS_ACCEPT}"
+        headers = {ENROLLMENT_TOKEN_HEADER: enrollment_token,
+                   "Content-Type": "application/json"}
+        payload = {"metadata": {
+            "ip_address": metadata.get("ip_address"),
+            "timestamp": metadata.get("timestamp"),
+            "user_agent": metadata.get("user_agent"),
+        }}
+        try:
+            resp = requests.post(url, json=payload, headers=headers,
+                                 timeout=max(self.timeout, 60))
+        except Exception as e:
+            raise PerchAmbiguousOutcomeError(
+                f"Contract acceptance could not be confirmed - the request to {url} "
+                f"failed in transport ({e}). It may or may not have been processed. "
+                f"Do not resend; check GET /status.") from e
+
+        if resp.status_code == 403:
+            raise attach_response_diagnostics(PerchTokenExpiredError(
+                "Perch returned 403 on /contracts/accept - token expired or invalid."), resp)
+        if resp.status_code == 422:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the acceptance metadata (422): {_msg(resp)}"), resp)
+        if resp.status_code >= 500:
+            raise attach_response_diagnostics(PerchAmbiguousOutcomeError(
+                f"Perch {PATH_CONTRACTS_ACCEPT} returned {resp.status_code}. Acceptance may "
+                f"or may not have been recorded. Do not resend; check GET /status. "
+                f"{_msg(resp)}"), resp)
+        if resp.status_code >= 400:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the acceptance: {_msg(resp)}"), resp)
+        # Documented success is 202 Accepted (async), not 200.
+        return normalize_accept_response(resp.json())
+
+    def get_status(self, enrollment_token: str) -> dict:
+        """GET /status - side-effect free, safe to poll."""
+        requests = self._requests()
+        url = f"{self.enrollment_base_url}{PATH_STATUS}"
+        headers = {ENROLLMENT_TOKEN_HEADER: enrollment_token}
+        try:
+            resp = requests.get(url, headers=headers, timeout=self.timeout)
+        except Exception as e:
+            raise PerchUnavailableError(f"Could not reach Perch at {url}: {e}") from e
+
+        if resp.status_code == 403:
+            raise attach_response_diagnostics(PerchTokenExpiredError(
+                "Perch returned 403 on /status - token expired or invalid."), resp)
+        if resp.status_code >= 500:
+            raise attach_response_diagnostics(PerchUnavailableError(
+                f"Perch {PATH_STATUS} returned {resp.status_code}. {_msg(resp)}"), resp)
+        if resp.status_code >= 400:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the status request: {_msg(resp)}"), resp)
+        return normalize_status_response(resp.json())

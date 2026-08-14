@@ -77,3 +77,17 @@ class PerchEnrollmentInProgressError(PerchError):
     NOT a retry of POST /token.
     """
     http_status = 409  # Conflict is the honest local mapping; Perch returns 422
+
+
+class PerchAmbiguousOutcomeError(PerchError):
+    """The request may or may not have reached Perch and been processed.
+
+    Raised for transport failures, timeouts, dropped connections, and 5xx on
+    NON-IDEMPOTENT operations - currently POST /contracts/accept.
+
+    Perch has NOT documented whether /contracts/accept is idempotent, so a
+    blind retry could double-submit an acceptance. Callers must NOT retry.
+    They should surface the uncertainty, attempt GET /status (safe, side-effect
+    free) to discover the true state, and never fabricate success.
+    """
+    http_status = 502

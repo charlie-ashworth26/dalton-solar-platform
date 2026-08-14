@@ -34,7 +34,8 @@ init_db(reset=True)
 from app import app
 from routes import document_routes
 import seed
-from services.perch import adapter
+from services.perch import adapter, workflow
+from services.perch.errors import PerchAmbiguousOutcomeError
 from services.perch.client import normalize_contracts_response
 
 # Keep uploaded test bytes out of the developer's real uploads/ directory.
@@ -206,8 +207,11 @@ def main():
         check("Agreement bridge returns safe contract metadata", r.status_code == 200 and contract_json["contract_count"] == 2)
         check("contract packet JSON contains no Perch presigned URL",
               "TOPSECRET" not in r.get_data(as_text=True) and all("url" not in c for c in contract_json["contracts"]))
-        check("contract acceptance remains disabled",
-              contract_json["acceptance_enabled"] is False and contract_json["next_step_key"] == "contracts_accept")
+        # INTENTIONALLY REPLACED: acceptance was previously disabled as a safety
+        # measure. Perch (Matthew Bowers) confirmed staging acceptance is safe,
+        # so acceptance is now implemented and enabled.
+        check("contract acceptance is now enabled",
+              contract_json["acceptance_enabled"] is True and contract_json["next_step_key"] == "contracts_accept")
 
         st = query_one("SELECT last_response_json FROM perch_workflow_state WHERE enrollment_id=?", (eid,))
         calls = query("SELECT request_json,response_json,error_message FROM perch_api_calls WHERE enrollment_id=?", (eid,))
@@ -224,9 +228,115 @@ def main():
         r3 = client.get(review_url, follow_redirects=False)
         check("contract review capability is one-time", r3.status_code == 410)
 
+        # INTENTIONALLY REPLACED: the route now exists. What must hold is that it
+        # is properly guarded - it must never reach Perch without authentication,
+        # authorization, correct workflow state, and explicit confirmation.
         rules = {rule.rule for rule in app.url_map.iter_rules()}
-        check("there is no executable Dalton /contracts/accept route",
-              not any("contracts/accept" in rule for rule in rules))
+        check("Dalton /contracts/accept route now exists",
+              any("contracts/accept" in rule for rule in rules))
+
+        accept_url = f"/api/perch/enrollments/{eid}/contracts/accept"
+        perch_called = {"n": 0}
+        original_accept = adapter.accept_contracts
+        original_status = adapter.get_status
+
+        def _spy_accept(enrollment_id, metadata, user_id=None):
+            perch_called["n"] += 1
+            captured["accept_metadata"] = metadata
+            return {"message": "Contracts accepted successfully", "raw": {}}
+
+        def _fake_status(enrollment_id, user_id=None):
+            return {"completed_steps": ["generate_enrollment_token", "capacity_check",
+                                        "enroll_utility_accounts", "submit_proof_documents",
+                                        "generate_contracts", "submit_contracts_acceptance"],
+                    "remaining_steps": [], "completed": True, "next_step": None,
+                    "raw": {"secret_probe": "TOPSECRET"}}
+
+        adapter.accept_contracts = _spy_accept
+        adapter.get_status = _fake_status
+        try:
+            r = client.post(accept_url, json={"customer_confirmed": True})
+            check("unauthenticated acceptance is rejected", r.status_code == 401)
+            check("... and Perch was not called", perch_called["n"] == 0)
+
+            r = client.post(accept_url, headers=headers, json={})
+            check("missing customer_confirmed is rejected", r.status_code == 400)
+            check("... and Perch was not called", perch_called["n"] == 0)
+
+            r = client.post(accept_url, headers=headers, json={"customer_confirmed": "yes"})
+            check("non-boolean customer_confirmed is rejected", r.status_code == 400)
+            check("... and Perch was not called", perch_called["n"] == 0)
+
+            # Wrong workflow state must short-circuit before any Perch call.
+            workflow.set_state(eid, "service_area")
+            r = client.post(accept_url, headers=headers, json={"customer_confirmed": True})
+            check("wrong workflow state is rejected", r.status_code == 409)
+            check("... and Perch was not called", perch_called["n"] == 0)
+            workflow.set_state(eid, "contracts_review",
+                               last_response={"contracts": [], "contract_count": 2})
+
+            r = client.post(accept_url, headers=headers, json={"customer_confirmed": True})
+            body = r.get_json()
+            check("legitimate acceptance succeeds", r.status_code == 200 and body["accepted"] is True)
+            check("Perch was called exactly once", perch_called["n"] == 1)
+            check("Perch message surfaced", body["message"] == "Contracts accepted successfully")
+            check("post-accept status reported complete", body["perch_status"]["completed"] is True)
+            check("acceptance response leaks no presigned URL", "TOPSECRET" not in r.get_data(as_text=True))
+
+            md = captured["accept_metadata"]
+            check("metadata built server-side: exactly the three Perch fields",
+                  set(md.keys()) == {"ip_address", "timestamp", "user_agent"})
+            check("customer_confirmed is NOT forwarded to Perch", "customer_confirmed" not in md)
+            check("server-side IP used", md["ip_address"] is not None)
+
+            st = query_one("SELECT current_step_key,last_response_json FROM perch_workflow_state WHERE enrollment_id=?", (eid,))
+            check("workflow records acceptance", st["current_step_key"] == "contracts_accepted")
+            check("workflow persistence leaks no presigned URL", "TOPSECRET" not in (st["last_response_json"] or ""))
+            # NOTE: adapter.accept_contracts is stubbed here, so no perch_api_calls
+            # row can exist - that row is written inside the adapter. What this
+            # layer owns is the audit_logs entry written by the ROUTE, so assert
+            # on that. Adapter-level api_call recording is exercised where the
+            # real adapter runs (see the client-layer tests in
+            # test_perch_milestone2.py).
+            acc_audit = query("SELECT action,details_json FROM audit_logs WHERE enrollment_id=? AND action='perch_contracts_accepted'", (eid,))
+            check("route writes an acceptance audit entry", len(acc_audit) >= 1)
+            check("acceptance audit leaks no presigned URL",
+                  "TOPSECRET" not in "\n".join(str(dict(x)) for x in acc_audit))
+
+            # Double-submission protection.
+            r = client.post(accept_url, headers=headers, json={"customer_confirmed": True})
+            check("second acceptance does not call Perch again", perch_called["n"] == 1)
+            check("... and reports already_accepted", r.get_json().get("already_accepted") is True)
+        finally:
+            adapter.accept_contracts = original_accept
+            adapter.get_status = original_status
+
+        # Ambiguous outcome must NOT auto-retry and must NOT claim success.
+        workflow.set_state(eid, "contracts_review", last_response={"contracts": [], "contract_count": 2})
+        amb_calls = {"n": 0}
+
+        def _amb_accept(enrollment_id, metadata, user_id=None):
+            amb_calls["n"] += 1
+            raise PerchAmbiguousOutcomeError("connection dropped after send")
+
+        adapter.accept_contracts = _amb_accept
+        adapter.get_status = original_status
+        try:
+            r = client.post(accept_url, headers=headers, json={"customer_confirmed": True})
+            body = r.get_json()
+            check("ambiguous acceptance returns an error, not success", r.status_code == 502)
+            check("ambiguous outcome is labelled uncertain", body.get("outcome") == "uncertain")
+            check("ambiguous outcome is explicitly not retry-safe", body.get("retry_safe") is False)
+            check("ambiguous acceptance called Perch only once (no blind retry)", amb_calls["n"] == 1)
+            st = query_one("SELECT current_step_key FROM perch_workflow_state WHERE enrollment_id=?", (eid,))
+            check("workflow marks uncertainty rather than accepted",
+                  st["current_step_key"] == "contracts_accept_uncertain")
+            r = client.post(accept_url, headers=headers, json={"customer_confirmed": True})
+            check("a retry after an uncertain outcome is blocked", r.status_code == 409)
+            check("... and Perch was still called only once", amb_calls["n"] == 1)
+        finally:
+            adapter.accept_contracts = original_accept
+            adapter.get_status = original_status
     finally:
         adapter.create_enrollment = original_enroll
         adapter.submit_proof_docs = original_proof

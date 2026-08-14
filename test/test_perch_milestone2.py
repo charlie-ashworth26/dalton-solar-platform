@@ -353,7 +353,15 @@ def main():
     check("existing Contact/password screen is preserved", 'id="step-contact"' in html and 'id="c-pass"' in html and 'id="c-pass-confirm"' in html)
     check("Contact email is displayed but not requested a second time", 'id="c-email"' in html and 'id="c-email" placeholder="name@email.com" readonly' in html)
     check("existing LMI upload screen is preserved", 'id="lmi-dropzone"' in html and 'id="lmi-file"' in html)
-    check("existing Agreement screen is reused for Perch contract review", 'id="perch-contract-list"' in html and 'Acceptance not enabled' in html)
+    # INTENTIONALLY UPDATED: "Acceptance not enabled" was removed when contract
+    # acceptance was implemented. The screen must still be the SAME existing
+    # Agreement step (not a new flow), now carrying the confirm + accept controls.
+    check("existing Agreement screen is reused for Perch contract review",
+          'id="perch-contract-list"' in html
+          and 'id="contract-confirm-check"' in html
+          and 'id="contract-accept-btn"' in html)
+    check("existing Review buttons were not removed", 'reviewPerchContract' in js)
+    check("no new frontend flow was introduced", 'id="pre-send"' in html)
     check("renderer builds fields from the descriptor", "function renderField" in js)
     check("renderer builds panels from the descriptor", "function renderPanel" in js)
     check("validation is descriptor-driven", "f.validation.pattern" in js)
@@ -366,8 +374,15 @@ def main():
           "document_id:state.bill.documentId" in js)
     check("/enroll branches on Perch next_step instead of a hardcoded LMI page",
           "continueFromPerchNextStep" in js and "next_step_key" in js)
-    check("contract review is explicit and acceptance stays disabled",
-          "/contracts/review" in js and "/contracts/accept" not in js)
+    # INTENTIONALLY UPDATED: acceptance is now implemented. Review must remain a
+    # separate explicit action (viewing != accepting), and acceptance must be
+    # gated behind an explicit customer confirmation.
+    check("contract review remains an explicit, separate action", "/contracts/review" in js)
+    check("acceptance is now wired in the GUI", "/contracts/accept" in js)
+    check("acceptance sends the Dalton-side confirmation precondition",
+          "customer_confirmed" in js)
+    check("acceptance guards against duplicate clicks while in flight",
+          "acceptanceInFlight" in js)
 
     section("ADAPTER BOUNDARY still holds")
     routes_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -1160,6 +1175,299 @@ def main():
     except _PNI2:
         _declined = True
     check("mock declines /contracts (out of scope for the mock stack)", _declined)
+
+    # ───────────────────────────────────────────────────────────
+    section("POST /contracts/accept - request contract")
+    from services.perch.client import (
+        normalize_accept_response, normalize_status_response, PATH_CONTRACTS_ACCEPT,
+    )
+    from services.perch.errors import PerchAmbiguousOutcomeError
+
+    check("endpoint path constant", PATH_CONTRACTS_ACCEPT == "/contracts/accept")
+
+    acc = normalize_accept_response({"message": "Contracts accepted successfully"})
+    check("message surfaced", acc["message"] == "Contracts accepted successfully")
+    check("raw preserved", acc["raw"]["message"] == "Contracts accepted successfully")
+    # Spec: "No next_step is returned - the enrollment is complete."
+    check("no next_step key invented on the accept response", "next_step" not in acc)
+    check("empty body does not crash", normalize_accept_response({})["message"] is None)
+    check("None body does not crash", normalize_accept_response(None)["message"] is None)
+
+    section("POST /contracts/accept - only the three documented metadata fields")
+    _sent = {}
+
+    class _AcceptResp:
+        status_code = 202
+        headers = {"Content-Type": "application/json"}
+        text = '{"message":"Contracts accepted successfully"}'
+        def json(self): return {"message": "Contracts accepted successfully"}
+
+    class _FakeRequests:
+        """Captures exactly what the client transmits."""
+        def __init__(self, resp=None, raise_exc=None):
+            self._resp = resp or _AcceptResp()
+            self._raise = raise_exc
+        def post(self, url, json=None, headers=None, timeout=None, **kw):
+            if self._raise:
+                raise self._raise
+            _sent.clear()
+            _sent.update({"url": url, "json": json, "headers": headers or {}})
+            return self._resp
+        def get(self, url, headers=None, timeout=None, **kw):
+            _sent.clear()
+            _sent.update({"url": url, "headers": headers or {}})
+            return self._resp
+
+    from services.perch.client import PerchHTTPClient as _HTTP
+    _c = _HTTP("https://staging.example/enrollments", "https://staging.example/markets",
+               "KEY", "SECRET")
+    _c._requests = lambda: _FakeRequests()
+
+    result = _c.accept_contracts("tok-123", {
+        "ip_address": "203.0.113.42",
+        "timestamp": "2026-08-14 10:00:00.1234",
+        "user_agent": "Mozilla/5.0 (Test)"})
+    check("HTTP 202 treated as success", result["message"] == "Contracts accepted successfully")
+    check("posts to /contracts/accept", _sent["url"].endswith("/contracts/accept"))
+    check("body has exactly one top-level key: metadata", list(_sent["json"].keys()) == ["metadata"])
+    check("metadata has exactly the three documented fields",
+          set(_sent["json"]["metadata"].keys()) == {"ip_address", "timestamp", "user_agent"})
+    check("no invented contract ids / acceptance arrays / ack flags",
+          not any(k in json.dumps(_sent["json"]) for k in
+                  ("contract_id", "accepted_contracts", "acknowledged", "customer_confirmed")))
+    check("X-Enrollment-Token sent", _sent["headers"].get("X-Enrollment-Token") == "tok-123")
+    check("no HMAC headers on this session endpoint",
+          not any(h.startswith("X-HMAC") for h in _sent["headers"]))
+
+    section("POST /contracts/accept - IPv4, IPv6 and User-Agent limit")
+    _c.accept_contracts("t", {"ip_address": "198.51.100.7", "timestamp": "x", "user_agent": "ua"})
+    check("IPv4 transmitted unchanged", _sent["json"]["metadata"]["ip_address"] == "198.51.100.7")
+    _v6 = "2001:0db8:85a3:0000:0000:8a2e:0370:7334"
+    _c.accept_contracts("t", {"ip_address": _v6, "timestamp": "x", "user_agent": "ua"})
+    check("IPv6 transmitted unchanged", _sent["json"]["metadata"]["ip_address"] == _v6)
+
+    # The route truncates to the documented 2048 maximum.
+    import routes.perch_routes as _pr
+    check("route enforces the documented 2048-char user-agent maximum",
+          _pr._MAX_USER_AGENT == 2048)
+    _long = "U" * 5000
+    check("over-long user agent truncates to exactly 2048", len(_long[:_pr._MAX_USER_AGENT]) == 2048)
+
+    section("POST /contracts/accept - error handling and the idempotency guardrail")
+
+    class _Resp:
+        def __init__(self, code, body=None, text=None):
+            self.status_code = code
+            self.headers = {"Content-Type": "application/json"}
+            self.text = text if text is not None else json.dumps(body or {})
+            self._body = body or {}
+        def json(self): return self._body
+
+    from services.perch.errors import PerchTokenExpiredError as _TE, PerchValidationError as _VE
+    _c._requests = lambda: _FakeRequests(resp=_Resp(403, {"error": "forbidden", "message": "expired"}))
+    try:
+        _c.accept_contracts("t", {"ip_address": "1.1.1.1", "timestamp": "x", "user_agent": "u"})
+        _r403 = None
+    except _TE as e:
+        _r403 = e
+    # 403 is a DEFINITE rejection - Perch did not process it - so refresh+retry is safe.
+    check("403 raises PerchTokenExpiredError (definite rejection, retry-once safe)", _r403 is not None)
+    check("403 carries response diagnostics", getattr(_r403, "status_code", None) == 403)
+
+    _c._requests = lambda: _FakeRequests(resp=_Resp(422, {"errors": [
+        {"field": "metadata.timestamp", "code": "invalid", "message": "timestamp is in the future"}]}))
+    try:
+        _c.accept_contracts("t", {"ip_address": "1.1.1.1", "timestamp": "x", "user_agent": "u"})
+        _r422 = None
+    except _VE as e:
+        _r422 = e
+    check("422 raises PerchValidationError", _r422 is not None)
+    check("422 message names the offending field", "metadata.timestamp" in str(_r422))
+    check("422 is NOT treated as ambiguous", not isinstance(_r422, PerchAmbiguousOutcomeError))
+
+    # Ambiguous outcomes must never be retryable.
+    _c._requests = lambda: _FakeRequests(raise_exc=OSError("connection reset"))
+    try:
+        _c.accept_contracts("t", {"ip_address": "1.1.1.1", "timestamp": "x", "user_agent": "u"})
+        _ramb = None
+    except PerchAmbiguousOutcomeError as e:
+        _ramb = e
+    check("transport failure raises PerchAmbiguousOutcomeError", _ramb is not None)
+    check("ambiguous error tells the caller not to resend", "Do not resend" in str(_ramb))
+    check("ambiguous error points at GET /status", "/status" in str(_ramb))
+
+    _c._requests = lambda: _FakeRequests(resp=_Resp(500, {"error": "server_error", "message": "boom"}))
+    try:
+        _c.accept_contracts("t", {"ip_address": "1.1.1.1", "timestamp": "x", "user_agent": "u"})
+        _r500 = None
+    except PerchAmbiguousOutcomeError as e:
+        _r500 = e
+    check("5xx raises PerchAmbiguousOutcomeError, NOT a retryable error", _r500 is not None)
+    check("5xx is not a PerchUnavailableError (which callers may retry)",
+          type(_r500).__name__ == "PerchAmbiguousOutcomeError")
+
+    section("GET /status - normalization")
+    _complete = normalize_status_response({
+        "completed_steps": ["generate_enrollment_token", "capacity_check",
+                             "enroll_utility_accounts", "submit_proof_documents",
+                             "generate_contracts", "submit_contracts_acceptance"],
+        "remaining_steps": [], "completed": True, "next_step": None})
+    check("completed_steps preserved", len(_complete["completed_steps"]) == 6)
+    check("remaining_steps empty", _complete["remaining_steps"] == [])
+    check("completed True", _complete["completed"] is True)
+    check("next_step null when complete", _complete["next_step"] is None)
+
+    _pending = normalize_status_response({
+        "completed_steps": ["generate_enrollment_token", "capacity_check"],
+        "remaining_steps": ["enroll_utility_accounts", "submit_contracts_acceptance"],
+        "completed": False,
+        "next_step": "https://staging.api.perchenergy.com/affiliate_partners/v1/enrollments/enroll"})
+    check("incomplete status keeps remaining steps", len(_pending["remaining_steps"]) == 2)
+    check("incomplete status is not marked complete", _pending["completed"] is False)
+    check("next_step preserved while pending", _pending["next_step"].endswith("/enroll"))
+    check("submit_contracts_acceptance visible as outstanding",
+          "submit_contracts_acceptance" in _pending["remaining_steps"])
+
+    # completed must be a literal True - never coerced from a truthy value.
+    check("truthy-but-not-True is NOT treated as complete",
+          normalize_status_response({"completed": "yes"})["completed"] is False)
+    check("missing completed defaults to False",
+          normalize_status_response({})["completed"] is False)
+    check("non-list steps degrade safely",
+          normalize_status_response({"completed_steps": "nope"})["completed_steps"] == [])
+    check("status tolerates the staging next_step_url alias",
+          normalize_status_response({"next_step_url": "https://x/enroll"})["next_step"]
+          == "https://x/enroll")
+    check("None body does not crash", normalize_status_response(None)["completed"] is False)
+
+    section("GET /status - request contract")
+    _c._requests = lambda: _FakeRequests(resp=_Resp(200, {
+        "completed_steps": [], "remaining_steps": [], "completed": False, "next_step": None}))
+    _c.get_status("tok-abc")
+    check("GET /status uses the status path", _sent["url"].endswith("/status"))
+    check("GET /status sends X-Enrollment-Token",
+          _sent["headers"].get("X-Enrollment-Token") == "tok-abc")
+    check("GET /status sends no HMAC headers",
+          not any(h.startswith("X-HMAC") for h in _sent["headers"]))
+
+    # ───────────────────────────────────────────────────────────
+    section("POST /contracts/accept - timestamp clock-skew allowance")
+    from services.perch.client import (
+        acceptance_timestamp, ACCEPTANCE_CLOCK_SKEW_SECONDS, ACCEPTANCE_TIMESTAMP_FORMAT,
+    )
+    from datetime import datetime as _dt, timedelta as _td
+
+    # Live staging returned 422 "Metadata timestamp cannot be in the future" for a
+    # timestamp generated at the exact instant of submission. Perch PARSED it and
+    # applied the not-in-the-future rule, so the format is fine - the value was not.
+    _ts = acceptance_timestamp()
+    _parsed = _dt.strptime(_ts, ACCEPTANCE_TIMESTAMP_FORMAT)
+    _age = (_dt.now() - _parsed).total_seconds()
+
+    check("generated timestamp is NOT in the future", _age > 0)
+    check("timestamp is at least the configured skew in the past",
+          _age >= ACCEPTANCE_CLOCK_SKEW_SECONDS - 1)
+    check("timestamp is still recent (well under Perch's 24h maximum)", _age < 86400)
+    check("timestamp is recent enough to be an honest acceptance record", _age < 120)
+    check("skew allowance is small and conservative",
+          5 <= ACCEPTANCE_CLOCK_SKEW_SECONDS <= 30)
+
+    # Format must not drift - staging demonstrably parses this shape.
+    check("format matches the spec example (space separated, no timezone)",
+          " " in _ts and "T" not in _ts and "Z" not in _ts)
+    check("microseconds truncated to 4 digits like the spec example",
+          len(_ts.split(".")[-1]) == 4)
+    check("timestamp round-trips through strptime", isinstance(_parsed, _dt))
+
+    # Deterministic check against a fixed instant.
+    _fixed = _dt(2026, 8, 14, 15, 29, 47, 606500)
+    _out = acceptance_timestamp(now=_fixed)
+    _out_parsed = _dt.strptime(_out, ACCEPTANCE_TIMESTAMP_FORMAT)
+    check("helper subtracts exactly the configured skew",
+          abs((_fixed - _out_parsed).total_seconds() - ACCEPTANCE_CLOCK_SKEW_SECONDS) < 0.01)
+    check("a timestamp built from 'now' would have been >= now (the original bug)",
+          _fixed.strftime(ACCEPTANCE_TIMESTAMP_FORMAT)[:-2] > _out)
+
+    section("POST /contracts/accept - metadata schema unchanged by the fix")
+    import routes.perch_routes as _pr2
+    _route_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                    "routes", "perch_routes.py"), encoding="utf-8").read()
+    check("route delegates to the shared acceptance_timestamp helper",
+          "acceptance_timestamp()" in _route_src)
+    check("route no longer builds a bare datetime.now() acceptance timestamp",
+          'datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")' not in _route_src)
+    check("user-agent limit still 2048", _pr2._MAX_USER_AGENT == 2048)
+
+    # The wire schema must still be exactly Perch's three fields.
+    _md_sent = {}
+
+    class _TsResp:
+        status_code = 202
+        headers = {"Content-Type": "application/json"}
+        text = '{"message":"ok"}'
+        def json(self): return {"message": "ok"}
+
+    class _TsRequests:
+        def post(self, url, json=None, headers=None, timeout=None, **kw):
+            _md_sent.clear(); _md_sent.update(json or {})
+            return _TsResp()
+
+    from services.perch.client import PerchHTTPClient as _H2
+    _c2 = _H2("https://x/enrollments", "https://x/markets", "K", "S")
+    _c2._requests = lambda: _TsRequests()
+    _c2.accept_contracts("tok", {"ip_address": "203.0.113.9",
+                                  "timestamp": acceptance_timestamp(),
+                                  "user_agent": "UA"})
+    check("body still has exactly one top-level key: metadata",
+          list(_md_sent.keys()) == ["metadata"])
+    check("metadata still has exactly the three Perch fields",
+          set(_md_sent["metadata"].keys()) == {"ip_address", "timestamp", "user_agent"})
+    check("transmitted timestamp is not in the future",
+          (_dt.now() - _dt.strptime(_md_sent["metadata"]["timestamp"],
+                                     ACCEPTANCE_TIMESTAMP_FORMAT)).total_seconds() > 0)
+
+    section("Staging verifier - CLI parsing and production parity")
+    _vsrc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "scripts", "verify_contracts_accept_live.py"), encoding="utf-8").read()
+    check("verifier uses argparse", "argparse.ArgumentParser" in _vsrc)
+    check("verifier no longer reads positional sys.argv[1]/[2]",
+          "sys.argv[1]" not in _vsrc and "sys.argv[2]" not in _vsrc)
+    check("safety flag parsed as a flag, not a positional",
+          'action="store_true"' in _vsrc and "args.accept_for_real" in _vsrc)
+    # Production parity: the verifier must use the same helper the route uses.
+    check("verifier uses the shared acceptance_timestamp helper",
+          "acceptance_timestamp()" in _vsrc)
+    check("verifier builds no bare datetime.now() acceptance timestamp",
+          'datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")' not in _vsrc)
+    check("safety gate still precedes the accept call",
+          _vsrc.index("args.accept_for_real") < _vsrc.index("client.accept_contracts(token, metadata)"))
+
+    # Reproduce the reported bug against the verifier's own parser shape.
+    import argparse as _ap
+    def _parse(argv):
+        _p = _ap.ArgumentParser()
+        _p.add_argument("zip_code", nargs="?", default="12202")
+        _p.add_argument("utility", nargs="?", default="national-grid-ny")
+        _p.add_argument("--i-understand-this-accepts-contracts",
+                        dest="accept_for_real", action="store_true")
+        return _p.parse_args(argv)
+
+    _a = _parse([])
+    check("no args: dry run, defaults intact",
+          _a.zip_code == "12202" and _a.accept_for_real is False)
+    _a = _parse(["--i-understand-this-accepts-contracts"])
+    check("flag alone is NOT parsed as the ZIP code (the reported bug)",
+          _a.zip_code == "12202" and _a.utility == "national-grid-ny")
+    check("flag alone enables acceptance", _a.accept_for_real is True)
+    _a = _parse(["12203", "nyseg"])
+    check("positional overrides still work",
+          _a.zip_code == "12203" and _a.utility == "nyseg" and _a.accept_for_real is False)
+    _a = _parse(["12203", "nyseg", "--i-understand-this-accepts-contracts"])
+    check("overrides plus flag work together",
+          _a.zip_code == "12203" and _a.accept_for_real is True)
+    _a = _parse(["--i-understand-this-accepts-contracts", "12203"])
+    check("flag before positionals works",
+          _a.zip_code == "12203" and _a.accept_for_real is True)
 
     print(f"\n{'='*74}\nMILESTONE 2.5 + STAGING SHAPE - ALL CHECKS PASSED\n{'='*74}")
 

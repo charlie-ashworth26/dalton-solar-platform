@@ -325,10 +325,14 @@
                   <div class="review-head">Perch contract packet</div>
                   <div id="perch-contract-list"><p class="helper">Generating the personalized contract packet…</p></div>
                 </div>
-                <div class="badge badge-gold" style="margin-bottom:12px;">Contract acceptance is not enabled yet</div>
-                <p class="helper" style="margin-bottom:14px;">Review is enabled. Viewing a contract does not accept it, and Dalton will not call Perch's contract-acceptance endpoint in this milestone.</p>
+                <p class="helper" style="margin-bottom:14px;">Open each contract with Review. Viewing a contract does not accept it — acceptance is recorded only when the customer confirms below.</p>
+                <label class="agree-row" style="margin-bottom:12px;">
+                  <input type="checkbox" id="contract-confirm-check" onchange="updateAcceptButtonState()">
+                  <span>The customer has reviewed all contract documents above and agrees to them.</span>
+                </label>
                 <p class="helper" id="contract-review-error" style="display:none;color:var(--danger);margin-bottom:10px;"></p>
-                <div class="wizard-actions"><button class="btn btn-ghost" id="agreement-back-btn" onclick="backFromAgreement()">Back</button><button class="btn btn-primary" disabled>Acceptance not enabled</button></div>
+                <p class="helper" id="contract-accept-status" style="display:none;margin-bottom:10px;"></p>
+                <div class="wizard-actions"><button class="btn btn-ghost" id="agreement-back-btn" onclick="backFromAgreement()">Back</button><button class="btn btn-primary" id="contract-accept-btn" disabled onclick="acceptPerchContracts()">Accept contracts</button></div>
               </div>
               <div id="post-send" style="display:none;">
                 <div class="badge badge-gold" style="margin-bottom:12px;">Awaiting customer signature</div>

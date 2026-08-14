@@ -18,12 +18,14 @@ from db import query, query_one, execute
 from services.perch.config import get_perch_client, get_api_mode
 from services.perch import token_manager, utilities
 from services.perch.client import (
+    PATH_CONTRACTS_ACCEPT, PATH_STATUS,
     PATH_CAPACITY, PATH_ENROLL, PATH_LMI_PROOF_DOCS, PATH_CONTRACTS,
     build_enrollment_multipart, build_proof_docs_multipart,
     contracts_safe, redact_contract_urls,
 )
 from services.perch.errors import (
     PerchError, PerchValidationError, PerchTokenExpiredError, PerchNoCapacityError,
+    PerchAmbiguousOutcomeError,
 )
 
 
@@ -439,6 +441,91 @@ def generate_contracts(enrollment_id, user_id=None):
         record_api_call(
             enrollment_id=enrollment_id, operation="generate_contracts", endpoint=PATH_CONTRACTS,
             http_method="POST", request_json=request_summary, response_json=None,
+            status_code=getattr(e, "http_status", None), duration_ms=0,
+            error_message=str(e), initiated_by_user_id=user_id,
+        )
+        raise
+
+
+def accept_contracts(enrollment_id, metadata, user_id=None):
+    """POST /contracts/accept.
+
+    NOT routed through _call_with_refresh's generic path for ambiguous failures.
+    A 403 is a definite rejection, so refresh-and-retry-once is safe and is
+    applied. Anything ambiguous (transport failure, timeout, 5xx) propagates as
+    PerchAmbiguousOutcomeError and is NEVER retried, because Perch has not
+    documented whether this endpoint is idempotent.
+
+    The metadata is audit data (IP / user-agent / timestamp), not a secret, so
+    it is recorded. No presigned URL or token is touched by this function.
+    """
+    request_summary = {"metadata": metadata}
+    try:
+        result, refreshed, duration_ms = _call_with_refresh(
+            enrollment_id, user_id, "accept_contracts", PATH_CONTRACTS_ACCEPT, "POST",
+            request_summary,
+            lambda client, token: client.accept_contracts(token, metadata),
+        )
+        record_api_call(
+            enrollment_id=enrollment_id, operation="accept_contracts",
+            endpoint=PATH_CONTRACTS_ACCEPT, http_method="POST",
+            request_json=request_summary,
+            response_json={"message": result.get("message")},
+            status_code=202, duration_ms=duration_ms, error_message=None,
+            initiated_by_user_id=user_id,
+        )
+        result["token_was_refreshed"] = refreshed
+        return result
+    except PerchAmbiguousOutcomeError as e:
+        # Record loudly: this is the state a human must reconcile.
+        record_api_call(
+            enrollment_id=enrollment_id, operation="accept_contracts",
+            endpoint=PATH_CONTRACTS_ACCEPT, http_method="POST",
+            request_json=request_summary, response_json=None,
+            status_code=getattr(e, "http_status", None), duration_ms=0,
+            error_message=f"AMBIGUOUS - acceptance may or may not have been recorded: {e}",
+            initiated_by_user_id=user_id,
+        )
+        raise
+    except PerchError as e:
+        record_api_call(
+            enrollment_id=enrollment_id, operation="accept_contracts",
+            endpoint=PATH_CONTRACTS_ACCEPT, http_method="POST",
+            request_json=request_summary, response_json=None,
+            status_code=getattr(e, "http_status", None), duration_ms=0,
+            error_message=str(e), initiated_by_user_id=user_id,
+        )
+        raise
+
+
+def get_status(enrollment_id, user_id=None):
+    """GET /status. Side-effect free per the spec, so the standard
+    refresh-and-retry-once path is safe here."""
+    request_summary = {"body": None}
+    try:
+        result, refreshed, duration_ms = _call_with_refresh(
+            enrollment_id, user_id, "get_status", PATH_STATUS, "GET",
+            request_summary,
+            lambda client, token: client.get_status(token),
+        )
+        record_api_call(
+            enrollment_id=enrollment_id, operation="get_status", endpoint=PATH_STATUS,
+            http_method="GET", request_json=request_summary,
+            response_json={
+                "completed_steps": result.get("completed_steps"),
+                "remaining_steps": result.get("remaining_steps"),
+                "completed": result.get("completed"),
+                "next_step": result.get("next_step"),
+            },
+            status_code=200, duration_ms=duration_ms, error_message=None,
+            initiated_by_user_id=user_id,
+        )
+        result["token_was_refreshed"] = refreshed
+        return result
+    except PerchError as e:
+        record_api_call(
+            enrollment_id=enrollment_id, operation="get_status", endpoint=PATH_STATUS,
+            http_method="GET", request_json=request_summary, response_json=None,
             status_code=getattr(e, "http_status", None), duration_ms=0,
             error_message=str(e), initiated_by_user_id=user_id,
         )

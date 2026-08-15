@@ -250,6 +250,76 @@ def _step_no_capacity(enrollment, check):
 
 # ─────────────── Resolution ───────────────
 
+# ─────────────── Rep-facing progress labels ───────────────
+# Every key that can be persisted by a route, mapped to what a rep should see.
+# Derived from Perch's own next_step vocabulary plus the keys the contract
+# routes set explicitly - NO new state vocabulary is invented here, and
+# enrollments.status is deliberately left alone for QA/reporting.
+STEP_LABELS = {
+    "service_area":               "Service area",
+    "capacity_result":            "Capacity confirmed",
+    "no_capacity":                "No capacity",
+    "enroll":                     "Ready to enroll",
+    "proof_docs":                 "Proof documents needed",
+    "self_attestation":           "Self-attestation needed",
+    "self_attestation_accept":    "Self-attestation acceptance needed",
+    "contracts":                  "Ready to generate contracts",
+    "contracts_review":           "Contracts awaiting acceptance",
+    "contracts_accept":           "Contracts awaiting acceptance",
+    "contracts_accepted":         "Complete",
+    "contracts_accept_uncertain": "Needs review",
+    # /status is in NEXT_STEP_PATH_MAP, so _next_key() can return it if Perch
+    # ever points there. Labelled so it can never surface as a bare key.
+    "enroll_outcome_uncertain":   "Enrollment outcome uncertain - check status",
+    "status":                     "Checking status with Perch",
+    "unknown_next_step":          "Needs review",
+}
+
+# Terminal: reopening these must never offer a restart or re-submit path.
+TERMINAL_STEP_KEYS = {"contracts_accepted"}
+# Blocked: reopened read-only pending human reconciliation with Perch.
+BLOCKED_STEP_KEYS = {"contracts_accept_uncertain", "enroll_outcome_uncertain"}
+
+
+def step_label(step_key):
+    return STEP_LABELS.get(step_key, "In progress")
+
+
+def is_terminal(step_key):
+    return step_key in TERMINAL_STEP_KEYS
+
+
+def is_blocked(step_key):
+    return step_key in BLOCKED_STEP_KEYS
+
+
+def _step_mid_flow(enrollment, step_key, state):
+    """Descriptor for a persisted step the GUI drives through dedicated routes
+    (enroll / proof docs / contracts) rather than the descriptor engine.
+
+    Without this, resolve() fell through to the capacity branch and silently
+    showed the wrong screen when an enrollment was reopened mid-flow.
+    """
+    return {
+        "key": step_key,
+        "eyebrow": "Enrollment in progress",
+        "title": step_label(step_key),
+        "subtitle": "This enrollment is already underway. Continue from the step below.",
+        "fields": [],
+        "uploads": [],
+        "panels": [],
+        "terminal": is_terminal(step_key),
+        "blocked": is_blocked(step_key),
+        "perch_next_step": {
+            "url": (state or {}).get("perch_next_step_url"),
+            "recognized": bool((state or {}).get("next_step_recognized", 1)),
+            "resolved_step": step_key,
+        },
+        "primary_action": None,
+        "secondary_action": {"label": "Back to dashboard", "operation": "exit"},
+    }
+
+
 def resolve(enrollment_id):
     """Returns the full workflow descriptor for an enrollment: the current step,
     plus enough context for the renderer to draw it."""
@@ -260,7 +330,25 @@ def resolve(enrollment_id):
     check = adapter.latest_capacity_check(enrollment_id)
     state = get_state(enrollment_id)
 
-    if state and state.get("current_step_key") == "service_area":
+    persisted_key = (state or {}).get("current_step_key")
+    # Any key past capacity is driven by dedicated routes; return a descriptor
+    # for it so a reopened enrollment never lands on the wrong screen.
+    if persisted_key and persisted_key not in (
+            "service_area", "capacity_result", "no_capacity"):
+        return {
+            "enrollment_id": enrollment_id,
+            "enrollment_code": enrollment["enrollment_code"],
+            "status": enrollment["status"],
+            "step": _step_mid_flow(enrollment, persisted_key, state),
+            "workflow_state": {
+                "current_step_key": persisted_key,
+                "perch_next_step_url": (state or {}).get("perch_next_step_url"),
+                "next_step_recognized": bool((state or {}).get("next_step_recognized", 1)),
+            },
+            "progress": _progress_hint(persisted_key),
+        }
+
+    if state and persisted_key == "service_area":
         step = _step_service_area(enrollment, check)
     elif check is None:
         step = _step_service_area(enrollment, None)

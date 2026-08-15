@@ -1,4 +1,12 @@
 import os
+
+# MUST run before any module reads os.environ. A VS Code restart previously
+# produced a shell with no Perch variables; app.py did not load .env and
+# PERCH_API_MODE silently defaulted to mock, which made a live reconciliation
+# call return 501 "Not implemented by this client."
+from config_bootstrap import init_configuration, perch_config_report
+init_configuration(verbose=False)   # banner is printed once, at server start
+
 from flask import Flask, jsonify, send_from_directory, render_template
 
 from db import close_db, init_db, DB_PATH
@@ -54,5 +62,11 @@ def create_app():
 app = create_app()
 
 if __name__ == "__main__":
+    from config_bootstrap import format_startup_banner
+    print(format_startup_banner(perch_config_report(),
+                                os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+                                if os.path.exists(os.path.join(
+                                    os.path.dirname(os.path.abspath(__file__)), ".env")) else None,
+                                []))
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)

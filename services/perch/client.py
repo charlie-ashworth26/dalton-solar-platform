@@ -20,8 +20,9 @@ Auth (documented):
     token. The signing scheme is not published; get_market_capacity() therefore
     raises rather than guessing.
 """
-import os
 import json
+import os
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 
@@ -408,6 +409,125 @@ def normalize_enroll_response(data: dict) -> dict:
     }
 
 
+# ─────────────── Defensive response parsing ───────────────
+# Perch returned a sub-400 status with a non-JSON body during live staging use
+# (2026-08). resp.json() was called unguarded on every SUCCESS path, so the
+# JSONDecodeError escaped as an uncaught Flask 500 - and because it was not a
+# PerchError, the adapter's `except PerchError` never fired and NOTHING was
+# recorded in perch_api_calls. We had no status, no body, no request id.
+#
+# Every success path now goes through parse_json_response(). Parse failures
+# become TYPED Perch errors so existing adapter logging catches them naturally;
+# genuine programming bugs still propagate loudly rather than being mislabelled
+# as API failures.
+
+_MAX_DIAGNOSTIC_BODY = 2000
+
+# Sentinel: distinguishes "parsed to None" from "could not parse".
+_UNPARSEABLE = object()
+
+# Anything that looks like credential or presigned-URL material is scrubbed
+# before a body is ever attached to an exception, logged, or persisted.
+_REDACTION_PATTERNS = [
+    (re.compile(r"(X-Amz-Signature=)[^&\s\"']+", re.I), r"\1[REDACTED]"),
+    (re.compile(r"(X-Amz-Credential=)[^&\s\"']+", re.I), r"\1[REDACTED]"),
+    (re.compile(r"(X-Amz-Security-Token=)[^&\s\"']+", re.I), r"\1[REDACTED]"),
+    (re.compile(r"https://[^\s\"']*amazonaws\.com[^\s\"']*", re.I), "[REDACTED_PRESIGNED_URL]"),
+    (re.compile(r"(\"?enrollment_token\"?\s*[:=]\s*\"?)[A-Za-z0-9\-]{8,}", re.I), r"\1[REDACTED]"),
+    (re.compile(r"(\"?(?:api_key|secret|signature)\"?\s*[:=]\s*\"?)[^\s\"',}]+", re.I), r"\1[REDACTED]"),
+]
+
+
+def redact_body(text):
+    """Scrub credential/presigned material from a response body before it is
+    attached to an exception, logged, or persisted."""
+    if not text:
+        return text
+    out = str(text)
+    for pattern, replacement in _REDACTION_PATTERNS:
+        out = pattern.sub(replacement, out)
+    return out
+
+
+def _safe_body_excerpt(resp):
+    try:
+        return redact_body((resp.text or ""))[:_MAX_DIAGNOSTIC_BODY]
+    except Exception:
+        return None
+
+
+def _request_id_of(resp):
+    for header in ("X-Request-Id", "X-Request-ID", "x-request-id",
+                   "X-Amzn-RequestId", "x-amzn-requestid", "X-Amzn-Trace-Id",
+                   "Request-Id", "CF-RAY"):
+        try:
+            val = resp.headers.get(header)
+        except Exception:
+            val = None
+        if val:
+            return f"{header}: {val}"
+    return None
+
+
+def parse_json_response(resp, path, ambiguous_on_failure=False):
+    """Parse a sub-400 Perch response that is expected to be JSON.
+
+    On success: returns the decoded object.
+
+    On an empty body, a non-JSON Content-Type, or malformed JSON, raises a TYPED
+    Perch error carrying status, Content-Type, request id and a redacted body
+    excerpt.
+
+    ambiguous_on_failure=True is used ONLY for state-changing, non-idempotent
+    operations (POST /enroll, POST /contracts/accept). Perch returned a success
+    status, so the operation may well have been performed - the caller must NOT
+    retry, and must reconcile via GET /status instead.
+
+    Everything else raises PerchUnavailableError, which is safe to retry.
+    """
+    # PARSE FIRST. A readable JSON body is always accepted, regardless of what
+    # other attributes the response object exposes - diagnostics are only
+    # gathered on the failure path. (An earlier version inspected .text before
+    # parsing, which rejected perfectly valid responses whose object did not
+    # expose every requests.Response attribute.)
+    try:
+        parsed = resp.json()
+    except Exception:
+        parsed = _UNPARSEABLE
+    if parsed is not _UNPARSEABLE and parsed is not None:
+        return parsed
+
+    status = getattr(resp, "status_code", None)
+    try:
+        content_type = resp.headers.get("Content-Type") or ""
+    except Exception:
+        content_type = ""
+    request_id = _request_id_of(resp)
+    excerpt = _safe_body_excerpt(resp)
+
+    def _fail(reason):
+        detail = (f"Perch {path} returned HTTP {status} with {reason}. "
+                  f"Content-Type: {content_type or '(none)'}. "
+                  f"Request id: {request_id or '(none)'}. "
+                  f"Body excerpt: {excerpt!r}")
+        if ambiguous_on_failure:
+            exc = PerchAmbiguousOutcomeError(
+                f"{detail} Perch reported success but the response could not be read, "
+                f"so this operation MAY have been performed. Do not retry - "
+                f"reconcile with GET /status first.")
+        else:
+            exc = PerchUnavailableError(
+                f"{detail} This endpoint is safe to retry.")
+        raise attach_response_diagnostics(exc, resp)
+
+    # Classify WHY it could not be read, for an actionable message.
+    if status == 204 or not (excerpt or "").strip():
+        _fail("an empty body")
+    if content_type and "json" not in content_type.lower():
+        _fail(f"a non-JSON body ({content_type})")
+    _fail("a body that is not valid JSON")
+
+
 def attach_response_diagnostics(exc, resp):
     """Attaches the raw response to an exception for diagnostics, then returns it.
 
@@ -446,7 +566,7 @@ def attach_response_diagnostics(exc, resp):
             break
 
     try:
-        exc.body_text = resp.text
+        exc.body_text = redact_body(resp.text)
     except Exception:
         exc.body_text = None
     try:
@@ -718,7 +838,7 @@ class PerchHTTPClient(PerchClient):
             raise PerchNoCapacityError(
                 f"No open capacity for {utility_slug} in ZIP {zip_code}.")
         self._raise_for_hmac_status(resp, PATH_MARKETS_CAPACITY)
-        return resp.json()
+        return parse_json_response(resp, PATH_MARKETS_CAPACITY)
 
     @staticmethod
     def _raise_for_hmac_status(resp, path):
@@ -761,7 +881,7 @@ class PerchHTTPClient(PerchClient):
         never invents one. Deriving a local expiry, and recording that it was
         derived, is token_manager's responsibility.
         """
-        data = resp.json()
+        data = parse_json_response(resp, "/token")
 
         # Documented name first, observed staging alias second.
         token = data.get("enrollment_token") or data.get("token")
@@ -806,7 +926,7 @@ class PerchHTTPClient(PerchClient):
         # Staging returns next_step_url where the YAML documents next_step.
         # Normalize here, at the same layer as _parse_token_response, so nothing
         # downstream needs to know which spelling arrived.
-        return normalize_capacity_response(resp.json())
+        return normalize_capacity_response(parse_json_response(resp, PATH_CAPACITY))
 
     def create_enrollment(self, enrollment_token: str, form: dict, files: dict) -> dict:
         """POST /enroll - multipart, X-Enrollment-Token auth, NO HMAC headers.
@@ -840,7 +960,10 @@ class PerchHTTPClient(PerchClient):
         if resp.status_code >= 400:
             raise attach_response_diagnostics(PerchValidationError(
                 f"Perch rejected the enrollment: {_msg(resp)}"), resp)
-        return normalize_enroll_response(resp.json())
+        # State-changing and non-idempotent: a sub-400 response we cannot read
+        # means the enrollment MAY exist at Perch. Never retried.
+        return normalize_enroll_response(
+            parse_json_response(resp, PATH_ENROLL, ambiguous_on_failure=True))
 
     def submit_proof_docs(self, enrollment_token: str, files: dict) -> dict:
         """POST /lmi/proof_docs - JSON metadata part + indexed proof files."""
@@ -868,7 +991,8 @@ class PerchHTTPClient(PerchClient):
         if resp.status_code >= 400:
             raise attach_response_diagnostics(PerchValidationError(
                 f"Perch rejected the proof documents: {_msg(resp)}"), resp)
-        return normalize_proof_docs_response(resp.json())
+        return normalize_proof_docs_response(
+            parse_json_response(resp, PATH_LMI_PROOF_DOCS))
 
     def generate_contracts(self, enrollment_token: str) -> dict:
         """POST /contracts - no request body, X-Enrollment-Token auth only.
@@ -897,7 +1021,7 @@ class PerchHTTPClient(PerchClient):
         if resp.status_code >= 400:
             raise attach_response_diagnostics(PerchValidationError(
                 f"Perch rejected the contract request: {_msg(resp)}"), resp)
-        return normalize_contracts_response(resp.json())
+        return normalize_contracts_response(parse_json_response(resp, PATH_CONTRACTS))
 
     def accept_contracts(self, enrollment_token: str, metadata: dict) -> dict:
         """POST /contracts/accept - JSON body, X-Enrollment-Token auth, no HMAC.
@@ -945,7 +1069,9 @@ class PerchHTTPClient(PerchClient):
             raise attach_response_diagnostics(PerchValidationError(
                 f"Perch rejected the acceptance: {_msg(resp)}"), resp)
         # Documented success is 202 Accepted (async), not 200.
-        return normalize_accept_response(resp.json())
+        # Same hazard as /enroll: Perch may have recorded the acceptance.
+        return normalize_accept_response(
+            parse_json_response(resp, PATH_CONTRACTS_ACCEPT, ambiguous_on_failure=True))
 
     def get_status(self, enrollment_token: str) -> dict:
         """GET /status - side-effect free, safe to poll."""
@@ -966,4 +1092,4 @@ class PerchHTTPClient(PerchClient):
         if resp.status_code >= 400:
             raise attach_response_diagnostics(PerchValidationError(
                 f"Perch rejected the status request: {_msg(resp)}"), resp)
-        return normalize_status_response(resp.json())
+        return normalize_status_response(parse_json_response(resp, PATH_STATUS))

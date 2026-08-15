@@ -7,6 +7,7 @@ from db import query, query_one, execute, rows_to_list
 from auth import require_auth, require_role
 from helpers import mask_account_number, next_enrollment_code, json_or_none, to_json
 from services import audit, status_machine, lmi_validation
+from services.perch import workflow as perch_workflow
 
 bp = Blueprint("enrollment_routes", __name__, url_prefix="/api/enrollments")
 
@@ -25,6 +26,12 @@ def _serialize_enrollment(row, requester_role):
         (d["sales_rep_id"],),
     ) if d["sales_rep_id"] else None
     lmi = query_one("SELECT * FROM lmi_qualifications WHERE enrollment_id = ? ORDER BY id DESC LIMIT 1", (d["id"],))
+
+    # Perch workflow state is the accurate rep-facing progress source.
+    # enrollments.status is deliberately NOT changed - QA, developer and
+    # reporting routes still depend on that legacy vocabulary.
+    wf = query_one("SELECT * FROM perch_workflow_state WHERE enrollment_id = ?", (d["id"],))
+    step_key = wf["current_step_key"] if wf else None
 
     utility_dict = dict(utility) if utility else None
     if utility_dict and requester_role not in ("admin", "qa_reviewer"):
@@ -51,6 +58,13 @@ def _serialize_enrollment(row, requester_role):
         "project": dict(project) if project else None,
         "sales_rep": dict(rep) if rep else None,
         "lmi_qualification": dict(lmi) if lmi else None,
+        # Rep-facing progress. next_step_url is a Perch endpoint URL, not a
+        # presigned document URL, so it is safe to expose.
+        "workflow_step_key": step_key,
+        "workflow_step_label": perch_workflow.step_label(step_key) if step_key else None,
+        "workflow_is_terminal": perch_workflow.is_terminal(step_key),
+        "workflow_is_blocked": perch_workflow.is_blocked(step_key),
+        "perch_next_step_url": wf["perch_next_step_url"] if wf else None,
     }
 
 
@@ -86,6 +100,13 @@ def list_enrollments():
     params = []
 
     if role == "sales_rep":
+        rep = query_one("SELECT * FROM sales_reps WHERE user_id = ?", (g.current_user["id"],))
+        sql += " AND sales_rep_id = ?"
+        params.append(rep["id"] if rep else -1)
+
+    # Privileged roles see everything by default; ?mine=true narrows to their own.
+    # Sales reps are already scoped above and are unaffected by this parameter.
+    if role != "sales_rep" and request.args.get("mine") == "true":
         rep = query_one("SELECT * FROM sales_reps WHERE user_id = ?", (g.current_user["id"],))
         sql += " AND sales_rep_id = ?"
         params.append(rep["id"] if rep else -1)

@@ -283,8 +283,11 @@ def diagnostics():
     """Surfaces anything we inferred rather than read from Perch, so an assumption
     cannot quietly become load-bearing."""
     from services.perch.config import get_api_mode
+    from config_bootstrap import perch_config_report
+    cfg = perch_config_report()   # presence flags only - never secret values
     return jsonify({
         "api_mode": get_api_mode(),
+        "configuration": cfg,
         "unconfirmed_utility_slugs": [
             {"slug": u["slug"], "display_name": u["display_name"]}
             for u in utilities.unconfirmed_slugs()
@@ -412,6 +415,29 @@ def create_perch_enrollment(enrollment_id):
             }],
         }
         result = adapter.create_enrollment(enrollment_id, payload, user_id=g.current_user["id"])
+    except PerchAmbiguousOutcomeError as e:
+        # Perch returned success but the response could not be read, so the
+        # enrollment MAY exist there. Do not retry; reconcile via GET /status.
+        workflow.set_state(
+            enrollment_id, "enroll_outcome_uncertain",
+            last_response={"uncertain": True, "detail": str(e)},
+        )
+        audit.log("perch_enroll_uncertain", enrollment_id=enrollment_id,
+                  user_id=g.current_user["id"], details={"detail": str(e)[:500]},
+                  ip_address=request.remote_addr)
+        status_payload = None
+        try:
+            status_payload = adapter.get_status(enrollment_id, user_id=g.current_user["id"])
+        except PerchError:
+            pass
+        return jsonify({
+            "error": "Enrollment outcome is uncertain. Check status before retrying.",
+            "detail": str(e),
+            "perch_error": type(e).__name__,
+            "outcome": "uncertain",
+            "retry_safe": False,
+            "perch_status": _safe_status(status_payload),
+        }), 502
     except PerchError as e:
         return _perch_error_response(enrollment_id, "enroll", e)
     finally:

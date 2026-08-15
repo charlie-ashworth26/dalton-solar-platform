@@ -269,11 +269,25 @@ function statusPillHtml(status){
   return '<span class="status-pill '+cls+'">'+status+'</span>';
 }
 
+// Perch workflow state is the accurate rep-facing progress. enrollments.status
+// is left alone - it still drives QA/reporting and is not rep-facing here.
+function workflowPillHtml(e){
+  const label = e.workflow_step_label || 'In progress';
+  const cls = e.workflow_is_terminal ? 'status-verified'
+            : (e.workflow_is_blocked ? 'status-danger' : 'status-opp');
+  return '<span class="status-pill '+cls+'">'+esc(label)+'</span>';
+}
+
+function openActionHtml(e){
+  const label = e.workflow_is_terminal ? 'View' : 'Open';
+  return '<span class="resume-link" onclick="openEnrollment('+e.id+')">'+label+'</span>';
+}
+
 function enrollmentRowHtml(e){
   const custName = e.customer ? (e.customer.first_name+' '+e.customer.last_name) : '(no customer info yet)';
   const custEmail = e.customer ? e.customer.email : '';
   const projectName = e.project ? e.project.name : '—';
-  return '<tr><td><div class="cust-name">'+custName+'</div><div class="cust-sub">'+custEmail+'</div></td><td>'+projectName+'</td><td>'+statusPillHtml(e.status)+'</td><td>'+formatDate(e.updated_at)+'</td><td style="text-align:right;"><span style="color:var(--ink-faint);font-size:12px;">'+e.enrollment_code+'</span></td></tr>';
+  return '<tr><td><div class="cust-name">'+esc(custName)+'</div><div class="cust-sub">'+esc(custEmail)+'</div></td><td>'+esc(projectName)+'</td><td>'+workflowPillHtml(e)+'</td><td>'+formatDate(e.updated_at)+'</td><td style="text-align:right;">'+openActionHtml(e)+'</td></tr>';
 }
 
 function formatDate(iso){
@@ -295,7 +309,7 @@ async function renderCustomers(query){
         const custName = e.customer ? (e.customer.first_name+' '+e.customer.last_name) : '(no customer info yet)';
         const custEmail = e.customer ? e.customer.email : '';
         const projectName = e.project ? e.project.name : '—';
-        return '<tr><td><div class="cust-name">'+custName+'</div><div class="cust-sub">'+custEmail+'</div></td><td>'+projectName+'</td><td>'+statusPillHtml(e.status)+'</td><td>'+formatDate(e.created_at)+'</td><td>'+formatDate(e.updated_at)+'</td><td style="text-align:right;"><span style="color:var(--ink-faint);font-size:12px;">'+e.enrollment_code+'</span></td></tr>';
+        return '<tr><td><div class="cust-name">'+esc(custName)+'</div><div class="cust-sub">'+esc(custEmail)+'</div></td><td>'+esc(projectName)+'</td><td>'+workflowPillHtml(e)+'</td><td>'+formatDate(e.created_at)+'</td><td>'+formatDate(e.updated_at)+'</td><td style="text-align:right;">'+openActionHtml(e)+'</td></tr>';
       }).join('')
     : '<tr><td colspan="6" style="text-align:center;color:var(--ink-faint);padding:26px;">No enrollments match that search.</td></tr>';
 }
@@ -311,6 +325,25 @@ function resetWizardState(){
   perchContracts = [];
   perchContext = freshPerchContext();
   currentCustomerId = null;
+  // RC-5: enrollment-specific globals that previously survived across
+  // enrollments. After this call, Enrollment B must be indistinguishable from
+  // Enrollment B on a fresh page load.
+  docReviewed = {};
+  hasSigned = false;
+  isDrawing = false;
+  sigCtx = null;
+  billTouched = false;
+  skipProjectStep = false;
+  entryMode = null;
+  currentWorkflow = null;
+  // RC-4: undo any read-only lock left by a completed/blocked enrollment.
+  unlockEnrollmentControls();
+  const rb = document.getElementById('resume-banner');
+  if(rb){ rb.style.display = 'none'; rb.innerHTML = ''; }
+  const reqEl = document.getElementById('bill-requirements');
+  if(reqEl){ reqEl.style.display = 'none'; reqEl.innerHTML = ''; }
+  const accStatus = document.getElementById('contract-accept-status');
+  if(accStatus){ accStatus.style.display = 'none'; accStatus.textContent = ''; }
   clearWizardForms();
 }
 function clearWizardForms(){
@@ -378,6 +411,7 @@ let utilityRules = {};
 let billRuntimeFile = null, billUploadPromise = null, billUploadGeneration = 0;
 let lmiRuntimeFile = null, lmiUploadPromise = null, lmiUploadGeneration = 0;
 let perchContracts = [];
+let billTouched = false;   // RC-3: has the rep interacted with the bill step yet?
 function freshPerchContext(){
   return {email:'', capacityZip:'', utilitySlug:'', utilityDisplay:'', projectDetails:null,
           nextStepKey:null, enrollmentSubmitted:false, proofSubmitted:false, contractsGenerated:false,
@@ -394,6 +428,7 @@ async function loadUtilityRules(){
 
 async function startWizardFresh(){
   resetWizardState();
+  const rb=document.getElementById('resume-banner'); if(rb) rb.style.display='none';
   state.project = {id:'',name:'',utility:''};
   skipProjectStep = false;
   currentDraft = null;
@@ -673,6 +708,183 @@ async function startWizardForProject(projId){
     await loadWorkflow();
   } catch(err){ renderWorkflowError('Could not start a new enrollment: ' + err.message); }
 }
+/* ==================== PHASE 4A: OPEN / RESUME AN EXISTING ENROLLMENT ====================
+   Operates on the EXISTING enrollment_id. Never calls create_draft, never starts
+   a new Perch session, and issues no Perch API call until the rep does something
+   that actually needs Perch. All state comes from what Dalton already persisted. */
+
+const WORKFLOW_STEP_TO_WIZARD = {
+  service_area: 1, capacity_result: 1, no_capacity: 1,
+  enroll: 3,                    // customer/contact details
+  proof_docs: 4, self_attestation: 4, self_attestation_accept: 4,
+  contracts: 5, contracts_review: 5, contracts_accept: 5,
+  status: 5, unknown_next_step: 5,
+  enroll_outcome_uncertain: 3,
+  contracts_accepted: 5, contracts_accept_uncertain: 5,
+};
+
+async function openEnrollment(enrollmentId){
+  let e;
+  try {
+    e = await apiFetch('/api/enrollments/' + enrollmentId);
+  } catch(err){
+    alert('Could not open that enrollment: ' + err.message);
+    return;
+  }
+
+  resetWizardState();
+  // Bind to the EXISTING enrollment. No draft is created.
+  currentDraft = {enrollment_id: e.id, enrollment_code: e.enrollment_code};
+  currentWorkflow = null;
+  skipProjectStep = true;
+
+  // Rehydrate from persisted Dalton data rather than asking the rep again.
+  if(e.customer){
+    state.customer.first = e.customer.first_name || '';
+    state.customer.last  = e.customer.last_name  || '';
+    state.customer.email = e.customer.email      || '';
+    state.customer.phone = e.customer.phone      || '';
+  }
+  if(e.service_address){
+    state.address.street = e.service_address.street || '';
+    state.address.unit   = e.service_address.unit   || '';
+    state.address.city   = e.service_address.city   || '';
+    state.address.zip    = e.service_address.zip    || '';
+  }
+  if(e.utility_account){
+    state.customer.acct  = e.utility_account.account_number || '';
+    state.customer.podId = e.utility_account.secondary_account_identifier || '';
+  }
+  if(e.billing_address){
+    state.billing.sameAsService = e.billing_address.same_as_service !== false;
+    state.billing.street = e.billing_address.street || '';
+    state.billing.city   = e.billing_address.city   || '';
+    state.billing.zip    = e.billing_address.zip    || '';
+  }
+  state.project = {id:(e.project ? e.project.id : ''), name:(e.project ? e.project.name : ''),
+                   utility: e.utility_account ? e.utility_account.utility_name : ''};
+
+  perchContext.email = (e.customer && e.customer.email) || '';
+  perchContext.utilitySlug = e.utility_account ? e.utility_account.utility_name : '';
+  perchContext.nextStepKey = e.workflow_step_key || null;
+
+  const key = e.workflow_step_key || 'service_area';
+  const terminal = e.workflow_is_terminal === true;
+  const blocked  = e.workflow_is_blocked === true;
+
+  showView('wizard');
+  goStep(WORKFLOW_STEP_TO_WIZARD[key] || 1);
+  renderResumeBanner(e, key, terminal, blocked);
+
+  // RC-1: straight-through created perchContracts + acceptanceEnabled in memory
+  // from the POST /contracts response. Resume previously recreated neither, so
+  // the packet rendered empty and Accept could never enable.
+  //
+  // Repeat POST /contracts is the DOCUMENTED mechanism: "If any URL expires
+  // before download, call this endpoint again to receive fresh URLs." The
+  // existing one-time review capability already re-calls it on every Review
+  // click, and that path is proven live. No presigned URL is persisted here -
+  // the response carries only URL-free metadata.
+  const CONTRACT_STEPS = ['contracts', 'contracts_review', 'contracts_accept',
+                          'contracts_accepted', 'contracts_accept_uncertain'];
+  if(CONTRACT_STEPS.indexOf(key) !== -1){
+    await rehydrateContractPacket(key, terminal, blocked);
+  }
+
+  if(terminal || blocked){
+    // Reopened read-only. No restart, no re-submit path is exposed.
+    lockEnrollmentReadOnly(blocked);
+  }
+}
+
+async function rehydrateContractPacket(key, terminal, blocked){
+  const wrap = document.getElementById('perch-contract-list');
+  if(wrap) wrap.innerHTML = '<p class="helper">Loading the contract packet…</p>';
+  const errEl = document.getElementById('contract-review-error');
+  if(errEl) errEl.style.display = 'none';
+  try{
+    const body = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/contracts',
+                                {method:'POST', body:JSON.stringify({})});
+    perchContracts = body.contracts || [];
+    perchContext.contractsGenerated = true;
+    perchContext.contractsNextStepKey = body.next_step_key;
+    // Never fabricated - taken from the backend response, exactly as the
+    // straight-through path does.
+    perchContext.acceptanceEnabled = body.acceptance_enabled === true;
+  }catch(err){
+    perchContracts = [];
+    perchContext.acceptanceEnabled = false;
+    if(errEl){
+      errEl.textContent = 'Could not reload the contract packet: ' + err.message +
+                          ' Return to the dashboard and reopen this enrollment to retry.';
+      errEl.style.display = 'block';
+    }
+    if(wrap) wrap.innerHTML = '<p class="helper">The contract packet could not be loaded.</p>';
+    return;
+  }
+  if(terminal || blocked){
+    // Already accepted or uncertain: show the packet for reference only.
+    perchContext.acceptanceEnabled = false;
+    perchContext.acceptanceSubmitted = terminal;
+  }
+  renderPerchContracts();
+  updateAcceptButtonState();
+}
+
+function renderResumeBanner(e, key, terminal, blocked){
+  let el = document.getElementById('resume-banner');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'resume-banner';
+    el.className = 'draft-banner';
+    const host = document.getElementById('view-wizard');
+    if(host) host.insertBefore(el, host.firstChild);
+  }
+  const badge = terminal ? '<span class="badge badge-green">Complete</span>'
+              : (blocked ? '<span class="badge badge-gold">Needs review</span>' : '');
+  el.innerHTML = '<span>Enrollment <strong>'+esc(e.enrollment_code)+'</strong> — '+
+                 esc(e.workflow_step_label || 'In progress')+'</span>'+badge;
+  el.style.display = 'flex';
+}
+
+// RC-4: explicit control list. The previous implementation disabled every
+// button in #view-wizard whose TEXT did not match /review|back|dashboard/, which
+// (a) depended on wording and (b) poisoned steps 1-4 for the next enrollment
+// because nothing re-enabled them. readOnlyLocked lets resetWizardState() undo
+// it deterministically.
+const READ_ONLY_LOCK_IDS = [
+  'btn-project-next', 'btn-bill-next', 'btn-contact-next', 'btn-lmi-next',
+  'contract-accept-btn', 'contract-confirm-check',
+];
+let readOnlyLocked = false;
+
+function unlockEnrollmentControls(){
+  READ_ONLY_LOCK_IDS.forEach(function(id){
+    const el = document.getElementById(id);
+    if(el) el.disabled = false;
+  });
+  readOnlyLocked = false;
+}
+
+function lockEnrollmentReadOnly(blocked){
+  readOnlyLocked = true;
+  READ_ONLY_LOCK_IDS.forEach(function(id){
+    const el = document.getElementById(id);
+    if(el) el.disabled = true;
+  });
+  const chk = document.getElementById('contract-confirm-check');
+  if(chk){ chk.checked = false; chk.disabled = true; }
+  const acc = document.getElementById('contract-accept-btn');
+  if(acc){ acc.disabled = true; acc.textContent = blocked ? 'Acceptance blocked' : 'Contracts accepted'; }
+  const status = document.getElementById('contract-accept-status');
+  if(status){
+    status.textContent = blocked
+      ? 'A previous acceptance attempt could not be confirmed. Check this enrollment with Perch before any further action.'
+      : 'These contracts were already accepted. This enrollment is complete and cannot be resubmitted.';
+    status.style.display = 'block';
+  }
+}
+
 function exitWizard(){ showView('dashboard'); }
 
 function backFromCustomer(){
@@ -802,6 +1014,7 @@ function podLooksValid(rule, value){
 }
 
 function checkBillReady(){
+  billTouched = true;   // RC-3: reached only via a real field/file interaction
   const first = document.getElementById('c-first').value.trim();
   const last = document.getElementById('c-last').value.trim();
   const acct = document.getElementById('c-acct').value.trim();
@@ -819,8 +1032,49 @@ function checkBillReady(){
     document.getElementById('b-city').value.trim() &&
     /^\d{5}$/.test(document.getElementById('b-zip').value.trim())
   );
-  const ready = !!(first && last && state.bill.fileName && acctOk && podOk && street && city && /^\d{5}$/.test(zip) && billingOk && amt);
+  // RC-3: collect WHY, not just whether. A dead Continue with no explanation is
+  // the single most confusing failure a rep hits - especially on NYSEG, where
+  // the account number is 11 digits (National Grid is 10) and a POD ID is
+  // required. Previously this reduced ~9 conditions to one silent boolean.
+  const missing = [];
+  if(!state.bill.fileName) missing.push('Upload the utility bill');
+  if(!first || !last) missing.push('Customer first and last name');
+  if(!acct){
+    missing.push('Utility account number');
+  } else if(!acctOk){
+    missing.push(expected
+      ? ('Account number must be ' + expected + ' digits for ' +
+         ((rule && rule.display_name) || 'this utility') + ' — you entered ' + acct.length)
+      : 'Account number must contain digits only');
+  }
+  if(!podOk){
+    const podRule = rule && rule.pod_id;
+    missing.push(podRule && podRule.description
+      ? ((rule.display_name || 'This utility') + ' requires a POD ID (' + podRule.description + ')')
+      : 'Valid POD / secondary identifier');
+  }
+  if(!street) missing.push('Service street address');
+  if(!city) missing.push('Service city');
+  if(!/^\d{5}$/.test(zip)) missing.push('5-digit service ZIP');
+  if(!billingOk) missing.push('Complete billing address (or tick "same as service")');
+  if(!amt) missing.push('Average monthly bill amount');
+
+  const ready = missing.length === 0;
   document.getElementById('btn-bill-next').disabled = !ready;
+  renderBillRequirements(missing);
+}
+
+// Shows what is still outstanding. Deliberately neutral guidance, not red
+// errors, and only after the rep has actually started the step - so it informs
+// rather than scolds an untouched form.
+function renderBillRequirements(missing){
+  const el = document.getElementById('bill-requirements');
+  if(!el) return;
+  const started = !!(state.bill.fileName || billTouched);
+  if(!missing.length || !started){ el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.innerHTML = '<strong>Still needed before you can continue:</strong><ul style="margin:6px 0 0 18px;">' +
+    missing.map(function(m){ return '<li>' + esc(m) + '</li>'; }).join('') + '</ul>';
+  el.style.display = 'block';
 }
 
 async function uploadDocumentToDalton(file, category){
@@ -1035,6 +1289,8 @@ async function handleBillUpload(files){
   c.innerHTML = '<div class="ocr-panel"><div class="ocr-analyzing"><div class="spinner"></div>Reading the bill…</div></div>';
   try{
     const text = await extractTextFromFile(f);
+    // RC-2: a stale generation means a NEWER bill/enrollment now owns the DOM.
+    // Bail out of applying results, but never skip the finally{} cleanup below.
     if(generation !== billUploadGeneration) return;
     const parsed = parseUtilityBill(text);
     if(parsed.first) document.getElementById('c-first').value = parsed.first;
@@ -1054,14 +1310,30 @@ async function handleBillUpload(files){
   } catch(err){
     if(generation !== billUploadGeneration) return;
     c.innerHTML = '<div class="ocr-panel"><div class="ocr-analyzing">Couldn\'t read this file automatically — enter the details below by hand.</div></div>';
+  } finally {
+    // RC-2: cleanup MUST run on every path, including a stale generation.
+    // Previously both guards returned before this, leaving the "Reading the
+    // bill…" spinner on screen forever and btn-bill-next stuck disabled.
+    if(generation === billUploadGeneration){
+      // Still the current bill: clear any spinner we may have left behind and
+      // recompute the Continue button from real conditions.
+      if(c && c.innerHTML.indexOf('Reading the bill') !== -1){
+        c.innerHTML = '<div class="ocr-panel"><div class="ocr-analyzing">Couldn\'t read this file automatically — enter the details below by hand.</div></div>';
+      }
+      // Avoid an unhandled rejection before Continue; submitBill surfaces the
+      // same save error without discarding OCR results.
+      if(billUploadPromise) billUploadPromise.catch(()=>{});
+      checkBillReady();
+    }
+    // Stale generation: the newer owner already reset the DOM via
+    // clearWizardForms()/removeBill(). Touching it here would corrupt them.
   }
-  // Avoid an unhandled rejection before the rep presses Continue; submitBill
-  // will display the same save error without discarding the OCR results.
-  billUploadPromise.catch(()=>{});
-  checkBillReady();
 }
 function removeBill(){
   billUploadGeneration += 1;
+  // RC-2: clear any in-flight spinner so a discarded OCR cannot leave one stuck.
+  const oc = document.getElementById('ocr-container');
+  if(oc) oc.innerHTML = '';
   billRuntimeFile = null;
   billUploadPromise = null;
   state.bill.fileName='';
@@ -1461,22 +1733,7 @@ function loadRecordIntoState(rec){
   state.bill = Object.assign({}, rec.bill);
   state.lmi = Object.assign({}, rec.lmi);
 }
-function resumeCustomer(id){
-  const rec = customers.find(c=>c.id===id);
-  if(!rec) return;
-  loadRecordIntoState(rec);
-  skipProjectStep = true;
-  clearWizardForms();
-  showView('wizard');
-  const target = resumeStepFor(rec.status);
-  goStep(target || 2);
-  if(rec.status === 'Opportunity - Review'){
-    document.getElementById('pre-send').style.display='none';
-    document.getElementById('post-send').style.display='block';
-    document.getElementById('post-send-contact').textContent = rec.phone || rec.email;
-    document.getElementById('magic-link-text').textContent = 'https://sign.daltonsolar.com/a/'+Math.random().toString(36).slice(2,10);
-  }
-}
+
 
 function enterCustomerSign(mode){
   entryMode = mode;

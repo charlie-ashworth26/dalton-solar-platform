@@ -33,3 +33,27 @@ def test_phase2_frontend_contract():
     """Frontend/API contract for the served application."""
     import verify_frontend_integration as suite
     suite.main()
+
+
+def test_phase4a_rep_visibility():
+    """Phase 4A: rep enrollment visibility and resume."""
+    import test_phase4a_rep_visibility as suite
+    suite.main()
+
+
+def test_stabilization_multi_enrollment():
+    """Stabilization: multi-enrollment session state lifecycle."""
+    import test_stabilization_multi_enrollment as suite
+    suite.main()
+
+
+def test_response_hardening():
+    """Perch responses are never blindly assumed to be JSON."""
+    import test_response_hardening as suite
+    suite.main()
+
+
+def test_config_startup():
+    """Configuration loading and startup reporting."""
+    import test_config_startup as suite
+    suite.main()

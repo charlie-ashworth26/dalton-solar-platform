@@ -197,7 +197,8 @@
                   <div class="field"><label>Billing ZIP</label><input type="text" id="b-zip" class="mono-field" maxlength="5" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,5); checkBillReady();"></div>
                 </div>
               </div>
-              <p class="helper" id="bill-submit-error" style="display:none;color:var(--danger);margin-bottom:12px;"></p>
+              <div class="helper" id="bill-requirements" style="display:none;margin-bottom:10px;"></div>
+                <p class="helper" id="bill-submit-error" style="display:none;color:var(--danger);margin-bottom:12px;"></p>
 
               <div class="field">
                 <label>Average monthly bill amount</label>

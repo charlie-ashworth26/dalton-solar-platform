@@ -376,10 +376,6 @@ function resetWizardState(){
   // RC-5: enrollment-specific globals that previously survived across
   // enrollments. After this call, Enrollment B must be indistinguishable from
   // Enrollment B on a fresh page load.
-  docReviewed = {};
-  hasSigned = false;
-  isDrawing = false;
-  sigCtx = null;
   billTouched = false;
   skipProjectStep = false;
   entryMode = null;
@@ -390,8 +386,9 @@ function resetWizardState(){
   if(rb){ rb.style.display = 'none'; rb.innerHTML = ''; }
   const reqEl = document.getElementById('bill-requirements');
   if(reqEl){ reqEl.style.display = 'none'; reqEl.innerHTML = ''; }
-  const accStatus = document.getElementById('contract-accept-status');
-  if(accStatus){ accStatus.style.display = 'none'; accStatus.textContent = ''; }
+  // The old #contract-accept-status element was removed with the legacy
+  // contract UI. The shared Agreements component owns its own status region
+  // and clears it on every mount, so there is nothing to reset here.
   clearWizardForms();
 }
 function clearWizardForms(){
@@ -416,7 +413,6 @@ function clearWizardForms(){
   const lmiLead=document.getElementById('lmi-lead');
   if(lmiTitle) lmiTitle.textContent='LMI documentation';
   if(lmiLead) lmiLead.textContent='Qualify the customer for the low-income adder — by document, by income self-attestation, or mark it N/A.';
-  document.getElementById('contract-review-error').style.display='none';
   document.getElementById('lmi-check-container').innerHTML='';
   document.getElementById('lmi-household-size').value='';
   document.getElementById('ami-threshold-display').textContent='';
@@ -433,8 +429,7 @@ function clearWizardForms(){
   document.getElementById('btn-lmi-next').disabled=true;
   document.getElementById('btn-bill-next').disabled=true;
   document.getElementById('pre-send').style.display='block';
-  document.getElementById('post-send').style.display='none';
-  const contractList=document.getElementById('perch-contract-list'); if(contractList) contractList.innerHTML='<p class="helper">Generating the personalized contract packet…</p>';
+  const agrHostEl=document.getElementById('agr-host-rep'); if(agrHostEl) agrHostEl.innerHTML='';
 }
 
 /* ==================== PERCH CAPACITY RENDERER ====================
@@ -846,7 +841,15 @@ async function openEnrollment(enrollmentId){
     // from persisted URL-free metadata. Zero Perch calls: opening a completed
     // enrollment is entirely side-effect-free.
     lockEnrollmentReadOnly(blocked);
-    renderCompletedContractSummary(e, key, terminal, blocked);
+    mountAgreements({
+      actor: 'rep',
+      enrollmentId: e.id,
+      contracts: ((e.workflow_last_response || {}).contracts) || [],
+      acceptanceEnabled: false,
+      readOnly: true,
+      submitted: terminal,
+      summary: agrSummaryFromEnrollment(e),
+    });
   } else if(REHYDRATE_CONTRACT_STEPS.indexOf(key) !== -1){
     await rehydrateContractPacket(key, terminal, blocked);
   }
@@ -855,44 +858,14 @@ async function openEnrollment(enrollmentId){
 // Read-only view of a finished (or uncertain) enrollment. Renders only what
 // Dalton already persisted - contract NAMES, never URLs, which are deliberately
 // never stored. Makes no network request of any kind.
-function renderCompletedContractSummary(e, key, terminal, blocked){
-  const wrap = document.getElementById('perch-contract-list');
-  const errEl = document.getElementById('contract-review-error');
-  if(errEl){ errEl.style.display = 'none'; errEl.textContent = ''; }
-
-  const saved = (e.workflow_last_response) || {};
-  const names = Array.isArray(saved.contracts) ? saved.contracts : [];
-
-  let html = '';
-  if(terminal){
-    html += '<div class="wf-notice info" style="margin-bottom:12px;">' +
-            'This enrollment is <strong>complete</strong>. The contracts below were ' +
-            'accepted and submitted to Perch. Nothing further is required.</div>';
-  } else if(blocked){
-    html += '<div class="wf-notice warn" style="margin-bottom:12px;">' +
-            'A previous acceptance attempt could not be confirmed. Check this ' +
-            'enrollment with Perch before taking any further action.</div>';
-  }
-
-  if(names.length){
-    html += '<ul style="margin:0 0 10px 18px;">' + names.map(function(c){
-      const nm = (c && c.contract_name) ? c.contract_name : String(c);
-      return '<li>' + esc(nm) + '</li>';
-    }).join('') + '</ul>';
-  }
-  // Presigned Perch URLs are intentionally never persisted, and Perch refuses
-  // to regenerate them once acceptance has started - so documents cannot be
-  // re-opened from here. Say so plainly instead of showing a dead button.
-  html += '<p class="helper">Contract documents are held by Perch and are no longer ' +
-          'retrievable through Dalton once an enrollment is complete.</p>';
-  if(wrap) wrap.innerHTML = html;
-}
-
 async function rehydrateContractPacket(key, terminal, blocked){
-  const wrap = document.getElementById('perch-contract-list');
-  if(wrap) wrap.innerHTML = '<p class="helper">Loading the contract packet…</p>';
-  const errEl = document.getElementById('contract-review-error');
-  if(errEl) errEl.style.display = 'none';
+  // Mount the shared component FIRST so the review screen is present (and the
+  // error region exists) before the network call. The old #contract-review-error
+  // element was removed with the legacy UI; errors now surface in the
+  // component's own #agr-card-error, which renderAgreementCard() renders.
+  mountRepAgreements(false, false);
+  const cardErr = document.getElementById('agr-card-error');
+  if(cardErr) cardErr.style.display = 'none';
   try{
     const body = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/contracts',
                                 {method:'POST', body:JSON.stringify({})});
@@ -905,12 +878,13 @@ async function rehydrateContractPacket(key, terminal, blocked){
   }catch(err){
     perchContracts = [];
     perchContext.acceptanceEnabled = false;
-    if(errEl){
-      errEl.textContent = 'Could not reload the contract packet: ' + err.message +
-                          ' Return to the dashboard and reopen this enrollment to retry.';
-      errEl.style.display = 'block';
+    mountRepAgreements(false, false);
+    const failEl = document.getElementById('agr-card-error');
+    if(failEl){
+      failEl.textContent = 'Could not load the agreements: ' + err.message +
+                           ' Return to the dashboard and reopen this enrollment to retry.';
+      failEl.style.display = 'block';
     }
-    if(wrap) wrap.innerHTML = '<p class="helper">The contract packet could not be loaded.</p>';
     return;
   }
   if(terminal || blocked){
@@ -918,8 +892,7 @@ async function rehydrateContractPacket(key, terminal, blocked){
     perchContext.acceptanceEnabled = false;
     perchContext.acceptanceSubmitted = terminal;
   }
-  renderPerchContracts();
-  updateAcceptButtonState();
+  mountRepAgreements(false, false);
 }
 
 function renderResumeBanner(e, key, terminal, blocked){
@@ -945,7 +918,8 @@ function renderResumeBanner(e, key, terminal, blocked){
 // it deterministically.
 const READ_ONLY_LOCK_IDS = [
   'btn-project-next', 'btn-bill-next', 'btn-contact-next', 'btn-lmi-next',
-  'contract-accept-btn', 'contract-confirm-check',
+  // Shared agreement component controls.
+  'agr-agree-btn', 'agr-ack-check', 'agr-open-btn',
 ];
 let readOnlyLocked = false;
 
@@ -963,17 +937,10 @@ function lockEnrollmentReadOnly(blocked){
     const el = document.getElementById(id);
     if(el) el.disabled = true;
   });
-  const chk = document.getElementById('contract-confirm-check');
-  if(chk){ chk.checked = false; chk.disabled = true; }
-  const acc = document.getElementById('contract-accept-btn');
-  if(acc){ acc.disabled = true; acc.textContent = blocked ? 'Acceptance blocked' : 'Contracts accepted'; }
-  const status = document.getElementById('contract-accept-status');
-  if(status){
-    status.textContent = blocked
-      ? 'A previous acceptance attempt could not be confirmed. Check this enrollment with Perch before any further action.'
-      : 'These contracts were already accepted. This enrollment is complete and cannot be resubmitted.';
-    status.style.display = 'block';
-  }
+    // READ_ONLY_LOCK_IDS above already disables the shared component's
+    // checkbox and agree button. The explanatory copy now lives in
+    // renderAgreementCard(), which renders the read-only state directly - the
+    // old #contract-* elements this used to poke no longer exist.
 }
 
 function exitWizard(){ showView('dashboard'); }
@@ -1058,7 +1025,7 @@ function hydrateStep(n){
     if(perchContext.nextStepKey === 'proof_docs') prepareLmiForPerch();
     checkLmiReady();
   }
-  if(n===5 && perchContracts.length){ renderPerchContracts(); updateAcceptButtonState(); }
+  if(n===5 && perchContracts.length){ mountRepAgreements(false, perchContext.acceptanceSubmitted === true); }
 }
 
 function currentUtilityRule(){ return utilityRules[perchContext.utilitySlug] || null; }
@@ -1263,7 +1230,7 @@ async function submitContact(){
 async function continueFromPerchNextStep(origin){
   if(perchContext.contractsGenerated){
     perchContext.agreementBackStep = origin === 'lmi' ? 4 : 3;
-    goStep(5); renderPerchContracts(); return;
+    goStep(5); mountRepAgreements(false, false); return;
   }
   if(perchContext.nextStepKey === 'proof_docs'){
     goStep(4); prepareLmiForPerch(); return;
@@ -1684,148 +1651,10 @@ async function generateContractsAndOpenAgreement(backStep){
   }
   perchContext.agreementBackStep=backStep || 3;
   goStep(5);
-  renderPerchContracts();
+  mountRepAgreements(false, false);
 }
-
-function renderPerchContracts(){
-  const wrap=document.getElementById('perch-contract-list');
-  if(!wrap) return;
-  if(!perchContracts.length){
-    wrap.innerHTML='<p class="helper">Perch did not return any contract documents.</p>';
-    return;
-  }
-  wrap.innerHTML=perchContracts.map((c,i)=>{
-    const expiry=c.expires_at ? ('Expires '+esc(String(c.expires_at))) : 'Review link generated on demand';
-    return '<div class="review-line"><span class="rl-label" style="max-width:72%;">'+esc(c.contract_name || ('Contract '+(i+1)))+'<br><span class="helper">'+expiry+'</span></span>'+
-      '<span class="rl-val"><button class="btn btn-ghost btn-sm" onclick="reviewPerchContract('+i+')">Review</button></span></div>';
-  }).join('');
-}
-
-async function reviewPerchContract(index){
-  const errEl=document.getElementById('contract-review-error');
-  errEl.style.display='none';
-  // Open synchronously so the browser treats this as the user's Review click.
-  // The authenticated POST returns only a short-lived *Dalton* one-time URL;
-  // that same-origin URL then regenerates the Perch packet server-side and
-  // redirects. A Perch presigned URL never enters application JSON/state.
-  const reviewWindow=window.open('about:blank','_blank');
-  if(!reviewWindow){
-    errEl.textContent='Your browser blocked the contract review window. Allow pop-ups for this Dalton page and click Review again.';
-    errEl.style.display='block'; return;
-  }
-  try{
-    const body=await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/contracts/review', {
-      method:'POST', body:JSON.stringify({index:index})
-    });
-    if(!body.review_url || !String(body.review_url).startsWith('/api/perch/contract-reviews/')){
-      throw new Error('Dalton did not return a valid contract review link.');
-    }
-    reviewWindow.location=body.review_url;
-  }catch(err){
-    reviewWindow.close();
-    errEl.textContent=err.message; errEl.style.display='block';
-  }
-}
-function updateAcceptButtonState(){
-  const btn=document.getElementById('contract-accept-btn');
-  const chk=document.getElementById('contract-confirm-check');
-  if(!btn || !chk) return;
-  if(perchContext.acceptanceSubmitted){
-    btn.disabled=true; btn.textContent='Contracts accepted'; chk.disabled=true; return;
-  }
-  if(perchContext.acceptanceInFlight){ btn.disabled=true; return; }
-  // Enabled only when the backend says acceptance is available AND the customer
-  // has explicitly confirmed. The backend re-checks confirmation independently.
-  btn.disabled = !(perchContext.acceptanceEnabled && chk.checked);
-}
-
-async function acceptPerchContracts(){
-  const btn=document.getElementById('contract-accept-btn');
-  const chk=document.getElementById('contract-confirm-check');
-  const errEl=document.getElementById('contract-review-error');
-  const statusEl=document.getElementById('contract-accept-status');
-  errEl.style.display='none'; statusEl.style.display='none';
-
-  if(!chk || !chk.checked){
-    errEl.textContent='The customer must confirm they reviewed and agree to the contracts.';
-    errEl.style.display='block'; return;
-  }
-  // Double-submission protection: block re-entry for the whole request.
-  if(perchContext.acceptanceInFlight || perchContext.acceptanceSubmitted) return;
-  perchContext.acceptanceInFlight=true;
-  btn.disabled=true; btn.textContent='Submitting acceptance…';
-
-  let body;
-  try{
-    body=await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/contracts/accept', {
-      method:'POST', body:JSON.stringify({customer_confirmed:true})
-    });
-  }catch(err){
-    perchContext.acceptanceInFlight=false;
-    btn.textContent='Accept contracts';
-    errEl.textContent=err.message; errEl.style.display='block';
-    // Deliberately NOT re-enabling on an uncertain outcome: a second click
-    // could double-submit an acceptance Perch may already have recorded.
-    if(/uncertain|could not be confirmed/i.test(err.message || '')){
-      btn.disabled=true;
-      statusEl.textContent='Do not resubmit. Check this enrollment with Perch before trying again.';
-      statusEl.style.display='block';
-    }else{
-      updateAcceptButtonState();
-    }
-    return;
-  }
-
-  perchContext.acceptanceInFlight=false;
-  perchContext.acceptanceSubmitted=true;
-  btn.textContent='Contracts accepted'; btn.disabled=true; chk.disabled=true;
-
-  const st=body.perch_status || null;
-  let msg=body.message || 'Contracts accepted.';
-  if(st && st.completed===true){
-    msg += ' Perch reports this enrollment is complete.';
-  }else if(st){
-    const remaining=(st.remaining_steps||[]).join(', ');
-    msg += remaining ? (' Perch still has outstanding steps: '+remaining+'.')
-                     : ' Perch has not yet reported completion.';
-  }
-  statusEl.textContent=msg; statusEl.style.display='block';
-}
-
 function backFromAgreement(){ goStep(perchContext.agreementBackStep || 3); }
-function sendAgreement(){
-  const errEl=document.getElementById('contract-review-error');
-  errEl.textContent='Contract acceptance is intentionally disabled in this milestone.';
-  errEl.style.display='block';
-}
-
 function todayStr(){ return new Date().toISOString().slice(0,10); }
-function upsertCustomerRecord(patch){
-  const base = {
-    first: state.customer.first, last: state.customer.last, email: state.customer.email,
-    phone: state.customer.phone, acct: state.customer.acct, password: state.customer.password,
-    projectId: state.project.id, projectName: state.project.name, utility: state.project.utility,
-    address: Object.assign({}, state.address), bill: Object.assign({}, state.bill), lmi: Object.assign({}, state.lmi),
-    lastModified: todayStr()
-  };
-  if(currentCustomerId){
-    const idx = customers.findIndex(c=>c.id===currentCustomerId);
-    if(idx>-1){ customers[idx] = Object.assign({}, customers[idx], base, patch); return; }
-  }
-  const id = 'c' + Math.random().toString(36).slice(2,9);
-  customers.push(Object.assign({id:id, dateAdded: todayStr(), status:'Opportunity - Address'}, base, patch));
-  currentCustomerId = id;
-}
-function loadRecordIntoState(rec){
-  currentCustomerId = rec.id;
-  state.project = {id: rec.projectId, name: rec.projectName, utility: rec.utility};
-  state.customer = {first:rec.first,last:rec.last,email:rec.email,phone:rec.phone,acct:rec.acct,password:rec.password};
-  state.address = Object.assign({}, rec.address);
-  state.bill = Object.assign({}, rec.bill);
-  state.lmi = Object.assign({}, rec.lmi);
-}
-
-
 // REMOVED: the legacy/mock customer contract engine.
 //
 // This used to render a hardcoded local document packet with per-document
@@ -1837,12 +1666,6 @@ function loadRecordIntoState(rec){
 // (openCustomerContracts -> POST /contracts, /contracts/review, /contracts/accept).
 // Kept as a hard failure rather than deleted outright so any surviving caller
 // is caught loudly instead of silently reopening the mock flow.
-function enterCustomerSign(mode){
-  console.error('enterCustomerSign() is removed. Customers use openCustomerContracts().');
-  if(CustomerAuth.getToken()){ openCustomerContracts(); return; }
-  activateScreen('screen-customer-login');
-}
-
 /* ---------------- REAL DOCUMENT PACKET (built from Perch/Solstice NY contract templates) ---------------- */
 const docPacket = [
   {
@@ -1901,7 +1724,6 @@ const docPacket = [
       '<p>Covers acceptable use, intellectual property, disclaimers of warranty, limitation of liability, and how your personal information is collected, used, and protected.</p>'
   }
 ];
-let docReviewed = {};
 function buildLmiSummary(){
   if(state.lmi.mode === 'attest'){
     return '<p>You self-attested that your household of <strong>'+state.lmi.householdSize+'</strong> has income <strong>'+(state.lmi.incomeBelow ? 'below' : 'above')+'</strong> 80% of the State Median Income for that household size.</p>'+
@@ -1913,91 +1735,6 @@ function buildLmiSummary(){
   }
   return '<p>No low-income program documentation was submitted for this enrollment.</p>';
 }
-function renderDocPacket(){
-  const wrap = document.getElementById('doc-packet');
-  const savingsPct = state.project.savingsPct != null ? state.project.savingsPct : 5;
-  const ctx = {
-    utility: state.project.utility || 'your utility',
-    custName: state.customer.first+' '+state.customer.last,
-    address: state.address.street+(state.address.unit ? ', '+state.address.unit : '')+', '+state.address.city+', NY '+state.address.zip,
-    savingsPct: savingsPct,
-    exampleSavings: savingsPct.toFixed(2),
-    lmiSummary: buildLmiSummary()
-  };
-  docReviewed = {};
-  wrap.innerHTML = docPacket.map(d=>{
-    docReviewed[d.id] = false;
-    return '<details class="doc-item" id="doc-'+d.id+'">'+
-      '<summary><span class="di-chevron">›</span><span><span class="di-title">'+d.title+'</span><div class="di-sub">'+d.sub+'</div></span><span class="di-status" id="di-status-'+d.id+'">Not reviewed</span></summary>'+
-      '<div class="doc-item-body">'+d.body(ctx)+'</div>'+
-      '<label class="doc-item-check"><input type="checkbox" onchange="markDocReviewed(\''+d.id+'\', this.checked)"> I\'ve reviewed this document</label>'+
-    '</details>';
-  }).join('');
-  checkCustomerReady();
-}
-function markDocReviewed(id, val){
-  docReviewed[id] = val;
-  const statusEl = document.getElementById('di-status-'+id);
-  if(statusEl){ statusEl.textContent = val ? 'Reviewed' : 'Not reviewed'; statusEl.classList.toggle('done', val); }
-  checkCustomerReady();
-}
-function allDocsReviewed(){
-  const keys = Object.keys(docReviewed);
-  return keys.length>0 && keys.every(k=>docReviewed[k]);
-}
-
-let sigCtx, isDrawing = false, hasSigned = false;
-function initSigCanvas(){
-  const canvas = document.getElementById('sig-canvas');
-  sigCtx = canvas.getContext('2d');
-  sigCtx.clearRect(0,0,canvas.width,canvas.height);
-  sigCtx.strokeStyle = '#122720';
-  sigCtx.lineWidth = 3;
-  sigCtx.lineCap = 'round';
-  sigCtx.lineJoin = 'round';
-  hasSigned = false;
-  document.getElementById('sig-canvas-wrap').classList.remove('signed');
-  function pos(e){
-    const r = canvas.getBoundingClientRect();
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-    const scaleX = canvas.width / r.width;
-    const scaleY = canvas.height / r.height;
-    return {x: (clientX - r.left) * scaleX, y: (clientY - r.top) * scaleY};
-  }
-  function start(e){ isDrawing=true; hasSigned=true; document.getElementById('sig-canvas-wrap').classList.add('signed'); const p=pos(e); sigCtx.beginPath(); sigCtx.moveTo(p.x,p.y); sigCtx.lineTo(p.x+0.1,p.y+0.1); sigCtx.stroke(); checkCustomerReady(); e.preventDefault(); }
-  function move(e){ if(!isDrawing) return; const p=pos(e); sigCtx.lineTo(p.x,p.y); sigCtx.stroke(); e.preventDefault(); }
-  function end(){ isDrawing=false; }
-  canvas.onmousedown=start; canvas.onmousemove=move; window.onmouseup=end;
-  canvas.ontouchstart=start; canvas.ontouchmove=move; canvas.ontouchend=end;
-}
-function clearSignature(){
-  const canvas = document.getElementById('sig-canvas');
-  if(sigCtx) sigCtx.clearRect(0,0,canvas.width,canvas.height);
-  hasSigned = false;
-  document.getElementById('sig-canvas-wrap').classList.remove('signed');
-  checkCustomerReady();
-}
-document.addEventListener('change', function(e){ if(e.target.id==='cv-agree') checkCustomerReady(); });
-function checkCustomerReady(){
-  const agree = document.getElementById('cv-agree').checked;
-  document.getElementById('cv-submit').disabled = !(hasSigned && agree && allDocsReviewed());
-}
-function completeSign(){
-  upsertCustomerRecord({status:'Customer - Verified'});
-  document.getElementById('screen-customer').classList.remove('active');
-  document.getElementById('screen-complete').classList.add('active');
-  const cta = document.getElementById('complete-cta');
-  if(entryMode === 'preview'){
-    cta.style.display = 'inline-flex';
-    cta.textContent = 'Return to dashboard';
-    cta.onclick = completeReturnToDashboard;
-  } else {
-    cta.style.display = 'none';
-    document.getElementById('complete-copy').innerHTML = 'Signed and submitted. You can close this window — Dalton Solar will be in touch if anything else is needed.';
-  }
-  setTimeout(fireConfetti, 150);
-}
 function completeReturnToDashboard(){
   document.getElementById('screen-complete').classList.remove('active');
   document.getElementById('app-shell').classList.add('active');
@@ -2005,29 +1742,6 @@ function completeReturnToDashboard(){
   document.getElementById('complete-copy').innerHTML = 'Signed and sent to QA. The rep dashboard will show this as <strong>Customer - Verified</strong> once it clears review.';
   resetWizardState();
   showView('dashboard');
-}
-function fireConfetti(){
-  const canvas = document.getElementById('confetti-canvas');
-  if(!canvas) return;
-  const ctx = canvas.getContext('2d');
-  canvas.width = window.innerWidth; canvas.height = window.innerHeight;
-  const colors = ['#1F6E52','#D8A31A','#8AC7A1','#F4D35E','#134432'];
-  const particles = [];
-  for(let i=0;i<140;i++){
-    particles.push({x:Math.random()*canvas.width, y:-20-Math.random()*canvas.height*0.6, w:6+Math.random()*6, h:8+Math.random()*10,
-      color:colors[Math.floor(Math.random()*colors.length)], speed:2+Math.random()*3, drift:-1+Math.random()*2, rot:Math.random()*360, rotSpeed:-6+Math.random()*12});
-  }
-  let frame=0;
-  function loop(){
-    frame++;
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-    particles.forEach(function(p){
-      p.y+=p.speed; p.x+=p.drift; p.rot+=p.rotSpeed;
-      ctx.save(); ctx.translate(p.x,p.y); ctx.rotate(p.rot*Math.PI/180); ctx.fillStyle=p.color; ctx.fillRect(-p.w/2,-p.h/2,p.w,p.h); ctx.restore();
-    });
-    if(frame<220){ requestAnimationFrame(loop); } else { ctx.clearRect(0,0,canvas.width,canvas.height); }
-  }
-  loop();
 }
 
 function resetAll(){
@@ -2071,7 +1785,6 @@ function togglePasswordVisibility(inputId, btnId){
 
 let customerEnrollmentId = null;
 let customerContracts = [];
-let customerAcceptInFlight = false;
 
 async function customerApi(path, opts){
   opts = opts || {};
@@ -2089,10 +1802,125 @@ async function customerApi(path, opts){
   if(!res.ok) throw new Error((data && data.error) || ('Request failed (' + res.status + ')'));
   return data;
 }
+/* ═══════════════════ AGREEMENT REVIEW — ONE SHARED COMPONENT ═══════════════════
+   Rep and customer render the SAME component and call the SAME Perch-backed
+   routes. The only difference is which bearer token apiFetch attaches and which
+   host element it mounts into - there is deliberately no second implementation.
 
+     POST /api/perch/enrollments/:id/contracts          packet (fresh URLs, server-side)
+     POST /api/perch/enrollments/:id/contracts/review   one-time capability URL
+     POST /api/perch/enrollments/:id/contracts/accept   the ONLY state change
+
+   Perch presigned URLs never reach this file. Review mints a short-lived
+   single-use Dalton URL each time it is clicked.                              */
+
+const Agreements = {
+  actor: 'rep',          // 'rep' | 'customer'
+  enrollmentId: null,
+  contracts: [],
+  acceptanceEnabled: false,
+  submitted: false,
+  readOnly: false,
+  inFlight: false,
+  opened: {},            // index -> true, for "Opened" hints only. NOT gating.
+  summary: null,
+};
+
+function agrToken(){
+  return Agreements.actor === 'customer'
+    ? (typeof CustomerAuth !== 'undefined' ? CustomerAuth.getToken() : null)
+    : (typeof AuthStore !== 'undefined' ? AuthStore.getToken() : null);
+}
+
+async function agrFetch(path, opts){
+  const o = Object.assign({headers:{}}, opts || {});
+  o.headers = Object.assign({'Content-Type':'application/json',
+                             'Authorization':'Bearer ' + agrToken()}, o.headers || {});
+  const res = await fetch(path, o);
+  let body = null;
+  try { body = await res.json(); } catch(e){ body = null; }
+  if(!res.ok){
+    throw new Error((body && (body.error || body.detail)) || ('Request failed (' + res.status + ')'));
+  }
+  return body || {};
+}
+
+function agrHost(){
+  return document.getElementById(
+    Agreements.actor === 'customer' ? 'agr-host-customer' : 'agr-host-rep');
+}
+
+function agrEsc(v){ return (typeof esc === 'function') ? esc(v == null ? '' : v) : String(v == null ? '' : v); }
+
+/* ── Mount ─────────────────────────────────────────────────────────────── */
+
+function mountAgreements(opts){
+  Agreements.actor = opts.actor || 'rep';
+  Agreements.enrollmentId = opts.enrollmentId;
+  Agreements.contracts = opts.contracts || [];
+  Agreements.acceptanceEnabled = opts.acceptanceEnabled === true;
+  Agreements.readOnly = opts.readOnly === true;
+  Agreements.submitted = opts.submitted === true;
+  Agreements.summary = opts.summary || null;
+  Agreements.opened = {};
+  renderAgreementCard();
+}
+/* ── Overlay ───────────────────────────────────────────────────────────── */
+
+
+function agrEscKey(e){ if(e.key === 'Escape') closeAgreements(); }
+function agrBackdrop(e){ if(e.target && e.target.id === 'agr-overlay') closeAgreements(); }
+/* Opening documents NEVER accepts. Only the checkbox + button below does. */
+function agrSummaryFromState(){
+  const addr = state.address || {};
+  const line = [addr.street, addr.unit, addr.city].filter(Boolean).join(', ');
+  return {
+    customerName: [state.customer.first, state.customer.last].filter(Boolean).join(' '),
+    utility: (state.project && state.project.utility) || perchContext.utilitySlug || '',
+    serviceAddress: line ? (line + (addr.zip ? ', NY ' + addr.zip : '')) : '',
+    project: (state.project && state.project.name) || '',
+  };
+}
+
+function agrSummaryFromEnrollment(e){
+  const a = e.service_address || {};
+  const line = [a.street, a.unit, a.city].filter(Boolean).join(', ');
+  return {
+    customerName: e.customer ? [e.customer.first_name, e.customer.last_name].filter(Boolean).join(' ') : '',
+    utility: e.utility_account ? e.utility_account.utility_name : '',
+    serviceAddress: line ? (line + (a.zip ? ', NY ' + a.zip : '')) : '',
+    project: e.project ? e.project.name : '',
+  };
+}
+
+// Rep-side: the wizard already holds the packet in perchContracts.
+function mountRepAgreements(readOnly, submitted){
+  mountAgreements({
+    actor: 'rep',
+    enrollmentId: currentDraft && currentDraft.enrollment_id,
+    contracts: perchContracts,
+    acceptanceEnabled: perchContext.acceptanceEnabled === true,
+    readOnly: readOnly === true,
+    submitted: submitted === true,
+    summary: agrSummaryFromState(),
+  });
+}
+
+// Called by the shared component after a successful acceptance.
+function onAgreementsAccepted(){
+  if(Agreements.actor === 'rep'){
+    perchContext.acceptanceSubmitted = true;
+    perchContext.acceptanceEnabled = false;
+  }
+}
+
+
+/* Customer entry point. Resolves the customer's own enrollment, then mounts the
+   SAME Agreements component the rep uses - no customer-specific contract code. */
 async function openCustomerContracts(){
   const errEl = document.getElementById('portal-error');
   if(errEl) errEl.style.display = 'none';
+
   let me;
   try{
     me = await customerApi('/api/auth/customer-me');
@@ -2101,146 +1929,270 @@ async function openCustomerContracts(){
     return;
   }
   customerEnrollmentId = me.enrollment_id;
-
   activateScreen('screen-customer-contracts');
-  const listEl = document.getElementById('cc-contract-list');
-  const statusEl = document.getElementById('cc-status');
-  const ccErr = document.getElementById('cc-error');
-  if(ccErr) ccErr.style.display = 'none';
-  if(statusEl) statusEl.style.display = 'none';
+
+  const summary = {
+    customerName: me.customer ? [me.customer.first_name, me.customer.last_name].filter(Boolean).join(' ') : '',
+    utility: me.utility_name || '',
+    serviceAddress: me.service_address || '',
+    project: me.project_name || '',
+  };
 
   // Completed / blocked enrollments are READ-ONLY: no packet is requested, so
-  // nothing is sent to Perch, and no acceptance control is offered.
-  if(me.workflow_is_terminal || me.workflow_is_blocked){
-    customerContracts = [];
-    renderCustomerReadOnly(me);
+  // opening one makes ZERO Perch contract calls.
+  if(me.workflow_is_terminal === true || me.workflow_is_blocked === true){
+    mountAgreements({
+      actor: 'customer', enrollmentId: customerEnrollmentId,
+      contracts: (me.workflow_last_response || {}).contracts || [],
+      acceptanceEnabled: false, readOnly: true,
+      submitted: me.workflow_is_terminal === true, summary: summary,
+    });
     return;
   }
 
-  if(listEl) listEl.innerHTML = '<p class="helper">Loading your contract packet…</p>';
+  mountAgreements({actor:'customer', enrollmentId: customerEnrollmentId, contracts: [],
+                   acceptanceEnabled: false, readOnly: false, submitted: false, summary: summary});
+
   let body;
   try{
     body = await customerApi('/api/perch/enrollments/' + customerEnrollmentId + '/contracts',
                              {method:'POST', body: JSON.stringify({})});
   }catch(err){
-    customerContracts = [];
-    if(listEl) listEl.innerHTML = '<p class="helper">Your contract packet could not be loaded.</p>';
-    if(ccErr){ ccErr.textContent = err.message; ccErr.style.display = 'block'; }
-    updateCustomerAcceptState();
+    const cardErr = document.getElementById('agr-card-error');
+    if(cardErr){
+      cardErr.textContent = 'Could not load your agreements: ' + err.message;
+      cardErr.style.display = 'block';
+    }
     return;
   }
-  customerContracts = body.contracts || [];
-  renderCustomerContracts(body);
-  updateCustomerAcceptState();
+  mountAgreements({
+    actor: 'customer', enrollmentId: customerEnrollmentId,
+    contracts: body.contracts || [],
+    acceptanceEnabled: body.acceptance_enabled === true,
+    readOnly: false, submitted: false, summary: summary,
+  });
 }
 
-function renderCustomerReadOnly(me){
-  const listEl = document.getElementById('cc-contract-list');
-  const btn = document.getElementById('cc-accept-btn');
-  const chk = document.getElementById('cc-confirm-check');
-  const statusEl = document.getElementById('cc-status');
-  document.getElementById('cc-title').textContent =
-    me.workflow_is_terminal ? 'Your enrollment is complete' : 'Your enrollment needs review';
-  document.getElementById('cc-lead').textContent =
-    me.workflow_is_terminal
-      ? 'You have already accepted your contracts. Nothing further is required.'
-      : 'We are confirming the status of your agreement. No action is needed right now.';
-  if(listEl) listEl.innerHTML =
-    '<p class="helper">Your contract documents are held by Perch and are no longer ' +
-    'retrievable here once an enrollment is complete.</p>';
-  if(chk){ chk.checked = false; chk.disabled = true; }
-  if(btn){ btn.disabled = true; btn.textContent = me.workflow_is_terminal ? 'Completed' : 'Unavailable'; }
-  if(statusEl){
-    statusEl.textContent = me.workflow_step_label || '';
-    statusEl.style.display = 'block';
+
+/* ── Final review screen ──────────────────────────────────────────────────
+   Modelled on Perch's own National Grid final-review step: concise account
+   details, ONE acknowledgement whose text carries the real agreement names as
+   inline links, ONE submit button. No document rail, no per-document cards, no
+   "opened" badges, no requirement to open anything. */
+
+function renderAgreementCard(){
+  const host = agrHost();
+  if(!host) return;
+  const s = Agreements.summary || {};
+
+  const rows = [
+    ['Name', s.customerName],
+    ['Email', s.email],
+    ['Electric utility', s.utility],
+    ['Service address', s.serviceAddress],
+    ['Account number', s.accountNumber],
+  ].filter(function(r){ return r[1]; });
+
+  let html = '<div class="card">';
+
+  if(Agreements.readOnly){
+    html += '<p class="card-eyebrow">Enrollment complete</p>' +
+            '<h2>Your enrollment is complete</h2>' +
+            '<p class="lead">These agreements were accepted and submitted. Nothing further is needed.</p>';
+  } else {
+    html += '<p class="card-eyebrow">Final step</p>' +
+            '<h2>Review &amp; complete your enrollment</h2>' +
+            '<p class="lead">Check your details below, then agree to your enrollment agreements to finish.</p>';
   }
-}
 
-function renderCustomerContracts(body){
-  const listEl = document.getElementById('cc-contract-list');
-  if(!listEl) return;
-  if(!customerContracts.length){
-    listEl.innerHTML = '<p class="helper">No contract documents were returned.</p>';
+  if(rows.length){
+    html += '<dl class="agr-details">';
+    rows.forEach(function(r){
+      html += '<dt>' + agrEsc(r[0]) + '</dt><dd>' + agrEsc(r[1]) + '</dd>';
+    });
+    html += '</dl>';
+  }
+
+  if(Agreements.readOnly){
+    if(Agreements.contracts.length){
+      html += '<p class="agr-docs-label">Agreements on file</p><ul class="agr-docs-list">';
+      Agreements.contracts.forEach(function(c){
+        html += '<li>' + agrEsc(c.contract_name || c) + '</li>';
+      });
+      html += '</ul>';
+    }
+    html += '<p class="helper">Your agreements are held by Perch and are no longer ' +
+            'retrievable through Dalton once an enrollment is complete.</p>';
+    html += '</div>';
+    host.innerHTML = html;
     return;
   }
-  listEl.innerHTML = customerContracts.map(function(ct, i){
-    return '<div class="product-card" style="display:flex;justify-content:space-between;' +
-           'align-items:center;gap:12px;">' +
-           '<div><div class="prod-name">' + esc(ct.contract_name || ('Document ' + (i+1))) + '</div>' +
-           '<div class="prod-id">' + (ct.url_present ? 'Ready to view' : 'Unavailable') + '</div></div>' +
-           '<button class="btn btn-ghost btn-sm" onclick="customerReviewContract(' + i + ')">Review</button>' +
-           '</div>';
-  }).join('');
-}
 
-async function customerReviewContract(index){
-  // Opened synchronously so the pop-up blocker does not eat it, exactly as the
-  // rep flow does. The presigned URL is never exposed to this page.
-  const w = window.open('about:blank', '_blank');
-  const ccErr = document.getElementById('cc-error');
-  if(ccErr) ccErr.style.display = 'none';
-  try{
-    const body = await customerApi(
-      '/api/perch/enrollments/' + customerEnrollmentId + '/contracts/review',
-      {method:'POST', body: JSON.stringify({contract_index: index})});
-    if(w) w.location = body.review_url; else window.location = body.review_url;
-  }catch(err){
-    if(w) w.close();
-    if(ccErr){ ccErr.textContent = err.message; ccErr.style.display = 'block'; }
-  }
-}
+  html += '<p class="agr-note err" id="agr-card-error" style="display:none;"></p>';
 
-function updateCustomerAcceptState(){
-  const btn = document.getElementById('cc-accept-btn');
-  const chk = document.getElementById('cc-confirm-check');
-  if(!btn || !chk) return;
-  if(customerAcceptInFlight){ btn.disabled = true; return; }
-  btn.disabled = !(customerContracts.length > 0 && chk.checked);
-}
-
-async function customerAcceptContracts(){
-  const btn = document.getElementById('cc-accept-btn');
-  const chk = document.getElementById('cc-confirm-check');
-  const ccErr = document.getElementById('cc-error');
-  const statusEl = document.getElementById('cc-status');
-  if(ccErr) ccErr.style.display = 'none';
-  if(!chk || !chk.checked){
-    if(ccErr){ ccErr.textContent = 'Please confirm you have reviewed the documents.'; ccErr.style.display = 'block'; }
+  if(!Agreements.contracts.length){
+    html += '<p class="helper">Preparing your agreements…</p></div>';
+    host.innerHTML = html;
     return;
   }
-  if(customerAcceptInFlight) return;
-  customerAcceptInFlight = true;
-  btn.disabled = true; btn.textContent = 'Submitting…';
+
+  // ONE acknowledgement. The agreement names are real, come from the Perch
+  // packet, and each links to its own authoritative contract index.
+  html += '<label class="agr-ack" for="agr-ack-check">' +
+          '<input type="checkbox" id="agr-ack-check" onchange="updateAgreeButton()">' +
+          '<span>By checking this box, I acknowledge that I have reviewed and agree to the ' +
+          agreementLinksHtml() +
+          '. By continuing, I am submitting my electronic signature.</span></label>';
+
+  html += '<div class="agr-actions">' +
+          '<button type="button" class="btn btn-primary btn-lg" id="agr-agree-btn" disabled ' +
+          'onclick="submitAgreements()">Agree &amp; finish</button></div>';
+  html += '<p class="agr-note" id="agr-status" style="display:none;"></p>';
+  html += '</div>';
+  host.innerHTML = html;
+  updateAgreeButton();
+}
+
+/* Real names from the packet, each carrying its authoritative index. */
+function agreementLinksHtml(){
+  const links = Agreements.contracts.map(function(c){
+    const idx = (typeof c.index === 'number') ? c.index : null;
+    const name = agrEsc(c.contract_name || ('Agreement ' + ((idx == null ? 0 : idx) + 1)));
+    if(idx === null || !c.url_present){
+      return '<span class="agr-link-off" title="This document is not available to open">' + name + '</span>';
+    }
+    return '<a href="#" class="agr-link" data-index="' + idx + '" ' +
+           'onclick="openAgreementDoc(' + idx + '); return false;">' + name + '</a>';
+  });
+  if(links.length === 1) return links[0];
+  if(links.length === 2) return links[0] + ' and ' + links[1];
+  return links.slice(0, -1).join(', ') + ', and ' + links[links.length - 1];
+}
+
+/* ── Single-document viewer ───────────────────────────────────────────── */
+
+let agrLastFocus = null;
+
+async function openAgreementDoc(index){
+  const cardErr = document.getElementById('agr-card-error');
+  if(cardErr) cardErr.style.display = 'none';
+
+  const contract = Agreements.contracts.find(function(c){ return c.index === index; });
+  const title = (contract && contract.contract_name) || 'Agreement';
+
+  agrLastFocus = document.activeElement;
+  const ov = document.getElementById('agr-overlay');
+  const titleEl = document.getElementById('agr-doc-title');
+  const bodyEl = document.getElementById('agr-doc-body');
+  const errEl = document.getElementById('agr-error');
+  if(titleEl) titleEl.textContent = title;
+  if(errEl){ errEl.style.display = 'none'; errEl.textContent = ''; }
+  if(bodyEl) bodyEl.innerHTML = '<p class="helper">Opening the document…</p>';
+  ov.classList.add('open');
+  document.body.style.overflow = 'hidden';
+  document.addEventListener('keydown', agrEscKey);
+  const close = ov.querySelector('.agr-close');
+  if(close) close.focus();
 
   let body;
   try{
-    body = await customerApi('/api/perch/enrollments/' + customerEnrollmentId + '/contracts/accept',
-                             {method:'POST', body: JSON.stringify({customer_confirmed: true})});
+    // The backend parameter is `index`. Send the authoritative index that came
+    // from the /contracts response - never a rendering position or a name.
+    body = await agrFetch('/api/perch/enrollments/' + Agreements.enrollmentId + '/contracts/review',
+                          {method:'POST', body: JSON.stringify({index: index})});
   }catch(err){
-    customerAcceptInFlight = false;
-    btn.textContent = 'Accept and complete';
-    if(ccErr){ ccErr.textContent = err.message; ccErr.style.display = 'block'; }
-    // An uncertain outcome must NOT be retried by clicking again.
+    if(bodyEl) bodyEl.innerHTML = '';
+    if(errEl){
+      errEl.textContent = 'Could not open that document: ' + err.message;
+      errEl.style.display = 'block';
+    }
+    return;
+  }
+
+  // A single-use, same-origin Dalton capability URL. Never a Perch presigned URL.
+  if(bodyEl){
+    bodyEl.innerHTML = '<iframe class="agr-doc-frame" src="' + agrEsc(body.review_url) +
+                       '" title="' + agrEsc(title) + '"></iframe>' +
+                       '<p class="helper agr-doc-fallback">Trouble viewing it here? ' +
+                       '<a href="' + agrEsc(body.review_url) + '" target="_blank" rel="noopener">' +
+                       'Open in a new tab</a>.</p>';
+  }
+}
+
+function closeAgreements(){
+  const ov = document.getElementById('agr-overlay');
+  if(ov) ov.classList.remove('open');
+  document.body.style.overflow = '';
+  document.removeEventListener('keydown', agrEscKey);
+  // Drop the iframe so the single-use URL is not left loaded behind the page.
+  const bodyEl = document.getElementById('agr-doc-body');
+  if(bodyEl) bodyEl.innerHTML = '';
+  if(agrLastFocus && agrLastFocus.focus) agrLastFocus.focus();
+  // Reviewing is NOT accepting - nothing about acceptance changes here.
+}
+
+function agrEscKey(e){ if(e.key === 'Escape') closeAgreements(); }
+function agrBackdrop(e){ if(e.target && e.target.id === 'agr-overlay') closeAgreements(); }
+
+/* ── Acceptance: one checkbox, one button ─────────────────────────────── */
+
+function updateAgreeButton(){
+  const btn = document.getElementById('agr-agree-btn');
+  const chk = document.getElementById('agr-ack-check');
+  if(!btn || !chk) return;
+  if(Agreements.submitted){
+    btn.disabled = true; btn.textContent = 'Agreements submitted';
+    chk.disabled = true; return;
+  }
+  if(Agreements.inFlight){ btn.disabled = true; return; }
+  btn.disabled = !(Agreements.acceptanceEnabled && chk.checked && !Agreements.readOnly);
+}
+
+async function submitAgreements(){
+  const btn = document.getElementById('agr-agree-btn');
+  const chk = document.getElementById('agr-ack-check');
+  const errEl = document.getElementById('agr-card-error');
+  const statusEl = document.getElementById('agr-status');
+  if(errEl) errEl.style.display = 'none';
+  if(statusEl) statusEl.style.display = 'none';
+
+  if(!chk || !chk.checked){
+    if(errEl){ errEl.textContent = 'Please check the box to agree before finishing.';
+               errEl.style.display = 'block'; }
+    return;
+  }
+  if(Agreements.inFlight || Agreements.submitted) return;
+  Agreements.inFlight = true;
+  if(btn){ btn.disabled = true; btn.textContent = 'Submitting…'; }
+
+  let body;
+  try{
+    body = await agrFetch('/api/perch/enrollments/' + Agreements.enrollmentId + '/contracts/accept',
+                          {method:'POST', body: JSON.stringify({customer_confirmed: true})});
+  }catch(err){
+    Agreements.inFlight = false;
+    if(btn) btn.textContent = 'Agree & finish';
+    if(errEl){ errEl.textContent = err.message; errEl.style.display = 'block'; }
     if(/uncertain|could not be confirmed/i.test(err.message || '')){
-      btn.disabled = true;
+      if(btn) btn.disabled = true;   // ambiguous outcome: never retry by clicking
       if(statusEl){
         statusEl.textContent = 'Do not resubmit. We are confirming this with Perch.';
         statusEl.style.display = 'block';
       }
-    }else{
-      updateCustomerAcceptState();
+    } else if(chk){
+      updateAgreeButton();
     }
     return;
   }
-  customerAcceptInFlight = false;
-  btn.textContent = 'Completed';
-  btn.disabled = true;
-  chk.disabled = true;
-  document.getElementById('cc-title').textContent = 'Your enrollment is complete';
-  if(statusEl){
-    const st = body.perch_status || null;
-    statusEl.textContent = (body.message || 'Contracts accepted.') +
-      (st && st.completed === true ? ' Your enrollment is now complete.' : '');
-    statusEl.style.display = 'block';
-  }
+
+  Agreements.inFlight = false;
+  Agreements.submitted = true;
+  Agreements.readOnly = true;
+  const st = body.perch_status || null;
+  let msg = body.message || 'Your agreements were submitted.';
+  if(st && st.completed === true) msg += ' Your enrollment is complete.';
+  renderAgreementCard();
+  const after = document.getElementById('agr-status');
+  if(after){ after.textContent = msg; after.style.display = 'block'; }
+  if(typeof onAgreementsAccepted === 'function') onAgreementsAccepted(body);
 }

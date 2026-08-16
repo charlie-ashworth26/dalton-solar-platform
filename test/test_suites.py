@@ -63,3 +63,9 @@ def test_customer_auth_and_completed_view():
     """Completed-enrollment view, customer auth, password toggle, metadata."""
     import test_customer_auth_and_completed_view as suite
     suite.main()
+
+
+def test_contract_ux_redesign():
+    """Redesigned shared contract UX; legacy engine removed."""
+    import test_contract_ux_redesign as suite
+    suite.main()

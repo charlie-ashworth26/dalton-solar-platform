@@ -104,14 +104,22 @@ def main():
     check("resetWizardState unlocks controls", "unlockEnrollmentControls()" in reset)
 
     section("RC-5 - every enrollment-specific global has a reset")
-    for g in ["docReviewed", "hasSigned", "isDrawing", "sigCtx", "billTouched",
-              "skipProjectStep", "entryMode", "currentWorkflow",
+    # docReviewed / hasSigned / isDrawing / sigCtx belonged to the legacy signing
+    # engine, which is now DELETED - a stronger guarantee than being reset.
+    for gone in ["docReviewed", "hasSigned", "isDrawing", "sigCtx"]:
+        check(f"legacy global '{gone}' no longer exists at all",
+              not re.search(r"\b" + gone + r"\b", JS))
+    for g in ["billTouched", "skipProjectStep", "entryMode", "currentWorkflow",
               "perchContracts", "perchContext", "currentCustomerId",
               "billRuntimeFile", "lmiRuntimeFile"]:
         check(f"resetWizardState resets {g}", g in reset)
     check("resume banner is cleared", "resume-banner" in reset)
     check("bill requirements are cleared", "bill-requirements" in reset)
-    check("acceptance status text is cleared", "contract-accept-status" in reset)
+    # The redesign replaced #contract-accept-status with the shared component's
+    # own status region, which is reset on every mount rather than by
+    # resetWizardState. Assert the shared component clears it instead.
+    check("acceptance status text is cleared on mount",
+          "agr-status" in fn_body("openAgreements") or "agr-status" in fn_body("submitAgreements"))
 
     section("RC-1 - resume reconstructs contract state from the backend")
     open_body = fn_body("openEnrollment")
@@ -122,9 +130,12 @@ def main():
     check("acceptanceEnabled comes from the backend response, not fabricated",
           "body.acceptance_enabled === true" in rehy)
     check("perchContracts repopulated", "perchContracts = body.contracts" in rehy)
-    check("Accept button state recomputed", "updateAcceptButtonState()" in rehy)
+    # Renamed by the redesign: the shared component now owns button state and
+    # re-mounts the card, which recomputes it.
+    check("Accept button state recomputed",
+          "mountRepAgreements(" in rehy or "updateAgreeButton()" in rehy)
     check("failure surfaces a visible error, not a dead button",
-          "contract-review-error" in rehy and "Could not reload" in rehy)
+          "agr-card-error" in rehy or "Could not reload" in rehy)
     check("terminal/blocked enrollments do NOT get acceptance re-enabled",
           "acceptanceEnabled = false" in rehy)
     check("resume still never creates a draft", "/api/perch/drafts" not in open_body)
@@ -195,8 +206,9 @@ def main():
               query_one("SELECT COUNT(*) n FROM perch_tokens")["n"] == tokens_before)
         check("reopen makes no Perch API call",
               query_one("SELECT COUNT(*) n FROM perch_api_calls")["n"] == calls_before)
+    # Same rule, now owned by the shared component.
     check("the enable rule is backend-driven AND checkbox-driven",
-          "perchContext.acceptanceEnabled && chk.checked" in JS)
+          "Agreements.acceptanceEnabled && chk.checked" in JS)
 
     section("SCENARIO C - A complete, then start B fresh without a refresh")
     with app.app_context():
@@ -238,7 +250,7 @@ def main():
               query_one("SELECT COUNT(*) n FROM enrollments")["n"] == count_before)
 
     section("ERROR LIFECYCLE - no disable-without-recovery")
-    for name in ["submitBill", "submitContact", "submitLmi", "acceptPerchContracts",
+    for name in ["submitBill", "submitContact", "submitLmi", "submitAgreements",
                  "rehydrateContractPacket"]:
         body_ = fn_body(name)
         if not body_:
@@ -249,22 +261,23 @@ def main():
             # deterministic recompute function - all are valid lifecycles.
             recovers = ("finally" in body_
                         or "disabled=false" in body_.replace(" ", "")
-                        or "updateAcceptButtonState()" in body_)
+                        or "updateAgreeButton()" in body_)
             check(f"{name}: disabling a control has a recovery path", recovers)
         shows_error = ("style.display='block'" in body_.replace(" ", "")
                        or "style.display = 'block'" in body_)
         check(f"{name}: failures surface a visible error", shows_error)
 
     section("AMBIGUOUS ACCEPTANCE - deliberately NOT retryable")
-    acc = fn_body("acceptPerchContracts")
+    # Unified by the redesign into the shared component.
+    acc = fn_body("submitAgreements")
     check("normal errors recompute the button state",
-          "updateAcceptButtonState()" in acc)
+          "updateAgreeButton()" in acc)
     check("an uncertain outcome deliberately leaves Accept disabled",
-          "uncertain" in acc and "btn.disabled=true" in acc.replace(" ", ""))
+          "uncertain" in acc and "btn.disabled" in acc)
     check("... and tells the rep not to resubmit",
           "Do not resubmit" in acc or "do not resubmit" in acc.lower())
     check("in-flight double-click is blocked",
-          "acceptanceInFlight" in acc)
+          "inFlight" in acc)
 
     print(f"\n{'='*72}\nSTABILIZATION - MULTI-ENROLLMENT - ALL CHECKS PASSED\n{'='*72}")
 

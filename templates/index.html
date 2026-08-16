@@ -58,25 +58,10 @@
 </div>
 
 <div class="screen" id="screen-customer-contracts">
-  <div class="wrap-narrow">
-    <div class="card">
-      <p class="card-eyebrow">Your agreement</p>
-      <h2 id="cc-title">Review and accept your contracts</h2>
-      <p class="lead" id="cc-lead">Open each document below, then confirm to complete your enrollment.</p>
-      <div id="cc-contract-list"><p class="helper">Loading your contract packet…</p></div>
-      <label class="agree-row" style="margin-top:14px;">
-        <input type="checkbox" id="cc-confirm-check" onchange="updateCustomerAcceptState()">
-        <span>I have reviewed all of the documents above and agree to them.</span>
-      </label>
-      <p class="helper" id="cc-error" style="display:none;color:var(--danger);margin-top:10px;"></p>
-      <p class="helper" id="cc-status" style="display:none;margin-top:10px;"></p>
-      <div class="wizard-actions">
-        <button class="btn btn-ghost" onclick="activateScreen('screen-customer-portal')">Back</button>
-        <button class="btn btn-primary" id="cc-accept-btn" disabled onclick="customerAcceptContracts()">Accept and complete</button>
-      </div>
+    <div class="wrap-narrow">
+      <div id="agr-host-customer"></div>
     </div>
   </div>
-</div>
 
 <div class="screen" id="screen-customer-portal">
   <div class="customer-wrap">
@@ -344,42 +329,9 @@
                 <div class="review-line"><span class="rl-label">LMI</span><span class="rl-val" id="rv-lmi"></span></div>
               </div>
               <div id="pre-send">
-                <div class="review-block" id="perch-contracts-review">
-                  <div class="review-head">Perch contract packet</div>
-                  <div id="perch-contract-list"><p class="helper">Generating the personalized contract packet…</p></div>
+                  <div id="agr-host-rep"></div>
                 </div>
-                <p class="helper" style="margin-bottom:14px;">Open each contract with Review. Viewing a contract does not accept it — acceptance is recorded only when the customer confirms below.</p>
-                <label class="agree-row" style="margin-bottom:12px;">
-                  <input type="checkbox" id="contract-confirm-check" onchange="updateAcceptButtonState()">
-                  <span>The customer has reviewed all contract documents above and agrees to them.</span>
-                </label>
-                <p class="helper" id="contract-review-error" style="display:none;color:var(--danger);margin-bottom:10px;"></p>
-                <p class="helper" id="contract-accept-status" style="display:none;margin-bottom:10px;"></p>
-                <div class="wizard-actions"><button class="btn btn-ghost" id="agreement-back-btn" onclick="backFromAgreement()">Back</button><button class="btn btn-primary" id="contract-accept-btn" disabled onclick="acceptPerchContracts()">Accept contracts</button></div>
-              </div>
-              <div id="post-send" style="display:none;">
-                <div class="badge badge-gold" style="margin-bottom:12px;">Awaiting customer signature</div>
-                <p class="lead" style="margin-bottom:14px;">A secure signing link has been sent to <strong id="post-send-contact"></strong>. Your customer can use either option below.</p>
-
-                <div class="link-option">
-                  <div class="link-option-label">Magic link — goes straight to signing</div>
-                  <div class="link-box">
-                    <span class="lb-text" id="magic-link-text">https://sign.daltonsolar.com/a/••••••••</span>
-                    <button type="button" class="btn btn-primary btn-sm" onclick="enterCustomerSign('preview')">Open</button>
-                  </div>
-                </div>
-
-                <div class="link-option">
-                  <div class="link-option-label">Login link — customer signs in with the credentials you set</div>
-                  <div class="link-box">
-                    <span class="lb-text">https://portal.daltonsolar.com/login</span>
-                    <button type="button" class="btn btn-ghost btn-sm" onclick="showScreen('screen-customer-login')">Open</button>
-                  </div>
-                </div>
-
-                <p class="helper" style="margin:14px 0 18px;">In this demo both options run right here in the browser. A live build would text or email these instead of showing them on screen.</p>
-                <button class="btn btn-ghost btn-full" onclick="exitWizard()">Done — back to dashboard</button>
-              </div>
+              
             </div>
           </div>
 
@@ -389,39 +341,9 @@
   </div>
 </div>
 
-<div class="screen" id="screen-customer">
-  <div class="customer-wrap">
-    <div class="customer-top"><div class="brand-mark"><span class="brand-badge">DS</span>Dalton Solar</div></div>
-    <div class="card">
-      <p class="card-eyebrow">Community solar agreement</p>
-      <h2 id="cust-hello">Hi there — one step left</h2>
-      <p class="lead">Everything below was filled in by your Dalton Solar representative. Review each document in your packet, then sign to complete your enrollment.</p>
-      <div class="review-block">
-        <div class="review-head">Your information</div>
-        <div class="review-line"><span class="rl-label">Name</span><span class="rl-val" id="cv-name"></span></div>
-        <div class="review-line"><span class="rl-label">Service address</span><span class="rl-val" id="cv-address"></span></div>
-        <div class="review-line"><span class="rl-label">Utility</span><span class="rl-val" id="cv-utility"></span></div>
-        <div class="review-line"><span class="rl-label">Account #</span><span class="rl-val mono" id="cv-acct"></span></div>
-      </div>
 
-      <div class="doc-packet" id="doc-packet"></div>
-
-      <div style="display:flex;justify-content:space-between;align-items:baseline;">
-        <label style="margin-top:6px;">Sign below</label>
-        <button class="btn-clear" onclick="clearSignature()">Clear</button>
-      </div>
-      <div class="sig-canvas-wrap" id="sig-canvas-wrap"><canvas id="sig-canvas" width="480" height="140"></canvas></div>
-      <div class="agree-row">
-        <input type="checkbox" id="cv-agree">
-        <span>I have reviewed each document above and authorize Dalton Solar and its partners to enroll me in this program.</span>
-      </div>
-      <button class="btn btn-primary btn-full btn-lg" id="cv-submit" onclick="completeSign()" disabled>Complete enrollment</button>
-    </div>
-  </div>
-</div>
 
 <div class="screen" id="screen-complete">
-  <canvas id="confetti-canvas" style="position:fixed;top:0;left:0;pointer-events:none;z-index:999;"></canvas>
   <div class="customer-wrap">
     <div class="card">
       <div class="complete-wrap">
@@ -437,5 +359,25 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/4.1.1/tesseract.min.js"></script>
 <script src="/static/js/app.js"></script>
+
+<div class="agr-overlay" id="agr-overlay" role="dialog" aria-modal="true"
+     aria-labelledby="agr-doc-title" onclick="agrBackdrop(event)">
+  <div class="agr-modal">
+    <div class="agr-head">
+      <h2 id="agr-doc-title">Agreement</h2>
+      <button type="button" class="agr-close" aria-label="Close document"
+              onclick="closeAgreements()">&times;</button>
+    </div>
+    <div class="agr-doc-body" id="agr-doc-body">
+      <p class="helper">Opening the document…</p>
+    </div>
+    <div class="agr-foot">
+      <p class="agr-note err" id="agr-error" style="display:none;"></p>
+      <div class="agr-actions">
+        <button type="button" class="btn btn-primary" onclick="closeAgreements()">Done reading</button>
+      </div>
+    </div>
+  </div>
+</div>
 </body>
 </html>

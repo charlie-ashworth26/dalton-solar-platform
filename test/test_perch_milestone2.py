@@ -356,12 +356,20 @@ def main():
     # INTENTIONALLY UPDATED: "Acceptance not enabled" was removed when contract
     # acceptance was implemented. The screen must still be the SAME existing
     # Agreement step (not a new flow), now carrying the confirm + accept controls.
+    # UPDATED for the contract UX redesign: the SAME Agreement step is still
+    # reused (not a new flow), but it now mounts the shared Agreements component
+    # rather than a rep-only contract list.
+    # The acknowledgement and submit moved onto the review page, rendered by the
+    # shared component - so they live in app.js, not the static template.
     check("existing Agreement screen is reused for Perch contract review",
-          'id="perch-contract-list"' in html
-          and 'id="contract-confirm-check"' in html
-          and 'id="contract-accept-btn"' in html)
-    check("existing Review buttons were not removed", 'reviewPerchContract' in js)
+          'id="agr-host-rep"' in html
+          and 'id="agr-ack-check"' in js
+          and 'id="agr-agree-btn"' in js)
+    check("document review is still available", 'openAgreementDoc' in js)
     check("no new frontend flow was introduced", 'id="pre-send"' in html)
+    check("rep and customer mount the SAME component",
+          'id="agr-host-rep"' in html and 'id="agr-host-customer"' in html
+          and js.count("function mountAgreements(") == 1)
     check("renderer builds fields from the descriptor", "function renderField" in js)
     check("renderer builds panels from the descriptor", "function renderPanel" in js)
     check("validation is descriptor-driven", "f.validation.pattern" in js)
@@ -381,8 +389,9 @@ def main():
     check("acceptance is now wired in the GUI", "/contracts/accept" in js)
     check("acceptance sends the Dalton-side confirmation precondition",
           "customer_confirmed" in js)
+    # Renamed by the redesign; the guard itself is unchanged.
     check("acceptance guards against duplicate clicks while in flight",
-          "acceptanceInFlight" in js)
+          "Agreements.inFlight" in js)
 
     section("ADAPTER BOUNDARY still holds")
     routes_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

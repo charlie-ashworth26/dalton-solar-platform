@@ -249,14 +249,20 @@ def normalize_contracts_response(data: dict) -> dict:
         raw_contracts = []
 
     safe = []
-    for item in raw_contracts:
+    for position, item in enumerate(raw_contracts):
         if not isinstance(item, dict):
             # Malformed entry - record its presence without inventing fields.
-            safe.append({"contract_name": None, "expires_at": None,
+            safe.append({"index": position, "contract_name": None, "expires_at": None,
                          "url_present": False, "malformed": True})
             continue
         url = item.get("url")
         safe.append({
+            # AUTHORITATIVE ORDERING. Perch's contract_urls array carries no id,
+            # so position IS the identity. Emitting it explicitly means the
+            # frontend never has to infer an index from its own rendering order
+            # or from a display name, and POST /contracts/review receives the
+            # exact position Perch returned.
+            "index": position,
             "contract_name": item.get("contract_name"),
             "expires_at": item.get("expires_at"),
             # Structural check only. The value never leaves `raw`.

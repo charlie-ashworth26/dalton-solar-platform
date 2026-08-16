@@ -84,17 +84,17 @@ def main():
           "contracts_accept_uncertain" not in REHYDRATE_STEPS)
     check("terminal/blocked is checked BEFORE any rehydrate",
           open_body.index("if(terminal || blocked)") < open_body.index("REHYDRATE_CONTRACT_STEPS.indexOf"))
+    # UPDATED for the redesign: the completed view now mounts the SHARED
+    # Agreements component in read-only mode instead of a bespoke summary.
     check("terminal/blocked renders from persisted data instead",
-          "renderCompletedContractSummary" in open_body)
-    summary = fn_body("renderCompletedContractSummary")
+          "mountAgreements({" in open_body and "readOnly: true" in open_body)
+    card = fn_body("renderAgreementCard")
     check("the completed view makes NO network call",
-          "apiFetch" not in summary and "fetch(" not in summary)
-    check("... and clears any stale rehydration error",
-          "contract-review-error" in summary)
+          "apiFetch" not in card and "fetch(" not in card and "agrFetch" not in card)
     check("it explains why documents are no longer retrievable",
-          "no longer" in summary.lower())
+          "no longer" in card.lower())
     check("lock is applied before rendering, so no control is briefly live",
-          open_body.index("lockEnrollmentReadOnly") < open_body.index("renderCompletedContractSummary"))
+          open_body.index("lockEnrollmentReadOnly") < open_body.index("mountAgreements({"))
 
     eid = c.post("/api/perch/drafts", headers=rep).get_json()["enrollment_id"]
     with app.app_context():
@@ -342,32 +342,34 @@ def main():
           "renderDocPacket()" not in entry)
     check("legacy entry no longer initialises the signature canvas",
           "initSigCanvas()" not in entry)
-    check("legacy entry fails loudly if anything still calls it",
-          "console.error" in entry)
-    check("legacy engine is unreachable: nothing calls renderDocPacket()",
-          JS.count("renderDocPacket()") == 1)      # the definition only
-    check("legacy engine is unreachable: nothing calls initSigCanvas()",
-          JS.count("initSigCanvas()") == 1)        # the definition only
-    check("no confetti completion is reachable from the customer flow",
-          "confetti" not in fn_body("openCustomerContracts")
-          and "confetti" not in fn_body("customerAcceptContracts"))
+    # STRONGER than before: the legacy engine is now DELETED, not merely
+    # neutralised, so there is nothing left to fail loudly.
+    for gone in ["renderDocPacket", "allDocsReviewed", "initSigCanvas",
+                 "checkCustomerReady", "enterCustomerSign"]:
+        check(f"legacy '{gone}' is fully removed", f"function {gone}(" not in JS)
+        check(f"nothing references '{gone}'", not re.search(gone + r"\s*\(", JS + HTML))
 
     section("CUSTOMER uses the SAME endpoints as the rep")
     oc = fn_body("openCustomerContracts")
     check("customer requests the real contract packet",
           "/contracts'" in oc or "'/contracts" in oc or "/contracts" in oc)
-    rev = fn_body("customerReviewContract")
-    check("customer review uses the one-time capability endpoint",
+    # The redesign unified review into ONE implementation shared with the rep.
+    rev = fn_body("openAgreementDoc")
+    check("review uses the one-time capability endpoint (shared)",
           "/contracts/review" in rev)
-    check("customer review never receives a raw presigned URL",
+    check("review never receives a raw presigned URL",
           "review_url" in rev and "amazonaws" not in rev)
-    acc = fn_body("customerAcceptContracts")
+    check("there is exactly one review implementation",
+          JS.count("function openAgreementDoc(") == 1
+          and "function customerReviewContract(" not in JS)
+    # Unified by the redesign: one acceptance implementation for both actors.
+    acc = fn_body("submitAgreements")
     check("customer acceptance uses the real acceptance endpoint",
           "/contracts/accept" in acc)
     check("customer acceptance sends the confirmation precondition",
           "customer_confirmed" in acc)
     check("customer acceptance blocks duplicate clicks",
-          "customerAcceptInFlight" in acc)
+          "Agreements.inFlight" in acc or "inFlight" in acc)
     check("an uncertain outcome is NOT retryable by clicking again",
           "uncertain" in acc)
     check("there is no second contract implementation (no local doc list)",

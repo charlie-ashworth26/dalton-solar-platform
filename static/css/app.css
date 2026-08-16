@@ -390,3 +390,21 @@
     .agr-doc-body{padding:0;}
     .agr-doc-frame{min-height:0;border:none;border-radius:0;}
   }
+
+  /* ---------- Multi-file document sets ---------- */
+  .docset-file{display:flex;align-items:center;gap:10px;padding:8px 10px;margin-top:6px;
+    border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);}
+  .docset-n{font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;
+    color:var(--brand);background:var(--brand-tint);border-radius:5px;
+    min-width:22px;height:22px;display:flex;align-items:center;justify-content:center;flex:none;}
+  .docset-name{flex:1;min-width:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .docset-size{font-size:11.5px;color:var(--ink-faint);flex:none;}
+  .docset-remove{background:none;border:none;cursor:pointer;font-size:17px;line-height:1;
+    color:var(--ink-muted);padding:2px 6px;border-radius:5px;flex:none;}
+  .docset-remove:hover{background:var(--danger-tint);color:var(--danger);}
+  .docset-remove:focus-visible{outline:2px solid var(--brand);outline-offset:1px;}
+
+  /* Clickable filename in a document set. The remove control stays separate. */
+  .docset-link{color:var(--brand);text-decoration:underline;text-underline-offset:2px;cursor:pointer;}
+  .docset-link:hover{color:var(--brand-dark);}
+  .docset-link:focus-visible{outline:2px solid var(--brand);outline-offset:2px;border-radius:3px;}

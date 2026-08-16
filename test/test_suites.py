@@ -69,3 +69,10 @@ def test_contract_ux_redesign():
     """Redesigned shared contract UX; legacy engine removed."""
     import test_contract_ux_redesign as suite
     suite.main()
+
+
+
+def test_document_ingestion():
+    """Document ingestion + OCR robustness."""
+    import test_document_ingestion as suite
+    suite.main()

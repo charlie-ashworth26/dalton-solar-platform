@@ -615,6 +615,7 @@ function renderWorkflowStep(wf){
       fields +
       panels +
       '<p class="helper" id="wf-form-error" style="display:none;color:var(--danger);margin-top:12px;"></p>' +
+
       disabledNote +
       '<div class="wizard-actions">' + secondaryBtn + primaryBtn + '</div>' +
     '</div>';
@@ -1316,6 +1317,11 @@ function ocrRow(label, ok, valueText){
 }
 async function handleBillUpload(files){
   if(!files.length) return;
+  // MULTI-FILE: every selected file is tracked and uploaded as ONE document set.
+  // The instant in-browser preview below still reads only the FIRST file, so the
+  // UI says so explicitly rather than implying all pages were read. The SERVER
+  // extracts across the whole set on upload and its result is authoritative.
+  docSetAddFiles('utility_bill', files);
   const f = files[0];
   if(f.size > 4 * 1024 * 1024){
     removeBill();
@@ -1351,6 +1357,7 @@ async function handleBillUpload(files){
     // Bail out of applying results, but never skip the finally{} cleanup below.
     if(generation !== billUploadGeneration) return;
     const parsed = parseUtilityBill(text);
+    renderPrefillScope('utility_bill');
     if(parsed.first) document.getElementById('c-first').value = parsed.first;
     if(parsed.last) document.getElementById('c-last').value = parsed.last;
     if(parsed.acct) document.getElementById('c-acct').value = parsed.acct;
@@ -1512,6 +1519,8 @@ function setIncomeAnswer(isBelow){
 async function handleLmiUpload(files){
   if(!files.length) return;
   if(state.lmi.mode !== 'doc') setLmiMode('doc');
+  // MULTI-FILE: front/back or multi-page proofs form ONE document set.
+  docSetAddFiles('lmi_document', files);
   const f = files[0];
   if(f.size > 4 * 1024 * 1024){
     removeLmi();
@@ -2195,4 +2204,167 @@ async function submitAgreements(){
   const after = document.getElementById('agr-status');
   if(after){ after.textContent = msg; after.style.display = 'block'; }
   if(typeof onAgreementsAccepted === 'function') onAgreementsAccepted(body);
+}
+
+
+/* ═══════════ Multi-file document sets (bill + LMI) ═══════════
+   One logical document -> one or more files. The picker and dropzone both
+   accept several at once; more can be added later and individual files removed.
+   Order of selection is preserved and sent as page order.
+
+   The existing single-file OCR preview still runs on the FIRST file so the
+   rep's prefill experience is unchanged; the SERVER extracts across the whole
+   set, which is what actually feeds validation. */
+
+const DocSets = { utility_bill: {id:null, files:[]}, lmi_document: {id:null, files:[]} };
+
+function docSetReset(category){
+  if(DocSets[category]) DocSets[category] = {id:null, files:[]};
+  renderDocSetList(category);
+}
+
+function docSetAddFiles(category, fileList){
+  const set = DocSets[category];
+  if(!set) return [];
+  const added = [];
+  for(let i = 0; i < fileList.length; i++){
+    const f = fileList[i];
+    // Same name AND size AND lastModified = the same file picked twice.
+    const dup = set.files.some(function(x){
+      return x.file.name === f.name && x.file.size === f.size
+             && x.file.lastModified === f.lastModified;
+    });
+    if(dup) continue;
+    set.files.push({ file: f, key: (f.name + ':' + f.size + ':' + f.lastModified),
+                     documentId: null });
+    added.push(f);
+  }
+  renderDocSetList(category);
+  return added;
+}
+
+function docSetRemove(category, key){
+  const set = DocSets[category];
+  if(!set) return;
+  set.files = set.files.filter(function(x){ return x.key !== key; });
+  renderDocSetList(category);
+}
+
+function docSetListEl(category){
+  // Its own element - the legacy single-file chip still owns bill-file-chip.
+  const hostId = category === 'utility_bill' ? 'bill-fileset' : 'lmi-fileset';
+  return document.getElementById(hostId);
+}
+
+function renderDocSetList(category){
+  const host = docSetListEl(category);
+  if(!host) return;
+  const set = DocSets[category];
+  if(!set || !set.files.length){ host.innerHTML = ''; return; }
+  host.innerHTML = set.files.map(function(x, i){
+    const kb = Math.max(1, Math.round(x.file.size / 1024));
+    return '<div class="docset-file">' +
+             '<span class="docset-n">' + (i + 1) + '</span>' +
+             docSetNameHtml(x) +
+             '<span class="docset-size">' + kb + ' KB</span>' +
+             '<button type="button" class="docset-remove" aria-label="Remove ' +
+               esc(x.file.name) + '" onclick="docSetRemove(\'' + category +
+               '\', \'' + esc(x.key).replace(/'/g, "\\'") + '\')">&times;</button>' +
+           '</div>';
+  }).join('');
+}
+
+/* Uploads the whole set. Files already stored keep their set id, so adding more
+   appends rather than starting a new document. */
+async function uploadDocumentSet(category){
+  const set = DocSets[category];
+  if(!set || !set.files.length) return null;
+  const fd = new FormData();
+  fd.append('category', category);
+  if(set.id) fd.append('document_set_id', String(set.id));
+  set.files.forEach(function(x){ fd.append('files', x.file, x.file.name); });
+  const body = await apiFetch('/api/enrollments/' + currentDraft.enrollment_id +
+                              '/document-sets', {method:'POST', body: fd});
+  set.id = body.document_set_id;
+  // Map returned document ids back onto the tracked files, in page order, so
+  // each filename can link to its own authorized view route.
+  (body.files || []).forEach(function(rec){
+    const match = set.files.filter(function(x){ return !x.documentId; })[0];
+    if(match) match.documentId = rec.document_id;
+  });
+  renderDocSetList(category);
+  return body;
+}
+
+
+/* Tells the rep exactly which files the visible prefill came from.
+   The in-browser preview reads only the first file; the server extracts the
+   whole set on upload. Saying so prevents a rep assuming pages 2-3 were read. */
+function renderPrefillScope(category){
+  const el = document.getElementById(
+    category === 'utility_bill' ? 'bill-prefill-scope' : 'lmi-prefill-scope');
+  if(!el) return;
+  const set = DocSets[category];
+  const n = set ? set.files.length : 0;
+  if(n <= 1){ el.style.display = 'none'; el.textContent = ''; return; }
+  const first = set.files[0].file.name;
+  el.textContent = 'Showing details read from "' + first + '" only. All ' + n +
+    ' files are attached and will be read together when you continue — ' +
+    'please check every field before submitting.';
+  el.style.display = 'block';
+}
+
+
+/* Filename link. Opens the ORIGINAL file in a new tab using the browser's own
+   viewer - no custom preview window. Stored uploads go through the authorized
+   Dalton route; a file not yet uploaded uses a temporary object URL.
+   Viewing is read-only: it never changes the set or page order. */
+function docSetNameHtml(entry){
+  const name = esc(entry.file.name);
+  if(entry.documentId && currentDraft && currentDraft.enrollment_id){
+    const href = '/api/enrollments/' + currentDraft.enrollment_id +
+                 '/documents/' + entry.documentId + '/view';
+    return '<a class="docset-name docset-link" href="' + href + '" target="_blank" ' +
+           'rel="noopener" title="Open ' + name + ' in a new tab" ' +
+           'onclick="return openStoredDocument(event, \'' + href + '\')">' + name + '</a>';
+  }
+  // Not uploaded yet - open the local file the rep just picked.
+  return '<a class="docset-name docset-link" href="#" ' +
+         'title="Open ' + name + ' in a new tab" ' +
+         'onclick="return openPendingDocument(event, \'' + esc(entry.key) + '\')">' + name + '</a>';
+}
+
+/* The view route requires the Authorization header, which a plain <a> cannot
+   send. Fetch it authenticated, then hand the browser a blob URL so it renders
+   natively (image viewer / PDF viewer) in a new tab. */
+async function openStoredDocument(e, href){
+  if(e) e.preventDefault();
+  const tab = window.open('about:blank', '_blank');   // opened on the user gesture
+  try{
+    const res = await fetch(href, {headers:{Authorization:'Bearer ' + AuthStore.getToken()}});
+    if(!res.ok) throw new Error('Could not open that file (' + res.status + ').');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    if(tab) tab.location = url; else window.location = url;
+    // Release once the tab has had time to load; the tab keeps its own copy.
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 60000);
+  }catch(err){
+    if(tab) tab.close();
+    alert(err.message || 'Could not open that file.');
+  }
+  return false;
+}
+
+function openPendingDocument(e, key){
+  if(e) e.preventDefault();
+  let entry = null;
+  Object.keys(DocSets).forEach(function(cat){
+    const hit = DocSets[cat].files.filter(function(x){ return x.key === key; })[0];
+    if(hit) entry = hit;
+  });
+  if(!entry) return false;
+  const url = URL.createObjectURL(entry.file);
+  window.open(url, '_blank', 'noopener');
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 60000);
+  return false;
 }

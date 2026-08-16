@@ -175,8 +175,10 @@
                 <div class="dz-title">Drag a file here, or click to browse</div>
                 <div class="dz-sub">PDF works best · JPG/PNG also supported · up to 4MB</div>
               </div>
-              <input type="file" id="bill-file" accept=".pdf,.jpg,.jpeg,.png" onchange="handleBillUpload(this.files)">
+              <input type="file" id="bill-file" multiple accept=".pdf,.jpg,.jpeg,.png,.heic" onchange="handleBillUpload(this.files)">
               <div id="bill-file-chip"></div>
+                  <div id="bill-fileset"></div>
+                  <p class="helper" id="bill-prefill-scope" style="display:none;margin-top:8px;"></p>
               <div id="ocr-container"></div>
 
               <div class="row2" style="margin-top:22px;">
@@ -277,8 +279,10 @@
                   <div class="dz-title">Drag LMI documentation here, or click to browse</div>
                   <div class="dz-sub">PDF, JPG, or PNG · up to 4MB</div>
                 </div>
-                <input type="file" id="lmi-file" accept=".pdf,.jpg,.jpeg,.png" onchange="handleLmiUpload(this.files)">
+                <input type="file" id="lmi-file" multiple accept=".pdf,.jpg,.jpeg,.png,.heic" onchange="handleLmiUpload(this.files)">
                 <div id="lmi-file-chip"></div>
+                    <div id="lmi-fileset"></div>
+                    <p class="helper" id="lmi-prefill-scope" style="display:none;margin-top:8px;"></p>
                 <div id="lmi-check-container"></div>
               </div>
 

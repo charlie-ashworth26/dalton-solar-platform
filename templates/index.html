@@ -48,10 +48,31 @@
         <h2>Customer sign in</h2>
         <p class="lead">Enter the email your rep used for your enrollment.</p>
         <div class="field"><label>Email</label><input type="email" id="cust-login-email" placeholder="you@email.com"></div>
-        <div class="field"><label>Password</label><input type="password" id="cust-login-pass" placeholder="••••••••"></div>
-        <button class="btn btn-primary btn-full btn-lg" onclick="doCustomerLogin()">Sign in</button>
+        <div class="field"><label>Password</label><span class="pw-wrap"><input type="password" id="cust-login-pass" placeholder="••••••••"><button type="button" class="pw-eye" id="cust-login-pass-eye" aria-label="Show password" aria-pressed="false" title="Show password" onclick="togglePasswordVisibility('cust-login-pass','cust-login-pass-eye')">👁</button></span></div>
+        <button class="btn btn-primary btn-full btn-lg" id="cust-login-btn" onclick="doCustomerLogin()">Sign in</button>
         <p class="helper" id="cust-login-error" style="display:none;color:var(--danger);text-align:center;margin-top:14px;">We couldn't find a pending agreement for that email. Try the link your rep sent you, or check with them.</p>
         <div class="switch-role">Are you the rep? <a onclick="showScreen('screen-login')">Sign in here</a></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="screen" id="screen-customer-contracts">
+  <div class="wrap-narrow">
+    <div class="card">
+      <p class="card-eyebrow">Your agreement</p>
+      <h2 id="cc-title">Review and accept your contracts</h2>
+      <p class="lead" id="cc-lead">Open each document below, then confirm to complete your enrollment.</p>
+      <div id="cc-contract-list"><p class="helper">Loading your contract packet…</p></div>
+      <label class="agree-row" style="margin-top:14px;">
+        <input type="checkbox" id="cc-confirm-check" onchange="updateCustomerAcceptState()">
+        <span>I have reviewed all of the documents above and agree to them.</span>
+      </label>
+      <p class="helper" id="cc-error" style="display:none;color:var(--danger);margin-top:10px;"></p>
+      <p class="helper" id="cc-status" style="display:none;margin-top:10px;"></p>
+      <div class="wizard-actions">
+        <button class="btn btn-ghost" onclick="activateScreen('screen-customer-portal')">Back</button>
+        <button class="btn btn-primary" id="cc-accept-btn" disabled onclick="customerAcceptContracts()">Accept and complete</button>
       </div>
     </div>
   </div>
@@ -69,7 +90,8 @@
         <div class="review-line"><span class="rl-label">Project</span><span class="rl-val" id="portal-project"></span></div>
         <div class="review-line"><span class="rl-label">Status</span><span class="rl-val"><span class="badge badge-gold">Awaiting your signature</span></span></div>
       </div>
-      <button class="btn btn-primary btn-full btn-lg" onclick="enterCustomerSign('portal')">Review &amp; sign agreement</button>
+      <button class="btn btn-primary btn-full btn-lg" id="portal-open-btn" onclick="openCustomerContracts()">Review &amp; sign agreement</button>
+        <p class="helper" id="portal-error" style="display:none;color:var(--danger);margin-top:12px;"></p>
     </div>
   </div>
 </div>
@@ -223,8 +245,8 @@
               <div class="field"><label>Phone number</label><input type="tel" id="c-phone" placeholder="(555) 555-5555"></div>
               <p class="helper" style="margin:-6px 0 14px;">Set login credentials for the customer — they'll use these to sign in and review their agreement.</p>
               <div class="row2">
-                <div class="field"><label>Password</label><input type="password" id="c-pass" placeholder="••••••••"></div>
-                <div class="field"><label>Confirm password</label><input type="password" id="c-pass-confirm" placeholder="••••••••"></div>
+                <div class="field"><label>Password</label><span class="pw-wrap"><input type="password" id="c-pass" placeholder="••••••••"><button type="button" class="pw-eye" id="c-pass-eye" aria-label="Show password" aria-pressed="false" title="Show password" onclick="togglePasswordVisibility('c-pass','c-pass-eye')">👁</button></span></div>
+                <div class="field"><label>Confirm password</label><span class="pw-wrap"><input type="password" id="c-pass-confirm" placeholder="••••••••"><button type="button" class="pw-eye" id="c-pass-confirm-eye" aria-label="Show password" aria-pressed="false" title="Show password" onclick="togglePasswordVisibility('c-pass-confirm','c-pass-confirm-eye')">👁</button></span></div>
               </div>
               <p class="helper" id="contact-submit-error" style="display:none;color:var(--danger);margin-top:6px;"></p><div class="wizard-actions"><button class="btn btn-ghost" onclick="goStep(2)">Back</button><button class="btn btn-primary" id="btn-contact-next" onclick="submitContact()">Continue</button></div>
             </div>

@@ -57,3 +57,9 @@ def test_config_startup():
     """Configuration loading and startup reporting."""
     import test_config_startup as suite
     suite.main()
+
+
+def test_customer_auth_and_completed_view():
+    """Completed-enrollment view, customer auth, password toggle, metadata."""
+    import test_customer_auth_and_completed_view as suite
+    suite.main()

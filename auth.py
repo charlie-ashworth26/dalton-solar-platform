@@ -43,6 +43,9 @@ def verify_password(plain_password: str, stored_hash: str) -> bool:
 
 def issue_token(user_row) -> str:
     payload = {
+        # Explicit scope. require_auth REJECTS anything that is not "staff", so a
+        # customer token can never reach a rep/admin/QA route.
+        "scope": "staff",
         "sub": user_row["id"],
         "email": user_row["email"],
         "role": user_row["role"],
@@ -77,6 +80,10 @@ def require_auth(fn):
             return jsonify({"error": "Token expired"}), 401
         except jwt.InvalidTokenError:
             return jsonify({"error": "Invalid token"}), 401
+        # A customer token must never authenticate a staff route, even though it
+        # is signed with the same key.
+        if payload.get("scope") == "customer":
+            return jsonify({"error": "This endpoint requires staff credentials"}), 403
         user = query_one("SELECT * FROM users WHERE id = ? AND is_active = 1", (payload["sub"],))
         if not user:
             return jsonify({"error": "User not found or inactive"}), 401
@@ -101,3 +108,112 @@ def require_role(*allowed_roles):
 
 def generate_session_token() -> str:
     return secrets.token_urlsafe(32)
+
+
+# ─────────────── Customer agreement access ───────────────
+# Customers are rows in `customers`, NOT `users`. They authenticate against
+# customers.password_hash (set during enrollment) and receive a token scoped to
+# exactly ONE enrollment. These tokens cannot reach staff routes.
+
+CUSTOMER_TOKEN_EXPIRY_SECONDS = 60 * 60 * 2   # shorter than a staff session
+
+
+def normalize_email(value):
+    """Single normalization rule for every email comparison: trim + lowercase.
+
+    Enrollment previously stored whatever the rep typed while login lowercased
+    its input, so a capitalised address could never match.
+    """
+    return (value or "").strip().lower()
+
+
+def issue_customer_token(customer_row, enrollment_id) -> str:
+    payload = {
+        "scope": "customer",
+        "sub": customer_row["id"],
+        "customer_id": customer_row["id"],
+        # Bound to ONE enrollment - the guard below refuses any other id.
+        "enrollment_id": enrollment_id,
+        "email": normalize_email(customer_row["email"]),
+        "iat": int(time.time()),
+        "exp": int(time.time()) + CUSTOMER_TOKEN_EXPIRY_SECONDS,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+
+
+def require_customer_auth(fn):
+    """Populates g.current_customer from a customer-scoped token, or 401/403.
+
+    Sets g.customer_enrollment_id - routes MUST scope every query to it so one
+    customer can never read another customer's enrollment.
+    """
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        token = _extract_token()
+        if not token:
+            return jsonify({"error": "Missing bearer token"}), 401
+        try:
+            payload = decode_token(token)
+        except jwt.ExpiredSignatureError:
+            return jsonify({"error": "Your session expired — please sign in again."}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"error": "Invalid token"}), 401
+        if payload.get("scope") != "customer":
+            return jsonify({"error": "This endpoint requires customer credentials"}), 403
+        customer = query_one("SELECT * FROM customers WHERE id = ?", (payload.get("customer_id"),))
+        if not customer:
+            return jsonify({"error": "Customer not found"}), 401
+        g.current_customer = dict(customer)
+        g.customer_enrollment_id = payload.get("enrollment_id")
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def require_staff_or_customer(fn):
+    """Accepts EITHER a staff token or a customer token.
+
+    Used by the Perch contract routes so the customer and the rep drive the
+    SAME engine - there is deliberately no second contract implementation.
+
+    Sets exactly one of g.current_user / g.current_customer, plus
+    g.actor_user_id (None for a customer) and g.actor_description for auditing.
+    Customer callers additionally get g.customer_enrollment_id; routes MUST
+    check it against the requested enrollment.
+    """
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        token = _extract_token()
+        if not token:
+            return jsonify({"error": "Missing bearer token"}), 401
+        try:
+            payload = decode_token(token)
+        except jwt.ExpiredSignatureError:
+            return jsonify({"error": "Your session expired — please sign in again."}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"error": "Invalid token"}), 401
+
+        g.current_user = None
+        g.current_customer = None
+        g.customer_enrollment_id = None
+
+        if payload.get("scope") == "customer":
+            customer = query_one("SELECT * FROM customers WHERE id = ?",
+                                 (payload.get("customer_id"),))
+            if not customer:
+                return jsonify({"error": "Customer not found"}), 401
+            g.current_customer = dict(customer)
+            g.customer_enrollment_id = payload.get("enrollment_id")
+            g.actor_user_id = None
+            g.actor_description = f"customer:{customer['id']}"
+            return fn(*args, **kwargs)
+
+        user = query_one("SELECT * FROM users WHERE id = ? AND is_active = 1", (payload["sub"],))
+        if not user:
+            return jsonify({"error": "User not found or inactive"}), 401
+        if user["role"] not in ("sales_rep", "admin"):
+            return jsonify({"error": f"Role '{user['role']}' is not permitted here"}), 403
+        g.current_user = dict(user)
+        g.actor_user_id = user["id"]
+        g.actor_description = f"user:{user['id']}"
+        return fn(*args, **kwargs)
+    return wrapper

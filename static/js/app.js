@@ -148,19 +148,67 @@ async function tryRestoreSession(){
 }
 document.addEventListener('DOMContentLoaded', tryRestoreSession);
 
-function doCustomerLogin(){
-  const email = document.getElementById('cust-login-email').value.trim().toLowerCase();
+async function doCustomerLogin(){
+  const email = document.getElementById('cust-login-email').value.trim();
   const pass = document.getElementById('cust-login-pass').value;
   const errEl = document.getElementById('cust-login-error');
-  if(!email || !pass){ alert('Enter your email and password to continue.'); return; }
-  const match = customers.find(c => c.email.toLowerCase() === email && c.status === 'Opportunity - Review');
-  if(!match || match.password !== pass){ errEl.style.display='block'; return; }
-  errEl.style.display='none';
-  loadRecordIntoState(match);
+  const btn = document.getElementById('cust-login-btn');
+  errEl.style.display = 'none';
+  if(!email || !pass){
+    errEl.textContent = 'Enter your email and password to continue.';
+    errEl.style.display = 'block';
+    return;
+  }
+  // BUG 2 FIX: this used to search a legacy in-memory array (empty since the
+  // Perch refactor) and compare plaintext passwords, never calling the backend
+  // at all - so it could never succeed. Real authentication now happens
+  // server-side against customers.password_hash.
+  if(btn){ btn.disabled = true; btn.textContent = 'Signing in…'; }
+  let body;
+  try{
+    body = await apiFetch('/api/auth/customer-login', {
+      method:'POST', body: JSON.stringify({email: email, password: pass})
+    });
+  }catch(err){
+    errEl.textContent = err.message || 'Invalid email or password.';
+    errEl.style.display = 'block';
+    if(btn){ btn.disabled = false; btn.textContent = 'Sign in'; }
+    return;
+  }
+  if(btn){ btn.disabled = false; btn.textContent = 'Sign in'; }
+  CustomerAuth.setToken(body.token);
   activateScreen('screen-customer-portal');
-  document.getElementById('portal-hello').textContent = 'Hi ' + match.first + ' — welcome back';
-  document.getElementById('portal-project').textContent = match.projectName;
+  document.getElementById('portal-hello').textContent =
+    'Hi ' + (body.customer.first_name || '') + ' — welcome back';
+  await loadCustomerAgreement();
 }
+
+// Customer tokens are stored separately from the rep token so the two sessions
+// can never be confused for one another.
+const CustomerAuth = {
+  KEY: 'dalton_customer_token',
+  getToken(){ try { return sessionStorage.getItem(this.KEY); } catch(e){ return null; } },
+  setToken(t){ try { sessionStorage.setItem(this.KEY, t); } catch(e){} },
+  clear(){ try { sessionStorage.removeItem(this.KEY); } catch(e){} },
+};
+
+async function loadCustomerAgreement(){
+  const el = document.getElementById('portal-project');
+  try{
+    const res = await fetch('/api/auth/customer-me', {
+      headers: {Authorization: 'Bearer ' + CustomerAuth.getToken()}
+    });
+    if(!res.ok) throw new Error('Could not load your agreement.');
+    const me = await res.json();
+    if(el){
+      el.textContent = (me.project_name || 'Your enrollment') +
+                       ' — ' + (me.workflow_step_label || '');
+    }
+  }catch(err){
+    if(el) el.textContent = 'Could not load your agreement.';
+  }
+}
+
 
 function showView(name){
   document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
@@ -785,16 +833,59 @@ async function openEnrollment(enrollmentId){
   // existing one-time review capability already re-calls it on every Review
   // click, and that path is proven live. No presigned URL is persisted here -
   // the response carries only URL-free metadata.
-  const CONTRACT_STEPS = ['contracts', 'contracts_review', 'contracts_accept',
-                          'contracts_accepted', 'contracts_accept_uncertain'];
-  if(CONTRACT_STEPS.indexOf(key) !== -1){
-    await rehydrateContractPacket(key, terminal, blocked);
-  }
+  // BUG 1 FIX: terminal/blocked enrollments must NOT be in this list.
+  // Previously contracts_accepted and contracts_accept_uncertain were included,
+  // so opening a COMPLETED enrollment POSTed /contracts - which Perch correctly
+  // rejects with 422 "Cannot modify this stage because later stages have
+  // already started", surfacing as a scary error on a finished enrollment.
+  // Only steps that still legitimately need a fresh presigned packet rehydrate.
+  const REHYDRATE_CONTRACT_STEPS = ['contracts', 'contracts_review', 'contracts_accept'];
 
   if(terminal || blocked){
-    // Reopened read-only. No restart, no re-submit path is exposed.
+    // Lock FIRST, so no acceptance control is ever briefly live, then render
+    // from persisted URL-free metadata. Zero Perch calls: opening a completed
+    // enrollment is entirely side-effect-free.
     lockEnrollmentReadOnly(blocked);
+    renderCompletedContractSummary(e, key, terminal, blocked);
+  } else if(REHYDRATE_CONTRACT_STEPS.indexOf(key) !== -1){
+    await rehydrateContractPacket(key, terminal, blocked);
   }
+}
+
+// Read-only view of a finished (or uncertain) enrollment. Renders only what
+// Dalton already persisted - contract NAMES, never URLs, which are deliberately
+// never stored. Makes no network request of any kind.
+function renderCompletedContractSummary(e, key, terminal, blocked){
+  const wrap = document.getElementById('perch-contract-list');
+  const errEl = document.getElementById('contract-review-error');
+  if(errEl){ errEl.style.display = 'none'; errEl.textContent = ''; }
+
+  const saved = (e.workflow_last_response) || {};
+  const names = Array.isArray(saved.contracts) ? saved.contracts : [];
+
+  let html = '';
+  if(terminal){
+    html += '<div class="wf-notice info" style="margin-bottom:12px;">' +
+            'This enrollment is <strong>complete</strong>. The contracts below were ' +
+            'accepted and submitted to Perch. Nothing further is required.</div>';
+  } else if(blocked){
+    html += '<div class="wf-notice warn" style="margin-bottom:12px;">' +
+            'A previous acceptance attempt could not be confirmed. Check this ' +
+            'enrollment with Perch before taking any further action.</div>';
+  }
+
+  if(names.length){
+    html += '<ul style="margin:0 0 10px 18px;">' + names.map(function(c){
+      const nm = (c && c.contract_name) ? c.contract_name : String(c);
+      return '<li>' + esc(nm) + '</li>';
+    }).join('') + '</ul>';
+  }
+  // Presigned Perch URLs are intentionally never persisted, and Perch refuses
+  // to regenerate them once acceptance has started - so documents cannot be
+  // re-opened from here. Say so plainly instead of showing a dead button.
+  html += '<p class="helper">Contract documents are held by Perch and are no longer ' +
+          'retrievable through Dalton once an enrollment is complete.</p>';
+  if(wrap) wrap.innerHTML = html;
 }
 
 async function rehydrateContractPacket(key, terminal, blocked){
@@ -1735,16 +1826,21 @@ function loadRecordIntoState(rec){
 }
 
 
+// REMOVED: the legacy/mock customer contract engine.
+//
+// This used to render a hardcoded local document packet with per-document
+// checkboxes, a drawn-signature canvas and a confetti completion screen, and
+// "completing" it updated NOTHING in Perch - a customer could finish the whole
+// flow while the real enrollment stayed at contracts_review.
+//
+// Customers now use the SAME Perch-backed engine as reps
+// (openCustomerContracts -> POST /contracts, /contracts/review, /contracts/accept).
+// Kept as a hard failure rather than deleted outright so any surviving caller
+// is caught loudly instead of silently reopening the mock flow.
 function enterCustomerSign(mode){
-  entryMode = mode;
-  activateScreen('screen-customer');
-  document.getElementById('cust-hello').textContent = 'Hi '+state.customer.first+' — one step left';
-  document.getElementById('cv-name').textContent = state.customer.first+' '+state.customer.last;
-  document.getElementById('cv-address').textContent = state.address.street+(state.address.unit ? ', '+state.address.unit : '')+', '+state.address.city+', NY '+state.address.zip;
-  document.getElementById('cv-utility').textContent = state.project.utility;
-  document.getElementById('cv-acct').textContent = state.customer.acct;
-  renderDocPacket();
-  initSigCanvas();
+  console.error('enterCustomerSign() is removed. Customers use openCustomerContracts().');
+  if(CustomerAuth.getToken()){ openCustomerContracts(); return; }
+  activateScreen('screen-customer-login');
 }
 
 /* ---------------- REAL DOCUMENT PACKET (built from Perch/Solstice NY contract templates) ---------------- */
@@ -1947,4 +2043,204 @@ function resetAll(){
   document.getElementById('cust-login-pass').value='';
   resetWizardState();
   showScreen('screen-login');
+}
+
+
+// ─────────────── Password visibility toggle ───────────────
+// Toggles ONLY the input type. Never logs, stores, or transmits the value.
+function togglePasswordVisibility(inputId, btnId){
+  const input = document.getElementById(inputId);
+  const btn = document.getElementById(btnId);
+  if(!input || !btn) return;
+  const showing = input.type === 'text';
+  input.type = showing ? 'password' : 'text';
+  btn.setAttribute('aria-pressed', String(!showing));
+  btn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+  btn.title = showing ? 'Show password' : 'Hide password';
+  btn.textContent = showing ? '\u{1F441}' : '\u{1F441}\u{200D}\u{1F5E8}';
+}
+
+
+/* ==================== CUSTOMER CONTRACT FLOW ====================
+   Uses the SAME Perch-backed endpoints the rep flow uses:
+     POST /api/perch/enrollments/:id/contracts          (packet + fresh URLs)
+     POST /api/perch/enrollments/:id/contracts/review   (one-time capability)
+     POST /api/perch/enrollments/:id/contracts/accept   (real acceptance)
+   There is deliberately no second contract implementation. Presigned URLs are
+   never stored client-side - Review mints a short-lived capability each time. */
+
+let customerEnrollmentId = null;
+let customerContracts = [];
+let customerAcceptInFlight = false;
+
+async function customerApi(path, opts){
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers || {},
+    {Authorization: 'Bearer ' + CustomerAuth.getToken()});
+  if(opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+  const res = await fetch(path, Object.assign({}, opts, {headers}));
+  let data = null;
+  try { data = await res.json(); } catch(e){}
+  if(res.status === 401){
+    CustomerAuth.clear();
+    activateScreen('screen-customer-login');
+    throw new Error('Your session expired — please sign in again.');
+  }
+  if(!res.ok) throw new Error((data && data.error) || ('Request failed (' + res.status + ')'));
+  return data;
+}
+
+async function openCustomerContracts(){
+  const errEl = document.getElementById('portal-error');
+  if(errEl) errEl.style.display = 'none';
+  let me;
+  try{
+    me = await customerApi('/api/auth/customer-me');
+  }catch(err){
+    if(errEl){ errEl.textContent = err.message; errEl.style.display = 'block'; }
+    return;
+  }
+  customerEnrollmentId = me.enrollment_id;
+
+  activateScreen('screen-customer-contracts');
+  const listEl = document.getElementById('cc-contract-list');
+  const statusEl = document.getElementById('cc-status');
+  const ccErr = document.getElementById('cc-error');
+  if(ccErr) ccErr.style.display = 'none';
+  if(statusEl) statusEl.style.display = 'none';
+
+  // Completed / blocked enrollments are READ-ONLY: no packet is requested, so
+  // nothing is sent to Perch, and no acceptance control is offered.
+  if(me.workflow_is_terminal || me.workflow_is_blocked){
+    customerContracts = [];
+    renderCustomerReadOnly(me);
+    return;
+  }
+
+  if(listEl) listEl.innerHTML = '<p class="helper">Loading your contract packet…</p>';
+  let body;
+  try{
+    body = await customerApi('/api/perch/enrollments/' + customerEnrollmentId + '/contracts',
+                             {method:'POST', body: JSON.stringify({})});
+  }catch(err){
+    customerContracts = [];
+    if(listEl) listEl.innerHTML = '<p class="helper">Your contract packet could not be loaded.</p>';
+    if(ccErr){ ccErr.textContent = err.message; ccErr.style.display = 'block'; }
+    updateCustomerAcceptState();
+    return;
+  }
+  customerContracts = body.contracts || [];
+  renderCustomerContracts(body);
+  updateCustomerAcceptState();
+}
+
+function renderCustomerReadOnly(me){
+  const listEl = document.getElementById('cc-contract-list');
+  const btn = document.getElementById('cc-accept-btn');
+  const chk = document.getElementById('cc-confirm-check');
+  const statusEl = document.getElementById('cc-status');
+  document.getElementById('cc-title').textContent =
+    me.workflow_is_terminal ? 'Your enrollment is complete' : 'Your enrollment needs review';
+  document.getElementById('cc-lead').textContent =
+    me.workflow_is_terminal
+      ? 'You have already accepted your contracts. Nothing further is required.'
+      : 'We are confirming the status of your agreement. No action is needed right now.';
+  if(listEl) listEl.innerHTML =
+    '<p class="helper">Your contract documents are held by Perch and are no longer ' +
+    'retrievable here once an enrollment is complete.</p>';
+  if(chk){ chk.checked = false; chk.disabled = true; }
+  if(btn){ btn.disabled = true; btn.textContent = me.workflow_is_terminal ? 'Completed' : 'Unavailable'; }
+  if(statusEl){
+    statusEl.textContent = me.workflow_step_label || '';
+    statusEl.style.display = 'block';
+  }
+}
+
+function renderCustomerContracts(body){
+  const listEl = document.getElementById('cc-contract-list');
+  if(!listEl) return;
+  if(!customerContracts.length){
+    listEl.innerHTML = '<p class="helper">No contract documents were returned.</p>';
+    return;
+  }
+  listEl.innerHTML = customerContracts.map(function(ct, i){
+    return '<div class="product-card" style="display:flex;justify-content:space-between;' +
+           'align-items:center;gap:12px;">' +
+           '<div><div class="prod-name">' + esc(ct.contract_name || ('Document ' + (i+1))) + '</div>' +
+           '<div class="prod-id">' + (ct.url_present ? 'Ready to view' : 'Unavailable') + '</div></div>' +
+           '<button class="btn btn-ghost btn-sm" onclick="customerReviewContract(' + i + ')">Review</button>' +
+           '</div>';
+  }).join('');
+}
+
+async function customerReviewContract(index){
+  // Opened synchronously so the pop-up blocker does not eat it, exactly as the
+  // rep flow does. The presigned URL is never exposed to this page.
+  const w = window.open('about:blank', '_blank');
+  const ccErr = document.getElementById('cc-error');
+  if(ccErr) ccErr.style.display = 'none';
+  try{
+    const body = await customerApi(
+      '/api/perch/enrollments/' + customerEnrollmentId + '/contracts/review',
+      {method:'POST', body: JSON.stringify({contract_index: index})});
+    if(w) w.location = body.review_url; else window.location = body.review_url;
+  }catch(err){
+    if(w) w.close();
+    if(ccErr){ ccErr.textContent = err.message; ccErr.style.display = 'block'; }
+  }
+}
+
+function updateCustomerAcceptState(){
+  const btn = document.getElementById('cc-accept-btn');
+  const chk = document.getElementById('cc-confirm-check');
+  if(!btn || !chk) return;
+  if(customerAcceptInFlight){ btn.disabled = true; return; }
+  btn.disabled = !(customerContracts.length > 0 && chk.checked);
+}
+
+async function customerAcceptContracts(){
+  const btn = document.getElementById('cc-accept-btn');
+  const chk = document.getElementById('cc-confirm-check');
+  const ccErr = document.getElementById('cc-error');
+  const statusEl = document.getElementById('cc-status');
+  if(ccErr) ccErr.style.display = 'none';
+  if(!chk || !chk.checked){
+    if(ccErr){ ccErr.textContent = 'Please confirm you have reviewed the documents.'; ccErr.style.display = 'block'; }
+    return;
+  }
+  if(customerAcceptInFlight) return;
+  customerAcceptInFlight = true;
+  btn.disabled = true; btn.textContent = 'Submitting…';
+
+  let body;
+  try{
+    body = await customerApi('/api/perch/enrollments/' + customerEnrollmentId + '/contracts/accept',
+                             {method:'POST', body: JSON.stringify({customer_confirmed: true})});
+  }catch(err){
+    customerAcceptInFlight = false;
+    btn.textContent = 'Accept and complete';
+    if(ccErr){ ccErr.textContent = err.message; ccErr.style.display = 'block'; }
+    // An uncertain outcome must NOT be retried by clicking again.
+    if(/uncertain|could not be confirmed/i.test(err.message || '')){
+      btn.disabled = true;
+      if(statusEl){
+        statusEl.textContent = 'Do not resubmit. We are confirming this with Perch.';
+        statusEl.style.display = 'block';
+      }
+    }else{
+      updateCustomerAcceptState();
+    }
+    return;
+  }
+  customerAcceptInFlight = false;
+  btn.textContent = 'Completed';
+  btn.disabled = true;
+  chk.disabled = true;
+  document.getElementById('cc-title').textContent = 'Your enrollment is complete';
+  if(statusEl){
+    const st = body.perch_status || null;
+    statusEl.textContent = (body.message || 'Contracts accepted.') +
+      (st && st.completed === true ? ' Your enrollment is now complete.' : '');
+    statusEl.style.display = 'block';
+  }
 }

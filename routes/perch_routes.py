@@ -9,6 +9,7 @@ Milestone 2: the browser no longer asks for "products" - it asks for the current
 WORKFLOW STEP and renders whatever descriptor comes back.
 """
 import json
+import os
 import secrets
 import time
 from datetime import datetime
@@ -17,7 +18,7 @@ from urllib.parse import urlparse
 from flask import Blueprint, request, jsonify, g, redirect
 
 from db import query_one, execute
-from auth import require_auth, require_role
+from auth import require_auth, require_role, require_staff_or_customer
 from helpers import next_enrollment_code, resolve_stored_path
 from services import audit, status_machine
 from services.perch import adapter, workflow, utilities
@@ -40,6 +41,42 @@ _CONTRACT_REVIEW_TTL_SECONDS = 5 * 60
 
 def _rep_for_current_user():
     return query_one("SELECT * FROM sales_reps WHERE user_id = ?", (g.current_user["id"],))
+
+
+def _actor_id():
+    """The acting user id for audit/adapter calls. None for a customer."""
+    return getattr(g, "actor_user_id", None) if hasattr(g, "actor_user_id") else g.current_user["id"]
+
+
+def _actor_details(extra=None):
+    actor = getattr(g, "actor_description", None)
+    if not actor:
+        user = getattr(g, "current_user", None)
+        actor = f"user:{user['id']}" if user else "unknown"
+    d = {"actor": actor}
+    if extra:
+        d.update(extra)
+    return d
+
+
+def _visible_to_actor(enrollment_id):
+    """Visibility for a route reachable by BOTH a rep and a customer.
+
+    A customer may only ever touch the single enrollment bound to their token.
+    A rep falls through to the existing _visible() rules.
+    """
+    customer = getattr(g, "current_customer", None)
+    if customer:
+        enrollment = query_one("SELECT * FROM enrollments WHERE id = ?", (enrollment_id,))
+        if not enrollment:
+            return None, (jsonify({"error": "Enrollment not found"}), 404)
+        # Two independent checks: the token's enrollment id AND ownership.
+        if str(getattr(g, "customer_enrollment_id", None)) != str(enrollment_id):
+            return None, (jsonify({"error": "Forbidden"}), 403)
+        if enrollment["customer_id"] != customer["id"]:
+            return None, (jsonify({"error": "Forbidden"}), 403)
+        return enrollment, None
+    return _visible(enrollment_id)
 
 
 def _visible(enrollment_id):
@@ -300,7 +337,7 @@ def diagnostics():
 def _perch_error_response(enrollment_id, operation, exc):
     audit.log(
         f"perch_{operation}_failed", enrollment_id=enrollment_id,
-        user_id=g.current_user["id"], details={"error": str(exc)},
+        user_id=_actor_id(), details=_actor_details({"error": str(exc)}),
         ip_address=request.remote_addr,
     )
     return jsonify({"error": str(exc), "perch_error": type(exc).__name__}), getattr(exc, "http_status", 502)
@@ -514,14 +551,13 @@ def submit_perch_proof_docs(enrollment_id):
 
 
 @bp.route("/enrollments/<int:enrollment_id>/contracts", methods=["POST"])
-@require_auth
-@require_role("sales_rep", "admin")
+@require_staff_or_customer
 def generate_perch_contracts(enrollment_id):
-    enrollment, err = _visible(enrollment_id)
+    enrollment, err = _visible_to_actor(enrollment_id)
     if err:
         return err
     try:
-        result = adapter.generate_contracts(enrollment_id, user_id=g.current_user["id"])
+        result = adapter.generate_contracts(enrollment_id, user_id=_actor_id())
     except PerchError as e:
         return _perch_error_response(enrollment_id, "contracts", e)
 
@@ -544,10 +580,9 @@ def generate_perch_contracts(enrollment_id):
 
 
 @bp.route("/enrollments/<int:enrollment_id>/contracts/review", methods=["POST"])
-@require_auth
-@require_role("sales_rep", "admin")
+@require_staff_or_customer
 def review_perch_contract(enrollment_id):
-    enrollment, err = _visible(enrollment_id)
+    enrollment, err = _visible_to_actor(enrollment_id)
     if err:
         return err
     data = request.get_json(force=True, silent=True) or {}
@@ -574,7 +609,7 @@ def review_perch_contract(enrollment_id):
         "enrollment_id": enrollment_id,
         "contract_index": index,
         "contract_name": safe_contracts[index].get("contract_name"),
-        "user_id": g.current_user["id"],
+        "user_id": _actor_id(),
         "expires_at": now + _CONTRACT_REVIEW_TTL_SECONDS,
     }
     response = jsonify({"review_url": f"/api/perch/contract-reviews/{token}"})
@@ -634,6 +669,45 @@ def open_contract_review(token):
 _MAX_USER_AGENT = 2048
 
 
+def _prior_contract_names(enrollment_id):
+    """URL-free contract names previously stored at the contracts_review step."""
+    state = workflow.get_state(enrollment_id) or {}
+    try:
+        saved = json.loads(state.get("last_response_json") or "{}")
+    except (TypeError, ValueError):
+        return []
+    items = saved.get("contracts")
+    if not isinstance(items, list):
+        return []
+    return [{"contract_name": (c or {}).get("contract_name")} for c in items
+            if isinstance(c, dict)]
+
+
+def _client_ip():
+    """The accepting client's IP.
+
+    request.remote_addr is the TCP peer. Behind a reverse proxy or load
+    balancer that is the PROXY's address, so every customer would appear to
+    share one IP in Perch's acceptance record.
+
+    X-Forwarded-For is trusted ONLY when DALTON_TRUSTED_PROXY_COUNT is set to a
+    positive integer, and then only the Nth-from-last entry - the hop actually
+    written by our own proxy. Entries further left are client-supplied and
+    forgeable, so they are never used. Unset (the default, and our current local
+    setup) means the header is ignored entirely.
+    """
+    try:
+        hops = int(os.environ.get("DALTON_TRUSTED_PROXY_COUNT", "0"))
+    except (TypeError, ValueError):
+        hops = 0
+    if hops > 0:
+        xff = request.headers.get("X-Forwarded-For") or ""
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if len(parts) >= hops:
+            return parts[-hops]
+    return request.remote_addr
+
+
 def _acceptance_metadata():
     """Build Perch's required metadata SERVER-SIDE.
 
@@ -651,15 +725,14 @@ def _acceptance_metadata():
     """
     user_agent = (request.headers.get("User-Agent") or "")[:_MAX_USER_AGENT]
     return {
-        "ip_address": request.remote_addr,
+        "ip_address": _client_ip(),
         "timestamp": acceptance_timestamp(),
         "user_agent": user_agent,
     }
 
 
 @bp.route("/enrollments/<int:enrollment_id>/contracts/accept", methods=["POST"])
-@require_auth
-@require_role("sales_rep", "admin")
+@require_staff_or_customer
 def accept_perch_contracts(enrollment_id):
     """Record the customer's acceptance of the whole Perch contract packet.
 
@@ -667,7 +740,7 @@ def accept_perch_contracts(enrollment_id):
     Perch: authenticated, authorized, enrollment visible, workflow in the
     contract-review state, and explicit customer confirmation present.
     """
-    enrollment, err = _visible(enrollment_id)
+    enrollment, err = _visible_to_actor(enrollment_id)
     if err:
         return err
 
@@ -719,7 +792,7 @@ def accept_perch_contracts(enrollment_id):
     metadata = _acceptance_metadata()
 
     try:
-        result = adapter.accept_contracts(enrollment_id, metadata, user_id=g.current_user["id"])
+        result = adapter.accept_contracts(enrollment_id, metadata, user_id=_actor_id())
     except PerchAmbiguousOutcomeError as e:
         # Do NOT mark accepted, do NOT mark failed, do NOT retry.
         workflow.set_state(
@@ -728,13 +801,13 @@ def accept_perch_contracts(enrollment_id):
                            "attempted_at": metadata["timestamp"]},
         )
         audit.log("perch_contracts_accept_uncertain", enrollment_id=enrollment_id,
-                  user_id=g.current_user["id"], details={"detail": str(e)},
+                  user_id=_actor_id(), details={"detail": str(e)},
                   ip_address=request.remote_addr)
         status_payload = None
         try:
             # GET /status is side-effect free, so it is safe even here - and it
             # is the only way to discover what actually happened.
-            status_payload = adapter.get_status(enrollment_id, user_id=g.current_user["id"])
+            status_payload = adapter.get_status(enrollment_id, user_id=_actor_id())
         except PerchError:
             pass
         return jsonify({
@@ -751,7 +824,7 @@ def accept_perch_contracts(enrollment_id):
     # every downstream step finished - confirm via GET /status.
     status_payload = None
     try:
-        status_payload = adapter.get_status(enrollment_id, user_id=g.current_user["id"])
+        status_payload = adapter.get_status(enrollment_id, user_id=_actor_id())
     except PerchError:
         status_payload = None
 
@@ -759,12 +832,15 @@ def accept_perch_contracts(enrollment_id):
     workflow.set_state(
         enrollment_id, "contracts_accepted",
         next_step_url=None, recognized=True,
-        last_response={"message": result.get("message"), "perch_status": safe_status},
+        # Carry the URL-free contract names forward so the completed read-only
+        # view can list them WITHOUT calling Perch. Names only - never URLs.
+        last_response={"message": result.get("message"), "perch_status": safe_status,
+                       "contracts": _prior_contract_names(enrollment_id)},
     )
     audit.log("perch_contracts_accepted", enrollment_id=enrollment_id,
-              user_id=g.current_user["id"],
-              details={"message": result.get("message"),
-                       "perch_completed": (safe_status or {}).get("completed")},
+              user_id=_actor_id(),
+              details=_actor_details({"message": result.get("message"),
+                       "perch_completed": (safe_status or {}).get("completed")}),
               ip_address=request.remote_addr)
 
     return jsonify({

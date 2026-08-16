@@ -65,6 +65,9 @@ def _serialize_enrollment(row, requester_role):
         "workflow_is_terminal": perch_workflow.is_terminal(step_key),
         "workflow_is_blocked": perch_workflow.is_blocked(step_key),
         "perch_next_step_url": wf["perch_next_step_url"] if wf else None,
+        # URL-free workflow payload, so a completed enrollment can be rendered
+        # read-only without calling Perch. Contains contract NAMES, never URLs.
+        "workflow_last_response": json_or_none(wf["last_response_json"]) if wf else None,
     }
 
 

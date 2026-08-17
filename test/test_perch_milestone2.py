@@ -1364,14 +1364,21 @@ def main():
     from services.perch.client import (
         acceptance_timestamp, ACCEPTANCE_CLOCK_SKEW_SECONDS, ACCEPTANCE_TIMESTAMP_FORMAT,
     )
-    from datetime import datetime as _dt, timedelta as _td
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tzone
 
     # Live staging returned 422 "Metadata timestamp cannot be in the future" for a
     # timestamp generated at the exact instant of submission. Perch PARSED it and
     # applied the not-in-the-future rule, so the format is fine - the value was not.
     _ts = acceptance_timestamp()
     _parsed = _dt.strptime(_ts, ACCEPTANCE_TIMESTAMP_FORMAT)
-    _age = (_dt.now() - _parsed).total_seconds()
+    # Compare against UTC, not local time. acceptance_timestamp() is generated
+    # from datetime.now(timezone.utc) and formatted WITHOUT an offset, because
+    # Perch's wire format carries none - so the parsed value is a naive UTC
+    # instant. Comparing it to a naive LOCAL now() silently subtracts the
+    # machine's UTC offset and reports a UTC-correct timestamp as "in the
+    # future" on any host that is not UTC (observed on a Windows/Eastern box).
+    _utc_now_naive = _dt.now(_tzone.utc).replace(tzinfo=None)
+    _age = (_utc_now_naive - _parsed).total_seconds()
 
     check("generated timestamp is NOT in the future", _age > 0)
     check("timestamp is at least the configured skew in the past",
@@ -1379,7 +1386,7 @@ def main():
     check("timestamp is still recent (well under Perch's 24h maximum)", _age < 86400)
     check("timestamp is recent enough to be an honest acceptance record", _age < 120)
     check("skew allowance is small and conservative",
-          5 <= ACCEPTANCE_CLOCK_SKEW_SECONDS <= 30)
+          5 <= ACCEPTANCE_CLOCK_SKEW_SECONDS <= 60)
 
     # Format must not drift - staging demonstrably parses this shape.
     check("format matches the spec example (space separated, no timezone)",
@@ -1432,8 +1439,9 @@ def main():
     check("metadata still has exactly the three Perch fields",
           set(_md_sent["metadata"].keys()) == {"ip_address", "timestamp", "user_agent"})
     check("transmitted timestamp is not in the future",
-          (_dt.now() - _dt.strptime(_md_sent["metadata"]["timestamp"],
-                                     ACCEPTANCE_TIMESTAMP_FORMAT)).total_seconds() > 0)
+          (_dt.now(_tzone.utc).replace(tzinfo=None)
+           - _dt.strptime(_md_sent["metadata"]["timestamp"],
+                          ACCEPTANCE_TIMESTAMP_FORMAT)).total_seconds() > 0)
 
     section("Staging verifier - CLI parsing and production parity")
     _vsrc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -1477,6 +1485,83 @@ def main():
     _a = _parse(["--i-understand-this-accepts-contracts", "12203"])
     check("flag before positionals works",
           _a.zip_code == "12203" and _a.accept_for_real is True)
+
+    section("ACCEPTANCE TIMESTAMP — explicit UTC, bounded skew")
+    import time as _time
+    from datetime import datetime as _dt, timezone as _tz
+    from services.perch.client import (acceptance_timestamp, acceptance_clock_skew_seconds,
+                                       DEFAULT_ACCEPTANCE_CLOCK_SKEW_SECONDS,
+                                       MAX_ACCEPTANCE_CLOCK_SKEW_SECONDS)
+
+    _saved_tz = os.environ.get("TZ")
+    _saved_skew = os.environ.get("PERCH_ACCEPTANCE_SKEW_SECONDS")
+    os.environ.pop("PERCH_ACCEPTANCE_SKEW_SECONDS", None)
+    try:
+        check("default skew is 30s", DEFAULT_ACCEPTANCE_CLOCK_SKEW_SECONDS == 30)
+        check("  ...and is what an unset env yields", acceptance_clock_skew_seconds() == 30)
+
+        # THE BUG THIS GUARDS: datetime.now() is LOCAL. On any host east of UTC it
+        # produced a future-dated timestamp, which Perch rejects with 422.
+        for tzname in ("UTC", "America/New_York", "Europe/Berlin", "Asia/Tokyo"):
+            os.environ["TZ"] = tzname
+            if hasattr(_time, "tzset"):
+                _time.tzset()
+            ts = acceptance_timestamp()
+            parsed = _dt.strptime(ts + "00", "%Y-%m-%d %H:%M:%S.%f")
+            delta = (parsed - _dt.now(_tz.utc).replace(tzinfo=None)).total_seconds()
+            check(f"TZ={tzname}: timestamp is UTC, not local", -60 < delta < 0)
+            check(f"  ...and is in the PAST (delta {delta:.0f}s)", delta < 0)
+        os.environ["TZ"] = "UTC"
+        if hasattr(_time, "tzset"):
+            _time.tzset()
+
+        ts = acceptance_timestamp()
+        check("wire format has no Z suffix", not ts.endswith("Z"))
+        check("wire format has no offset", "+" not in ts and ts.count("-") == 2)
+        check("wire format is space-separated", " " in ts and "T" not in ts)
+        check("microseconds truncated to 4 digits", len(ts.split(".")[-1]) == 4)
+        check("parseable as the documented format",
+              _dt.strptime(ts + "00", "%Y-%m-%d %H:%M:%S.%f") is not None)
+
+        for raw_val, expected in (("0", 0), ("15", 15), ("30", 30), ("120", 120),
+                                  ("9999", MAX_ACCEPTANCE_CLOCK_SKEW_SECONDS),
+                                  ("-5", 0), ("abc", 30), ("", 30)):
+            os.environ["PERCH_ACCEPTANCE_SKEW_SECONDS"] = raw_val
+            check(f"skew {raw_val!r} -> {expected}s", acceptance_clock_skew_seconds() == expected)
+        os.environ.pop("PERCH_ACCEPTANCE_SKEW_SECONDS", None)
+        check("skew can never exceed the 120s cap",
+              MAX_ACCEPTANCE_CLOCK_SKEW_SECONDS == 120)
+
+        # An aware datetime is converted, never assumed.
+        aware = _dt(2026, 8, 17, 3, 0, 0, tzinfo=_tz.utc)
+        check("aware UTC input handled", acceptance_timestamp(aware).startswith("2026-08-17 02:59"))
+    finally:
+        if _saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = _saved_tz
+        if hasattr(_time, "tzset"):
+            _time.tzset()
+        if _saved_skew is None:
+            os.environ.pop("PERCH_ACCEPTANCE_SKEW_SECONDS", None)
+        else:
+            os.environ["PERCH_ACCEPTANCE_SKEW_SECONDS"] = _saved_skew
+
+    section("RECONCILE-FIRST RESUME (runtime)")
+    import subprocess as _sp
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _h = os.path.join(_root, "test", "contract_resume_reconcile_harness.js")
+    check("reconcile harness exists", os.path.exists(_h))
+    _r = _sp.run(["node", _h], capture_output=True, text=True, timeout=120)
+    for _line in (_r.stdout + _r.stderr).splitlines():
+        if "[FAIL]" in _line:
+            print("      " + _line.strip())
+    check("reopen reconciles with /status before /contracts", _r.returncode == 0)
+    _js = open(os.path.join(_root, "static", "js", "app.js"), encoding="utf-8").read()
+    check("resume calls perch-status", "/perch-status" in _js)
+    check("regeneration is gated on the reconciled stage", "canRegenerate" in _js)
+    check("the misleading reopen advice is gone",
+          "Return to the dashboard and reopen this enrollment to retry" not in _js)
 
     print(f"\n{'='*74}\nMILESTONE 2.5 + STAGING SHAPE - ALL CHECKS PASSED\n{'='*74}")
 

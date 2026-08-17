@@ -451,6 +451,7 @@ function clearWizardForms(){
      step.primary_action / .secondary_action  {label, operation, enabled, disabled_reason}
 */
 
+let currentEnrollmentDetail = null;
 let currentDraft = null;     // {enrollment_id, enrollment_code} - durable Dalton key
 let currentWorkflow = null;  // descriptor used only for service-area/capacity
 let utilityRules = {};
@@ -815,6 +816,7 @@ async function openEnrollment(enrollmentId){
   perchContext.utilitySlug = e.utility_account ? e.utility_account.utility_name : '';
   perchContext.nextStepKey = e.workflow_step_key || null;
 
+  currentEnrollmentDetail = e;   // persisted workflow_last_response for resume
   const key = e.workflow_step_key || 'service_area';
   const terminal = e.workflow_is_terminal === true;
   const blocked  = e.workflow_is_blocked === true;
@@ -863,40 +865,109 @@ async function openEnrollment(enrollmentId){
 // Dalton already persisted - contract NAMES, never URLs, which are deliberately
 // never stored. Makes no network request of any kind.
 async function rehydrateContractPacket(key, terminal, blocked){
-  // Mount the shared component FIRST so the review screen is present (and the
-  // error region exists) before the network call. The old #contract-review-error
-  // element was removed with the legacy UI; errors now surface in the
-  // component's own #agr-card-error, which renderAgreementCard() renders.
+  // RECONCILE FIRST, then decide whether regenerating is even legal.
+  //
+  // POST /contracts is only repeatable BEFORE acceptance is attempted. Once a
+  // customer has submitted acceptance - even one Perch rejected - Perch's stage
+  // machine advances and refuses to regenerate:
+  //     "Cannot modify this stage because later stages have already started."
+  // Dalton's local state does not advance on a rejected acceptance, so the two
+  // diverge and the old code called /contracts unconditionally, producing a hard
+  // error the rep could not clear by reopening. (Observed live 2026-08-17.)
+  //
+  // GET /status is documented side-effect free, so asking first costs nothing.
   mountRepAgreements(false, false);
   const cardErr = document.getElementById('agr-card-error');
   if(cardErr) cardErr.style.display = 'none';
+
+  const eid = currentDraft.enrollment_id;
+  let status = null;
   try{
-    const body = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/contracts',
-                                {method:'POST', body:JSON.stringify({})});
-    perchContracts = body.contracts || [];
-    perchContext.contractsGenerated = true;
-    perchContext.contractsNextStepKey = body.next_step_key;
-    // Never fabricated - taken from the backend response, exactly as the
-    // straight-through path does.
-    perchContext.acceptanceEnabled = body.acceptance_enabled === true;
+    status = await apiFetch('/api/perch/enrollments/' + eid + '/perch-status');
   }catch(err){
-    perchContracts = [];
+    // Status is best-effort. If it fails we fall back to the persisted packet
+    // rather than guessing that regeneration is safe.
+    status = null;
+  }
+
+  const perchStep = status ? (status.next_step_key || null) : null;
+  const perchCompleted = status ? status.completed === true : false;
+
+  // Regeneration is valid ONLY while Perch still considers contracts the
+  // current stage. Anything at or past acceptance must not touch /contracts.
+  const REGENERABLE = ['contracts', 'contracts_review'];
+  const statusSaysPastContracts =
+    perchCompleted || (perchStep && REGENERABLE.indexOf(perchStep) === -1);
+  const canRegenerate = !terminal && !blocked && !statusSaysPastContracts;
+
+  if(canRegenerate){
+    try{
+      const body = await apiFetch('/api/perch/enrollments/' + eid + '/contracts',
+                                  {method:'POST', body:JSON.stringify({})});
+      perchContracts = body.contracts || [];
+      perchContext.contractsGenerated = true;
+      perchContext.contractsNextStepKey = body.next_step_key;
+      // Never fabricated - taken from the backend response, exactly as the
+      // straight-through path does.
+      perchContext.acceptanceEnabled = body.acceptance_enabled === true;
+      mountRepAgreements(false, false);
+      return;
+    }catch(err){
+      // Fall through to the persisted packet rather than dead-ending.
+      perchContracts = [];
+      perchContext.acceptanceEnabled = false;
+    }
+  }
+
+  // ── Perch has advanced past contracts (or regeneration failed) ──
+  // Reuse the agreement names Dalton already persisted at contracts_review.
+  // URL-free by design, so documents cannot be reopened - say so honestly
+  // instead of implying a retry will help.
+  const persisted = (currentEnrollmentDetail
+                     && currentEnrollmentDetail.workflow_last_response
+                     && currentEnrollmentDetail.workflow_last_response.contracts) || [];
+  perchContracts = persisted;
+  perchContext.contractsGenerated = persisted.length > 0;
+
+  if(perchCompleted || terminal){
+    // Already accepted: read-only, no further action.
     perchContext.acceptanceEnabled = false;
-    mountRepAgreements(false, false);
-    const failEl = document.getElementById('agr-card-error');
-    if(failEl){
-      failEl.textContent = 'Could not load the agreements: ' + err.message +
-                           ' Return to the dashboard and reopen this enrollment to retry.';
-      failEl.style.display = 'block';
+    perchContext.acceptanceSubmitted = true;
+    mountRepAgreements(true, true);
+    return;
+  }
+
+  if(blocked && perchStep !== 'contracts_accept'){
+    // Uncertain acceptance that /status has NOT cleared: stay read-only.
+    perchContext.acceptanceEnabled = false;
+    mountRepAgreements(true, false);
+    const el = document.getElementById('agr-card-error');
+    if(el){
+      el.textContent = 'A previous acceptance could not be confirmed. Check this ' +
+                       'enrollment with Perch before trying again.';
+      el.style.display = 'block';
     }
     return;
   }
-  if(terminal || blocked){
-    // Already accepted or uncertain: show the packet for reference only.
-    perchContext.acceptanceEnabled = false;
-    perchContext.acceptanceSubmitted = terminal;
-  }
+
+  // Perch says acceptance is still the outstanding step, so ONE attempt is
+  // legitimate. Acceptance itself remains server-guarded and non-retrying.
+  perchContext.acceptanceEnabled = (perchStep === 'contracts_accept');
   mountRepAgreements(false, false);
+
+  const note = document.getElementById('agr-card-error');
+  if(note){
+    if(perchStep === 'contracts_accept'){
+      note.textContent = 'These agreements were already generated and are awaiting ' +
+        'acceptance. The documents cannot be reopened at this stage, but you can ' +
+        'complete acceptance below.';
+    }else{
+      note.textContent = 'The agreements could not be reloaded and Dalton has no ' +
+        'saved copy for this enrollment. Check its status with Perch before ' +
+        'taking further action.';
+    }
+    note.style.display = 'block';
+  }
 }
 
 function renderResumeBanner(e, key, terminal, blocked){

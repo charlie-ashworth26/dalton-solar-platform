@@ -24,7 +24,7 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from services.perch import hmac_auth
 from services.perch.errors import (
@@ -326,7 +326,45 @@ def redact_contract_urls(data):
 # typical NTP skew while remaining far inside Perch's documented 24-hour
 # maximum age, so the value is still an honest record of when the customer
 # agreed (they clicked moments earlier, not 10 seconds in the future).
-ACCEPTANCE_CLOCK_SKEW_SECONDS = 10
+# Raised 10 -> 30 after a live hosted 422 on 2026-08-17. Render's container was
+# verified UTC (local and utc identical to the microsecond), so Dalton's value
+# was already correct UTC minus 10s - the rejection came from Perch-side clock
+# skew or a tolerance tighter than 10s, not from our formatting.
+#
+# 30s is a defensible NTP allowance between two well-synced servers. It is NOT a
+# licence to backdate: the timestamp records when the customer agreed, so it is
+# bounded below and capped hard.
+DEFAULT_ACCEPTANCE_CLOCK_SKEW_SECONDS = 30
+
+# Hard ceiling. A larger offset would hide a real clock problem rather than
+# absorb jitter, and would make the acceptance record dishonest.
+MAX_ACCEPTANCE_CLOCK_SKEW_SECONDS = 120
+MIN_ACCEPTANCE_CLOCK_SKEW_SECONDS = 0
+
+
+def acceptance_clock_skew_seconds():
+    """Skew allowance, overridable via PERCH_ACCEPTANCE_SKEW_SECONDS.
+
+    Clamped to [0, 120]. An unparseable or out-of-range value falls back to the
+    default rather than failing the acceptance, because a malformed env var must
+    never block a customer from completing an enrollment.
+    """
+    raw = os.environ.get("PERCH_ACCEPTANCE_SKEW_SECONDS")
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_ACCEPTANCE_CLOCK_SKEW_SECONDS
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_ACCEPTANCE_CLOCK_SKEW_SECONDS
+    if value < MIN_ACCEPTANCE_CLOCK_SKEW_SECONDS:
+        return MIN_ACCEPTANCE_CLOCK_SKEW_SECONDS
+    if value > MAX_ACCEPTANCE_CLOCK_SKEW_SECONDS:
+        return MAX_ACCEPTANCE_CLOCK_SKEW_SECONDS
+    return value
+
+
+# Kept for callers/tests that reference the historical name.
+ACCEPTANCE_CLOCK_SKEW_SECONDS = DEFAULT_ACCEPTANCE_CLOCK_SKEW_SECONDS
 
 # Format matches the spec's own example ("2026-07-03 15:20:36.6717"): space
 # separated, no timezone, microseconds truncated to 4 digits. Confirmed
@@ -341,8 +379,21 @@ def acceptance_timestamp(now=None):
     this, so the verifier provably exercises production behavior rather than a
     near-copy that can drift.
     """
-    base = now or datetime.now()
-    stamped = base - timedelta(seconds=ACCEPTANCE_CLOCK_SKEW_SECONDS)
+    # EXPLICIT UTC. datetime.now() returns LOCAL time, which equals UTC only if
+    # the server happens to be configured that way - an invisible dependency that
+    # would silently produce a future-dated timestamp on any host east of UTC.
+    # Perch's format carries no offset, so the value must be UTC by construction.
+    if now is None:
+        base = datetime.now(timezone.utc).replace(tzinfo=None)
+    elif now.tzinfo is not None:
+        # A caller-supplied aware datetime is converted, never assumed.
+        base = now.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        # A naive datetime from a caller (tests) is used as given.
+        base = now
+    stamped = base - timedelta(seconds=acceptance_clock_skew_seconds())
+    # tzinfo is stripped above, so strftime emits no offset - the wire format is
+    # unchanged: "YYYY-MM-DD HH:MM:SS.ffff", 4-digit microseconds, no Z.
     return stamped.strftime(ACCEPTANCE_TIMESTAMP_FORMAT)[:-2]
 
 

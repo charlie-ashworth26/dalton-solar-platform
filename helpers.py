@@ -7,6 +7,18 @@ from db import query_one, execute
 
 BACKEND_ROOT = os.path.dirname(os.path.abspath(__file__))
 
+# Where Dalton writes everything it must KEEP: uploaded originals, generated
+# documents, submission packages.
+#
+# Local development: unset -> BACKEND_ROOT, i.e. exactly the paths used today.
+# Hosted staging:    DALTON_DATA_DIR=/var/data, a Render persistent disk, because
+#                    the container filesystem is wiped on every deploy/restart and
+#                    documents would vanish while enrollments still referenced them.
+#
+# stored_path stays RELATIVE in the database ("uploads/3/bill.pdf"), so moving
+# the data directory does not require rewriting existing rows.
+DATA_ROOT = os.path.abspath(os.environ.get("DALTON_DATA_DIR") or BACKEND_ROOT)
+
 
 def resolve_stored_path(stored_path: str) -> str:
     """Every documents.stored_path value is relative to the backend root
@@ -14,7 +26,7 @@ def resolve_stored_path(stored_path: str) -> str:
     This is the ONLY place that turns one into an absolute path — every route
     should call this instead of joining paths itself, so the convention can't
     drift between upload and generation code paths again."""
-    return os.path.join(BACKEND_ROOT, stored_path)
+    return os.path.join(DATA_ROOT, stored_path)
 
 
 def mask_account_number(acct: str) -> str:

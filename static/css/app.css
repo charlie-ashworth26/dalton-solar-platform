@@ -408,3 +408,10 @@
   .docset-link{color:var(--brand);text-decoration:underline;text-underline-offset:2px;cursor:pointer;}
   .docset-link:hover{color:var(--brand-dark);}
   .docset-link:focus-visible{outline:2px solid var(--brand);outline-offset:2px;border-radius:3px;}
+
+  /* Environment warning banner. Only rendered when the backend supplies text,
+     so it can never appear in an unconfigured production environment. */
+  #env-banner{position:sticky;top:0;z-index:2000;background:#8a1c1c;color:#fff;
+    text-align:center;padding:9px 14px;font-size:13px;font-weight:700;
+    letter-spacing:.03em;font-family:'IBM Plex Mono',monospace;
+    box-shadow:0 1px 0 rgba(0,0,0,.25);}

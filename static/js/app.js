@@ -2489,3 +2489,23 @@ async function toggleRep(userId, isActive){
   }catch(e){ alert(e.message); return; }
   loadReps();
 }
+
+
+/* Environment warning banner. Fetched unauthenticated so it renders on the
+   LOGIN page too - a tester must see it before typing anything. Shown only when
+   the backend supplies text, so an unconfigured production environment gets
+   nothing. Never blocks the app if the request fails. */
+async function loadEnvironmentBanner(){
+  const el = document.getElementById('env-banner');
+  if(!el) return;
+  try{
+    const res = await fetch('/api/environment');
+    if(!res.ok) return;
+    const info = await res.json();
+    if(info && info.banner){
+      el.textContent = info.banner;
+      el.style.display = 'block';
+    }
+  }catch(e){ /* never block the app on the banner */ }
+}
+document.addEventListener('DOMContentLoaded', loadEnvironmentBanner);

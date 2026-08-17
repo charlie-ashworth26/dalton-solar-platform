@@ -1,0 +1,52 @@
+# Render blueprint — Dalton private STAGING.
+#
+# FAKE/TEST DATA ONLY. Not approved for real customer enrollment.
+#
+# ONE worker is deliberate, not a performance oversight:
+#   * a Render persistent disk attaches to exactly one instance, and
+#   * the contract-review capability tokens live in a process-local dict, so a
+#     second worker would reject links minted by the first.
+# Concurrency for 2-3 simultaneous testers comes from the 4 THREADS, not workers.
+services:
+  - type: web
+    name: dalton-staging
+    runtime: python
+    plan: starter          # required for a persistent disk; free has none
+    branch: phase4a-rep-visibility-auth
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT
+    healthCheckPath: /api/health
+    disk:
+      name: dalton-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      # ── non-secret configuration ──
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: DALTON_ENV
+        value: staging
+      - key: DALTON_DB_PATH
+        value: /var/data/dalton_solar.db
+      - key: DALTON_DATA_DIR
+        value: /var/data
+      - key: DALTON_TRUSTED_PROXY_COUNT
+        value: "1"
+      - key: DALTON_LOG_LEVEL
+        value: INFO
+      # PERCH_API_MODE=live means REAL HTTP instead of mock fixtures.
+      # It does NOT mean Perch production — the STAGING hosts below decide that.
+      - key: PERCH_API_MODE
+        value: live
+      - key: PERCH_ENROLLMENT_BASE_URL
+        value: https://staging.api.perchenergy.com/affiliate_partners/v1/enrollments
+      - key: PERCH_MARKETS_BASE_URL
+        value: https://staging.api.perchenergy.com/affiliate_partners/v1/markets
+      # ── secrets: set in the Render dashboard, never in this file or in git ──
+      - key: JWT_SECRET
+        sync: false
+      - key: PERCH_API_KEY
+        sync: false
+      - key: PERCH_SECRET_KEY
+        sync: false
+

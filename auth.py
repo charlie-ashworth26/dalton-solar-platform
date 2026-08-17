@@ -14,7 +14,51 @@ from flask import request, jsonify, g
 
 from db import query_one
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret-change-in-production")
+# ─────────────── JWT signing secret ───────────────
+# The development fallback below is PUBLIC — it is in the repository. Anyone who
+# can read this file could forge a token for any user. That is acceptable on a
+# laptop and unacceptable anywhere reachable from the internet, so a hosted
+# deployment REFUSES TO BOOT rather than silently running forgeable.
+#
+# "Hosted" is inferred from DALTON_ENV, or from the platform variables Render
+# sets automatically, so a deploy cannot accidentally look local.
+DEV_JWT_SECRET = "dev-secret-change-in-production"
+
+
+def _is_hosted_environment():
+    env = (os.environ.get("DALTON_ENV") or "").strip().lower()
+    if env in ("staging", "production", "hosted"):
+        return True
+    if env in ("local", "development", "dev", "test"):
+        return False
+    # Render sets these on every service; neither exists on a laptop.
+    return bool(os.environ.get("RENDER") or os.environ.get("RENDER_SERVICE_ID"))
+
+
+def _resolve_jwt_secret():
+    secret = os.environ.get("JWT_SECRET")
+    if _is_hosted_environment():
+        if not secret or not secret.strip():
+            raise RuntimeError(
+                "JWT_SECRET is not set. A hosted Dalton deployment refuses to start "
+                "without it, because the development fallback is public in the "
+                "repository and every session token would be forgeable. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(48))\"")
+        if secret.strip() == DEV_JWT_SECRET:
+            raise RuntimeError(
+                "JWT_SECRET is still the public development default. A hosted "
+                "Dalton deployment refuses to start with it. Generate a unique "
+                "value and set it in the Render dashboard.")
+        if len(secret.strip()) < 32:
+            raise RuntimeError(
+                "JWT_SECRET is too short (minimum 32 characters) for a hosted "
+                "deployment. Generate a stronger value.")
+        return secret.strip()
+    # Local development keeps working with no configuration at all.
+    return (secret or DEV_JWT_SECRET)
+
+
+JWT_SECRET = _resolve_jwt_secret()
 JWT_ALG = "HS256"
 JWT_EXPIRY_SECONDS = 60 * 60 * 8  # 8-hour staff session
 

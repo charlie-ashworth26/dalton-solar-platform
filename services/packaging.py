@@ -16,7 +16,9 @@ import os
 import zipfile
 import json
 
-STORAGE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "storage", "packages")
+from helpers import DATA_ROOT
+
+STORAGE_DIR = os.path.join(DATA_ROOT, "storage", "packages")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
 

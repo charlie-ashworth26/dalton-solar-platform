@@ -18,7 +18,9 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from pypdf import PdfWriter, PdfReader
 
-STORAGE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "storage", "generated")
+from helpers import DATA_ROOT
+
+STORAGE_DIR = os.path.join(DATA_ROOT, "storage", "generated")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
 styles = getSampleStyleSheet()

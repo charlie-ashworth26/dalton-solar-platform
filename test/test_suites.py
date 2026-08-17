@@ -88,3 +88,9 @@ def test_admin_rep_management():
     """Admin rep account management."""
     import test_admin_rep_management as suite
     suite.main()
+
+
+def test_hosting_readiness():
+    """Render staging hosting readiness."""
+    import test_hosting_readiness as suite
+    suite.main()

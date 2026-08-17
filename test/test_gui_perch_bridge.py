@@ -27,12 +27,21 @@ import helpers
 
 _temp = tempfile.TemporaryDirectory(prefix="dalton-gui-bridge-test-")
 db.DB_PATH = os.path.join(_temp.name, "dalton_test.db")
+# Persistent file paths now derive from helpers.DATA_ROOT (which defaults to
+# BACKEND_ROOT locally and points at the persistent disk when DALTON_DATA_DIR is
+# set). Redirect BOTH so this test keeps writing into its temp directory.
 helpers.BACKEND_ROOT = _temp.name
+helpers.DATA_ROOT = _temp.name
 from db import init_db, query, query_one
 init_db(reset=True)
 
 from app import app
 from routes import document_routes
+# UPLOAD_DIR is computed at import time from DATA_ROOT, so it must be repointed
+# after the redirection above.
+document_routes.UPLOAD_DIR = os.path.join(_temp.name, "uploads")
+document_routes.DATA_ROOT = _temp.name
+os.makedirs(document_routes.UPLOAD_DIR, exist_ok=True)
 import seed
 from services.perch import adapter, workflow
 from services.perch.errors import PerchAmbiguousOutcomeError

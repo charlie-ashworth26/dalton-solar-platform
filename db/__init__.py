@@ -10,7 +10,30 @@ import os
 import threading
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(BASE_DIR, "dalton_solar.db")
+# Local development: unset -> the existing repo-local file, unchanged.
+# Hosted staging:    DALTON_DB_PATH=/var/data/dalton_solar.db on the persistent
+#                    disk, because the container filesystem is wiped on deploy.
+DB_PATH = os.environ.get("DALTON_DB_PATH") or os.path.join(BASE_DIR, "dalton_solar.db")
+
+# Several coworkers share one Gunicorn worker with 4 threads, so multiple
+# threads hit SQLite concurrently.
+#   WAL         readers do not block the writer (default DELETE mode blocks both)
+#   busy_timeout wait for a held lock instead of failing instantly with
+#               "database is locked"
+SQLITE_BUSY_TIMEOUT_MS = int(os.environ.get("DALTON_SQLITE_BUSY_TIMEOUT_MS", "5000"))
+
+
+def _configure_connection(conn):
+    """Applied to EVERY connection. WAL is a persistent database property, but
+    busy_timeout and foreign_keys are per-connection and must be re-applied."""
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except Exception:
+        # Some filesystems refuse WAL. Degrade rather than fail to boot.
+        pass
+    return conn
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema_sqlite.sql")
 
 _local = threading.local()
@@ -19,9 +42,12 @@ _local = threading.local()
 def get_db():
     """Return a connection for the current thread (Flask request), creating one if needed."""
     if not hasattr(_local, "conn"):
-        conn = sqlite3.connect(DB_PATH)
+        # check_same_thread=False is safe here: each thread gets its OWN
+        # connection via threading.local, so no connection is shared.
+        conn = sqlite3.connect(DB_PATH, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000.0,
+                               check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
+        _configure_connection(conn)
         _local.conn = conn
     return _local.conn
 
@@ -36,10 +62,19 @@ def close_db(exception=None):
 def init_db(reset=False):
     """Create the database from schema_sqlite.sql, then apply any pending
     migrations from db/migrations/. If reset=True, drop and recreate first."""
-    if reset and os.path.exists(DB_PATH):
-        os.remove(DB_PATH)
+    if reset:
+        # WAL mode keeps committed pages in a SIDECAR file. Deleting only the
+        # .db leaves dalton_solar.db-wal behind, and SQLite REPLAYS it on the
+        # next connect - resurrecting rows the reset was supposed to remove.
+        # This surfaced as tests seeing stale document rows whose files had
+        # been cleaned up. Remove the sidecars too.
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            path = DB_PATH + suffix
+            if os.path.exists(path):
+                os.remove(path)
+    os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA foreign_keys = ON")
+    _configure_connection(conn)
     with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
         conn.executescript(f.read())
     conn.commit()

@@ -6,13 +6,13 @@ from flask import Blueprint, request, jsonify, g, send_file
 
 from db import query, query_one, execute
 from auth import require_auth, require_role
-from helpers import validate_upload, to_json, resolve_stored_path, BACKEND_ROOT
+from helpers import validate_upload, to_json, resolve_stored_path, DATA_ROOT
 from services import extraction, lmi_validation, audit
 from services.authz import visible_enrollment
 
 bp = Blueprint("document_routes", __name__, url_prefix="/api/enrollments")
 
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads")
+UPLOAD_DIR = os.path.join(DATA_ROOT, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
@@ -413,7 +413,9 @@ def view_document(enrollment_id, document_id):
     # Containment check: the resolved file must live under the backend root.
     # stored_path is written by our own upload code, but this makes traversal
     # structurally impossible rather than merely unlikely.
-    root = os.path.realpath(BACKEND_ROOT)
+    # Follows DATA_ROOT, so the containment guarantee holds whether files live
+    # under the repo (local) or on the persistent disk (hosted).
+    root = os.path.realpath(DATA_ROOT)
     real = os.path.realpath(abs_path)
     if not (real == root or real.startswith(root + os.sep)):
         return jsonify({"error": "Not found"}), 404

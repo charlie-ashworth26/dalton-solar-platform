@@ -19,3 +19,4 @@ requests==2.34.2
 # WSGI server for hosted deployment. Not used by local `python app.py`.
 gunicorn==23.0.0
 
+pypdf==5.9.0

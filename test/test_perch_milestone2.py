@@ -1365,20 +1365,20 @@ def main():
         acceptance_timestamp, ACCEPTANCE_CLOCK_SKEW_SECONDS, ACCEPTANCE_TIMESTAMP_FORMAT,
     )
     from datetime import datetime as _dt, timedelta as _td, timezone as _tzone
+    from zoneinfo import ZoneInfo as _ZoneInfo
 
     # Live staging returned 422 "Metadata timestamp cannot be in the future" for a
     # timestamp generated at the exact instant of submission. Perch PARSED it and
     # applied the not-in-the-future rule, so the format is fine - the value was not.
     _ts = acceptance_timestamp()
     _parsed = _dt.strptime(_ts, ACCEPTANCE_TIMESTAMP_FORMAT)
-    # Compare against UTC, not local time. acceptance_timestamp() is generated
-    # from datetime.now(timezone.utc) and formatted WITHOUT an offset, because
-    # Perch's wire format carries none - so the parsed value is a naive UTC
-    # instant. Comparing it to a naive LOCAL now() silently subtracts the
-    # machine's UTC offset and reports a UTC-correct timestamp as "in the
-    # future" on any host that is not UTC (observed on a Windows/Eastern box).
-    _utc_now_naive = _dt.now(_tzone.utc).replace(tzinfo=None)
-    _age = (_utc_now_naive - _parsed).total_seconds()
+    # Compare against EASTERN wall-clock, not UTC and not the host's local zone.
+    # Live evidence (2026-08-17) proved Perch interprets this offset-less field
+    # as Eastern: sending UTC put the value ~4 hours in Perch's future and was
+    # rejected 422. An earlier revision of this block asserted UTC; that
+    # assumption is now demonstrated wrong for this specific Perch field.
+    _ny_now_naive = _dt.now(_ZoneInfo("America/New_York")).replace(tzinfo=None)
+    _age = (_ny_now_naive - _parsed).total_seconds()
 
     check("generated timestamp is NOT in the future", _age > 0)
     check("timestamp is at least the configured skew in the past",
@@ -1438,8 +1438,8 @@ def main():
           list(_md_sent.keys()) == ["metadata"])
     check("metadata still has exactly the three Perch fields",
           set(_md_sent["metadata"].keys()) == {"ip_address", "timestamp", "user_agent"})
-    check("transmitted timestamp is not in the future",
-          (_dt.now(_tzone.utc).replace(tzinfo=None)
+    check("transmitted timestamp is not in the future (Eastern wall-clock)",
+          (_dt.now(_ZoneInfo("America/New_York")).replace(tzinfo=None)
            - _dt.strptime(_md_sent["metadata"]["timestamp"],
                           ACCEPTANCE_TIMESTAMP_FORMAT)).total_seconds() > 0)
 
@@ -1486,34 +1486,53 @@ def main():
     check("flag before positionals works",
           _a.zip_code == "12203" and _a.accept_for_real is True)
 
-    section("ACCEPTANCE TIMESTAMP — explicit UTC, bounded skew")
+    section("ACCEPTANCE TIMESTAMP — Eastern wall-clock, bounded skew")
     import time as _time
-    from datetime import datetime as _dt, timezone as _tz
+    from datetime import datetime as _dt2, timezone as _tz2
+    from zoneinfo import ZoneInfo as _ZI
     from services.perch.client import (acceptance_timestamp, acceptance_clock_skew_seconds,
+                                       acceptance_timezone,
+                                       ACCEPTANCE_TIMEZONE_NAME,
                                        DEFAULT_ACCEPTANCE_CLOCK_SKEW_SECONDS,
                                        MAX_ACCEPTANCE_CLOCK_SKEW_SECONDS)
 
+    _NY = _ZI("America/New_York")
     _saved_tz = os.environ.get("TZ")
     _saved_skew = os.environ.get("PERCH_ACCEPTANCE_SKEW_SECONDS")
     os.environ.pop("PERCH_ACCEPTANCE_SKEW_SECONDS", None)
     try:
-        check("default skew is 30s", DEFAULT_ACCEPTANCE_CLOCK_SKEW_SECONDS == 30)
+        check("default skew restored to 30s", DEFAULT_ACCEPTANCE_CLOCK_SKEW_SECONDS == 30)
         check("  ...and is what an unset env yields", acceptance_clock_skew_seconds() == 30)
+        check("acceptance timezone is an explicit IANA name",
+              ACCEPTANCE_TIMEZONE_NAME == "America/New_York")
+        check("  ...resolved through ZoneInfo, not the host zone",
+              acceptance_timezone().key == "America/New_York")
 
-        # THE BUG THIS GUARDS: datetime.now() is LOCAL. On any host east of UTC it
-        # produced a future-dated timestamp, which Perch rejects with 422.
-        for tzname in ("UTC", "America/New_York", "Europe/Berlin", "Asia/Tokyo"):
+        # THE HOSTED BUG THIS GUARDS: Perch reads this offset-less field as
+        # EASTERN. Sending UTC put it ~4h in Perch's future -> 422.
+        for tzname in ("UTC", "America/New_York", "Europe/Berlin",
+                       "Asia/Tokyo", "Australia/Sydney"):
             os.environ["TZ"] = tzname
             if hasattr(_time, "tzset"):
                 _time.tzset()
             ts = acceptance_timestamp()
-            parsed = _dt.strptime(ts + "00", "%Y-%m-%d %H:%M:%S.%f")
-            delta = (parsed - _dt.now(_tz.utc).replace(tzinfo=None)).total_seconds()
-            check(f"TZ={tzname}: timestamp is UTC, not local", -60 < delta < 0)
-            check(f"  ...and is in the PAST (delta {delta:.0f}s)", delta < 0)
+            parsed = _dt2.strptime(ts + "00", "%Y-%m-%d %H:%M:%S.%f")
+            ny_delta = (parsed - _dt2.now(_NY).replace(tzinfo=None)).total_seconds()
+            utc_delta = (parsed - _dt2.now(_tz2.utc).replace(tzinfo=None)).total_seconds()
+            check(f"TZ={tzname}: value is NEW YORK wall-clock", -90 < ny_delta < 0)
+            check(f"  ...and in the past for Perch", ny_delta < 0)
+            check(f"  ...NOT UTC wall-clock", abs(utc_delta) > 60 or tzname == "UTC")
         os.environ["TZ"] = "UTC"
         if hasattr(_time, "tzset"):
             _time.tzset()
+
+        # DST must come from the zone database, not a hardcoded -4.
+        _winter = acceptance_timestamp(_dt2(2026, 1, 15, 12, 0, 0, tzinfo=_tz2.utc))
+        _summer = acceptance_timestamp(_dt2(2026, 8, 15, 12, 0, 0, tzinfo=_tz2.utc))
+        check("winter converts at EST (-5)", _winter.startswith("2026-01-15 06:59:30"))
+        check("summer converts at EDT (-4)", _summer.startswith("2026-08-15 07:59:30"))
+        check("  ...so DST is real, not a fixed offset",
+              _winter[11:13] != _summer[11:13])
 
         ts = acceptance_timestamp()
         check("wire format has no Z suffix", not ts.endswith("Z"))
@@ -1521,7 +1540,7 @@ def main():
         check("wire format is space-separated", " " in ts and "T" not in ts)
         check("microseconds truncated to 4 digits", len(ts.split(".")[-1]) == 4)
         check("parseable as the documented format",
-              _dt.strptime(ts + "00", "%Y-%m-%d %H:%M:%S.%f") is not None)
+              _dt2.strptime(ts + "00", "%Y-%m-%d %H:%M:%S.%f") is not None)
 
         for raw_val, expected in (("0", 0), ("15", 15), ("30", 30), ("120", 120),
                                   ("9999", MAX_ACCEPTANCE_CLOCK_SKEW_SECONDS),
@@ -1529,12 +1548,12 @@ def main():
             os.environ["PERCH_ACCEPTANCE_SKEW_SECONDS"] = raw_val
             check(f"skew {raw_val!r} -> {expected}s", acceptance_clock_skew_seconds() == expected)
         os.environ.pop("PERCH_ACCEPTANCE_SKEW_SECONDS", None)
-        check("skew can never exceed the 120s cap",
-              MAX_ACCEPTANCE_CLOCK_SKEW_SECONDS == 120)
+        check("skew capped at 120s", MAX_ACCEPTANCE_CLOCK_SKEW_SECONDS == 120)
 
-        # An aware datetime is converted, never assumed.
-        aware = _dt(2026, 8, 17, 3, 0, 0, tzinfo=_tz.utc)
-        check("aware UTC input handled", acceptance_timestamp(aware).startswith("2026-08-17 02:59"))
+        # A naive caller datetime is treated as already-Eastern.
+        _naive = acceptance_timestamp(_dt2(2026, 8, 15, 12, 0, 0))
+        check("naive input treated as Eastern wall-clock",
+              _naive.startswith("2026-08-15 11:59:30"))
     finally:
         if _saved_tz is None:
             os.environ.pop("TZ", None)

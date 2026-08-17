@@ -326,14 +326,49 @@ def redact_contract_urls(data):
 # typical NTP skew while remaining far inside Perch's documented 24-hour
 # maximum age, so the value is still an honest record of when the customer
 # agreed (they clicked moments earlier, not 10 seconds in the future).
-# Raised 10 -> 30 after a live hosted 422 on 2026-08-17. Render's container was
-# verified UTC (local and utc identical to the microsecond), so Dalton's value
-# was already correct UTC minus 10s - the rejection came from Perch-side clock
-# skew or a tolerance tighter than 10s, not from our formatting.
+# ─────────────── Acceptance timestamp timezone ───────────────
+# Perch's acceptance timestamp format carries NO timezone:
+#     "YYYY-MM-DD HH:MM:SS.ffff"
+# so Perch must interpret it in SOME zone. Live evidence (2026-08-17) proves it
+# is EASTERN wall-clock, not UTC:
 #
-# 30s is a defensible NTP allowance between two well-synced servers. It is NOT a
-# licence to backdate: the timestamp records when the customer agreed, so it is
-# bounded below and capped hard.
+#     Dalton sent: 2026-08-17 04:01:22.1941   (UTC)
+#     Eastern now: 2026-08-17 00:02:22        -> Perch saw ~4 hours in ITS future
+#                                             -> 422 "timestamp cannot be in the future"
+#
+# This is why the original datetime.now() worked from a Windows box in Eastern
+# and failed the moment the same code ran on Render (UTC). The value was never
+# a clock-skew problem; it was a wall-clock/timezone problem.
+#
+# Use an EXPLICIT IANA zone, never the host's local timezone, so the value is
+# identical whether Dalton runs on a laptop in New York, on Render in UTC, or
+# anywhere else. ZoneInfo also handles EST/EDT automatically - a hardcoded -4
+# would be wrong for roughly half the year.
+ACCEPTANCE_TIMEZONE_NAME = os.environ.get(
+    "PERCH_ACCEPTANCE_TIMEZONE") or "America/New_York"
+
+
+def acceptance_timezone():
+    """The IANA zone Perch interprets acceptance timestamps in.
+
+    Raises a clear configuration error rather than silently falling back to UTC
+    or to a hardcoded offset - either would reintroduce the exact 422 this fixes.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        return ZoneInfo(ACCEPTANCE_TIMEZONE_NAME)
+    except (ZoneInfoNotFoundError, KeyError, ValueError) as exc:
+        raise RuntimeError(
+            f"Timezone database unavailable for {ACCEPTANCE_TIMEZONE_NAME!r}, so the "
+            f"Perch acceptance timestamp cannot be generated correctly. Install the "
+            f"system tzdata (or `pip install tzdata`) on this host. Falling back to "
+            f"UTC or a fixed offset would send a timestamp Perch reads as being in "
+            f"the future.") from exc
+
+
+# The clock-skew allowance is SEPARATE from the timezone question above and
+# stays small: it absorbs NTP jitter between two servers, nothing more. 60s was
+# only ever a diagnostic override while we were chasing the real cause.
 DEFAULT_ACCEPTANCE_CLOCK_SKEW_SECONDS = 30
 
 # Hard ceiling. A larger offset would hide a real clock problem rather than
@@ -379,22 +414,23 @@ def acceptance_timestamp(now=None):
     this, so the verifier provably exercises production behavior rather than a
     near-copy that can drift.
     """
-    # EXPLICIT UTC. datetime.now() returns LOCAL time, which equals UTC only if
-    # the server happens to be configured that way - an invisible dependency that
-    # would silently produce a future-dated timestamp on any host east of UTC.
-    # Perch's format carries no offset, so the value must be UTC by construction.
+    # EASTERN WALL-CLOCK, from an explicit IANA zone - never the host's local
+    # timezone and never UTC. See ACCEPTANCE_TIMEZONE_NAME above for the live
+    # evidence that Perch reads this field as Eastern.
+    tz = acceptance_timezone()
     if now is None:
-        base = datetime.now(timezone.utc).replace(tzinfo=None)
+        aware = datetime.now(tz)
     elif now.tzinfo is not None:
-        # A caller-supplied aware datetime is converted, never assumed.
-        base = now.astimezone(timezone.utc).replace(tzinfo=None)
+        # A caller-supplied aware datetime is CONVERTED to the acceptance zone.
+        aware = now.astimezone(tz)
     else:
-        # A naive datetime from a caller (tests) is used as given.
-        base = now
-    stamped = base - timedelta(seconds=acceptance_clock_skew_seconds())
-    # tzinfo is stripped above, so strftime emits no offset - the wire format is
-    # unchanged: "YYYY-MM-DD HH:MM:SS.ffff", 4-digit microseconds, no Z.
-    return stamped.strftime(ACCEPTANCE_TIMESTAMP_FORMAT)[:-2]
+        # A naive datetime from a caller (tests) is taken as already being
+        # wall-clock in the acceptance zone.
+        aware = now.replace(tzinfo=tz)
+    stamped = aware - timedelta(seconds=acceptance_clock_skew_seconds())
+    # tzinfo is dropped here, so strftime emits NO offset and NO "Z" - the wire
+    # format is unchanged: "YYYY-MM-DD HH:MM:SS.ffff", 4-digit microseconds.
+    return stamped.replace(tzinfo=None).strftime(ACCEPTANCE_TIMESTAMP_FORMAT)[:-2]
 
 
 def normalize_accept_response(data: dict) -> dict:

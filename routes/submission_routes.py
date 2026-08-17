@@ -6,6 +6,7 @@ from db import query, query_one, execute
 from auth import require_auth, require_role
 from helpers import mask_account_number, json_or_none, resolve_stored_path
 from services import status_machine, audit, documents as doc_service, packaging
+from services.authz import visible_enrollment
 
 bp = Blueprint("submission_routes", __name__)
 
@@ -51,9 +52,9 @@ def _gather_validation_json(enrollment_id):
 @require_auth
 @require_role("sales_rep", "admin", "qa_reviewer")
 def submit_enrollment(enrollment_id):
-    enrollment = query_one("SELECT * FROM enrollments WHERE id = ?", (enrollment_id,))
-    if not enrollment:
-        return jsonify({"error": "Not found"}), 404
+    enrollment, _authz_err = visible_enrollment(enrollment_id)
+    if _authz_err:
+        return _authz_err
     if enrollment["status"] != "Verified":
         return jsonify({"error": f"Enrollment must be 'Verified' before submitting (currently '{enrollment['status']}')"}), 409
 
@@ -140,6 +141,9 @@ def submit_enrollment(enrollment_id):
 @bp.route("/api/enrollments/<int:enrollment_id>/package", methods=["GET"])
 @require_auth
 def get_package(enrollment_id):
+    _, _authz_err = visible_enrollment(enrollment_id)
+    if _authz_err:
+        return _authz_err
     submission = query_one("SELECT * FROM submissions WHERE enrollment_id = ? ORDER BY id DESC LIMIT 1", (enrollment_id,))
     if not submission:
         return jsonify({"error": "No submission package has been generated for this enrollment yet"}), 404

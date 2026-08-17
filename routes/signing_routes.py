@@ -8,6 +8,7 @@ from db import query, query_one, execute
 from auth import require_auth, require_role, generate_session_token
 from helpers import json_or_none, resolve_stored_path
 from services import status_machine, audit, documents as doc_service
+from services.authz import visible_enrollment
 
 bp = Blueprint("signing_routes", __name__)
 
@@ -42,9 +43,9 @@ def _required_fields(enrollment_id):
 @require_auth
 @require_role("sales_rep", "admin")
 def create_signing_session(enrollment_id):
-    enrollment = query_one("SELECT * FROM enrollments WHERE id = ?", (enrollment_id,))
-    if not enrollment:
-        return jsonify({"error": "Not found"}), 404
+    enrollment, _authz_err = visible_enrollment(enrollment_id)
+    if _authz_err:
+        return _authz_err
     customer = query_one("SELECT * FROM customers WHERE id = ?", (enrollment["customer_id"],))
     if not query("SELECT id FROM agreements WHERE enrollment_id = ?", (enrollment_id,)):
         return jsonify({"error": "No agreements generated yet — call /agreements/generate first"}), 400

@@ -76,3 +76,9 @@ def test_document_ingestion():
     """Document ingestion + OCR robustness."""
     import test_document_ingestion as suite
     suite.main()
+
+
+def test_enrollment_ownership():
+    """Rep identity + enrollment ownership enforcement."""
+    import test_enrollment_ownership as suite
+    suite.main()

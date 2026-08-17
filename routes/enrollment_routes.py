@@ -7,6 +7,7 @@ from db import query, query_one, execute, rows_to_list
 from auth import require_auth, require_role
 from helpers import mask_account_number, next_enrollment_code, json_or_none, to_json
 from services import audit, status_machine, lmi_validation
+from services.authz import visible_enrollment
 from services.perch import workflow as perch_workflow
 
 bp = Blueprint("enrollment_routes", __name__, url_prefix="/api/enrollments")
@@ -179,9 +180,10 @@ def get_enrollment(enrollment_id):
 @require_auth
 @require_role("sales_rep", "admin")
 def update_enrollment(enrollment_id):
-    row = query_one("SELECT * FROM enrollments WHERE id = ?", (enrollment_id,))
-    if not row:
-        return jsonify({"error": "Not found"}), 404
+    enrollment, _authz_err = visible_enrollment(enrollment_id)
+    if _authz_err:
+        return _authz_err
+    row = enrollment
     data = request.get_json(force=True, silent=True) or {}
 
     # Customer
@@ -275,6 +277,9 @@ def update_enrollment(enrollment_id):
 @bp.route("/<int:enrollment_id>/status", methods=["POST"])
 @require_auth
 def change_status(enrollment_id):
+    _, _authz_err = visible_enrollment(enrollment_id)
+    if _authz_err:
+        return _authz_err
     data = request.get_json(force=True, silent=True) or {}
     try:
         new_status = status_machine.transition(
@@ -294,6 +299,9 @@ def change_status(enrollment_id):
 @require_auth
 @require_role("sales_rep", "admin")
 def set_lmi(enrollment_id):
+    _, _authz_err = visible_enrollment(enrollment_id)
+    if _authz_err:
+        return _authz_err
     data = request.get_json(force=True, silent=True) or {}
     path = data.get("path")
     if path not in ("document", "self_attestation", "not_applicable"):

@@ -3,6 +3,7 @@ from flask import Blueprint, request, jsonify, g
 from db import query, query_one, execute
 from auth import require_auth, require_role
 from services import status_machine, audit
+from services.authz import visible_enrollment
 
 bp = Blueprint("qa_routes", __name__, url_prefix="/api/qa")
 
@@ -40,9 +41,13 @@ def qa_queue():
 @require_auth
 @require_role("qa_reviewer", "admin")
 def submit_review(enrollment_id):
-    enrollment = query_one("SELECT * FROM enrollments WHERE id = ?", (enrollment_id,))
-    if not enrollment:
-        return jsonify({"error": "Not found"}), 404
+    # Only qa_reviewer/admin reach this, and both have global access, so this is
+    # a no-op for them today. Applied anyway so EVERY enrollment-scoped route
+    # carries the same check - if the role list is ever widened, the guard is
+    # already here rather than being remembered.
+    enrollment, _authz_err = visible_enrollment(enrollment_id)
+    if _authz_err:
+        return _authz_err
     data = request.get_json(force=True, silent=True) or {}
     decision = data.get("decision")
     if decision not in ("approved", "rejected", "needs_work"):

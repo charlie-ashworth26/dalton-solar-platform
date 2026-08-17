@@ -8,6 +8,7 @@ from db import query, query_one, execute
 from auth import require_auth, require_role
 from helpers import validate_upload, to_json, resolve_stored_path, BACKEND_ROOT
 from services import extraction, lmi_validation, audit
+from services.authz import visible_enrollment
 
 bp = Blueprint("document_routes", __name__, url_prefix="/api/enrollments")
 
@@ -19,9 +20,9 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 @require_auth
 @require_role("sales_rep", "admin")
 def upload_document(enrollment_id):
-    enrollment = query_one("SELECT * FROM enrollments WHERE id = ?", (enrollment_id,))
-    if not enrollment:
-        return jsonify({"error": "Not found"}), 404
+    enrollment, _authz_err = visible_enrollment(enrollment_id)
+    if _authz_err:
+        return _authz_err
 
     if "file" not in request.files:
         return jsonify({"error": "No file provided"}), 400
@@ -129,6 +130,9 @@ def upload_document(enrollment_id):
 @require_role("sales_rep", "admin")
 def correct_extraction(enrollment_id, document_id):
     """Stores rep corrections separately from the raw extraction, per requirement #3."""
+    _, _authz_err = visible_enrollment(enrollment_id)
+    if _authz_err:
+        return _authz_err
     data = request.get_json(force=True, silent=True) or {}
     execute("UPDATE documents SET corrected_data_json=? WHERE id=? AND enrollment_id=?",
             (to_json(data.get("corrected_fields", {})), document_id, enrollment_id))
@@ -179,9 +183,9 @@ def upload_document_set(enrollment_id):
     """
     from services import extraction_engine as engine
 
-    enrollment = query_one("SELECT * FROM enrollments WHERE id = ?", (enrollment_id,))
-    if not enrollment:
-        return jsonify({"error": "Enrollment not found"}), 404
+    enrollment, _authz_err = visible_enrollment(enrollment_id)
+    if _authz_err:
+        return _authz_err
 
     category = (request.form.get("category") or "").strip()
     if category not in ("utility_bill", "lmi_document", "other"):
@@ -307,6 +311,9 @@ def _extraction_message(result, category):
 @require_auth
 def get_document_set(enrollment_id, set_id):
     """A set and its files, in deterministic page order."""
+    _, _authz_err = visible_enrollment(enrollment_id)
+    if _authz_err:
+        return _authz_err
     row = query_one("SELECT * FROM document_sets WHERE id = ? AND enrollment_id = ?",
                     (set_id, enrollment_id))
     if not row:

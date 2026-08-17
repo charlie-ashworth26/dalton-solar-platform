@@ -7,6 +7,7 @@ from db import query_one, execute
 from auth import require_auth, require_role
 from helpers import mask_account_number, json_or_none
 from services import documents as doc_service, status_machine, audit
+from services.authz import visible_enrollment
 
 bp = Blueprint("agreement_routes", __name__, url_prefix="/api/enrollments")
 
@@ -62,9 +63,9 @@ DOC_SPECS = [
 @require_auth
 @require_role("sales_rep", "admin")
 def generate_agreements(enrollment_id):
-    enrollment = query_one("SELECT * FROM enrollments WHERE id = ?", (enrollment_id,))
-    if not enrollment:
-        return jsonify({"error": "Not found"}), 404
+    enrollment, _authz_err = visible_enrollment(enrollment_id)
+    if _authz_err:
+        return _authz_err
     project = query_one("SELECT * FROM projects WHERE id = ?", (enrollment["project_id"],))
     if not project:
         return jsonify({"error": "Enrollment has no project selected yet"}), 400

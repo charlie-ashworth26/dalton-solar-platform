@@ -82,3 +82,9 @@ def test_enrollment_ownership():
     """Rep identity + enrollment ownership enforcement."""
     import test_enrollment_ownership as suite
     suite.main()
+
+
+def test_admin_rep_management():
+    """Admin rep account management."""
+    import test_admin_rep_management as suite
+    suite.main()

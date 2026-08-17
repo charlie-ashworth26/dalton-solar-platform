@@ -117,6 +117,7 @@ async function doLogin(){
   applyCurrentUserToUI();
   await loadProjects();
   activateScreen('app-shell');
+  syncAdminNav();
   showView('dashboard');
 }
 
@@ -218,6 +219,8 @@ function showView(name){
   if(name==='projects') renderProjects('projects-list', true);
   if(name==='customers') renderCustomers('');
   window.scrollTo({top:0});
+
+  if(name === 'reps') loadReps();
 }
 
 async function loadProjects(){
@@ -2367,4 +2370,122 @@ function openPendingDocument(e, key){
   window.open(url, '_blank', 'noopener');
   setTimeout(function(){ URL.revokeObjectURL(url); }, 60000);
   return false;
+}
+
+
+/* ═══════════ Admin: rep management ═══════════
+   Admin-only. The nav entry is hidden for everyone else, but that is cosmetic -
+   every /api/admin route is enforced server-side with @require_role("admin"),
+   so hiding the link is convenience, not the security boundary. */
+
+function syncAdminNav(){
+  const el = document.getElementById('nav-reps');
+  if(!el) return;
+  el.style.display = (currentUser && currentUser.role === 'admin') ? '' : 'none';
+}
+
+async function loadReps(){
+  const host = document.getElementById('reps-table');
+  const err = document.getElementById('rep-list-error');
+  if(err) err.style.display = 'none';
+  if(!host) return;
+  host.innerHTML = '<p class="helper">Loading reps…</p>';
+  let reps;
+  try{
+    reps = await apiFetch('/api/admin/reps');
+  }catch(e){
+    host.innerHTML = '';
+    if(err){ err.textContent = e.message; err.style.display = 'block'; }
+    return;
+  }
+  if(!reps.length){ host.innerHTML = '<p class="helper">No reps yet.</p>'; return; }
+  host.innerHTML =
+    '<table class="table"><thead><tr>' +
+      '<th>Name</th><th>Email</th><th>Rep code</th><th>Phone</th><th>Team</th>' +
+      '<th>Enrollments</th><th>Status</th><th style="text-align:right;">Actions</th>' +
+    '</tr></thead><tbody>' +
+    reps.map(function(r){
+      const active = r.is_active === 1;
+      return '<tr>' +
+        '<td>' + esc(r.full_name) + '</td>' +
+        '<td>' + esc(r.email) + '</td>' +
+        '<td>' + esc(r.rep_code || '') + '</td>' +
+        '<td>' + esc(r.phone || '—') + '</td>' +
+        '<td>' + esc(r.team || '—') + '</td>' +
+        '<td>' + r.enrollment_count + '</td>' +
+        '<td><span class="status-pill ' + (active ? 'status-verified' : 'status-danger') + '">' +
+          (active ? 'Active' : 'Inactive') + '</span></td>' +
+        '<td style="text-align:right;white-space:nowrap;">' +
+          '<button class="btn btn-ghost btn-sm" onclick="editRep(' + r.user_id + ')">Edit</button> ' +
+          '<button class="btn btn-ghost btn-sm" onclick="resetRepPassword(' + r.user_id + ')">Reset password</button> ' +
+          '<button class="btn btn-ghost btn-sm" onclick="toggleRep(' + r.user_id + ',' + active + ')">' +
+            (active ? 'Deactivate' : 'Activate') + '</button>' +
+        '</td></tr>';
+    }).join('') + '</tbody></table>';
+}
+
+async function createRep(){
+  const btn = document.getElementById('rep-create-btn');
+  const err = document.getElementById('rep-form-error');
+  const ok  = document.getElementById('rep-form-ok');
+  err.style.display = 'none'; ok.style.display = 'none';
+  const payload = {
+    full_name: document.getElementById('rep-new-name').value.trim(),
+    email:     document.getElementById('rep-new-email').value.trim(),
+    password:  document.getElementById('rep-new-pass').value,
+    rep_code:  document.getElementById('rep-new-code').value.trim(),
+    phone:     document.getElementById('rep-new-phone').value.trim(),
+    team:      document.getElementById('rep-new-team').value.trim(),
+  };
+  btn.disabled = true; btn.textContent = 'Adding…';
+  let rep;
+  try{
+    rep = await apiFetch('/api/admin/reps', {method:'POST', body: JSON.stringify(payload)});
+  }catch(e){
+    err.textContent = e.message; err.style.display = 'block';
+    btn.disabled = false; btn.textContent = 'Add rep';
+    return;
+  }
+  btn.disabled = false; btn.textContent = 'Add rep';
+  ['rep-new-name','rep-new-email','rep-new-pass','rep-new-code','rep-new-phone','rep-new-team']
+    .forEach(function(id){ document.getElementById(id).value = ''; });
+  ok.textContent = 'Added ' + rep.full_name + ' (' + rep.rep_code + '). ' +
+                   'Give them their password directly — it is not emailed.';
+  ok.style.display = 'block';
+  loadReps();
+}
+
+async function editRep(userId){
+  const phone = prompt('Phone (leave blank to clear):');
+  if(phone === null) return;
+  const team = prompt('Team (leave blank to clear):');
+  if(team === null) return;
+  const code = prompt('Rep code (leave blank to keep unchanged):');
+  if(code === null) return;
+  const payload = {phone: phone, team: team};
+  if(code.trim()) payload.rep_code = code.trim();
+  try{
+    await apiFetch('/api/admin/reps/' + userId, {method:'PATCH', body: JSON.stringify(payload)});
+  }catch(e){ alert(e.message); return; }
+  loadReps();
+}
+
+async function resetRepPassword(userId){
+  const pw = prompt('New password (at least 10 characters):');
+  if(pw === null) return;
+  try{
+    await apiFetch('/api/admin/reps/' + userId + '/password',
+                   {method:'POST', body: JSON.stringify({password: pw})});
+  }catch(e){ alert(e.message); return; }
+  alert('Password updated. Give it to the rep directly — it is not emailed.');
+}
+
+async function toggleRep(userId, isActive){
+  const action = isActive ? 'deactivate' : 'activate';
+  if(isActive && !confirm('Deactivate this rep? They will be signed out immediately. ' +
+                          'Their enrollments and history are kept.')) return;
+  try{
+    await apiFetch('/api/admin/reps/' + userId + '/' + action, {method:'POST', body:'{}'});
+  }catch(e){ alert(e.message); return; }
+  loadReps();
 }

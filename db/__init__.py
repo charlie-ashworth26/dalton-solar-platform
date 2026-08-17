@@ -69,6 +69,45 @@ def execute(sql, params=()):
     return cur
 
 
+def transaction():
+    """Group several writes into ONE all-or-nothing unit.
+
+        with transaction() as tx:
+            tx.execute(...)
+            tx.execute(...)
+
+    execute() above commits on EVERY call, so two consecutive execute() calls
+    are not atomic: if the second fails, the first is already durable. Creating
+    a rep writes both a `users` row and a `sales_reps` row, and a half-created
+    rep (user with no rep row) would be unusable and invisible to rep listings.
+
+    Commits on clean exit, rolls back on ANY exception, and re-raises so the
+    caller can translate it into an HTTP response.
+    """
+    return _Transaction(get_db())
+
+
+class _Transaction:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __enter__(self):
+        # sqlite3 opens a transaction implicitly on the first write; make sure
+        # nothing earlier in this connection is left pending.
+        self._conn.commit()
+        return self
+
+    def execute(self, sql, params=()):
+        return self._conn.execute(sql, params)
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self._conn.commit()
+        else:
+            self._conn.rollback()
+        return False   # never swallow the exception
+
+
 def row_to_dict(row):
     return dict(row) if row is not None else None
 

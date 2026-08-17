@@ -10,7 +10,7 @@ init_configuration(verbose=False)   # banner is printed once, at server start
 from flask import Flask, jsonify, send_from_directory, render_template
 
 from db import close_db, init_db, DB_PATH
-from routes import auth_routes, enrollment_routes, document_routes, agreement_routes
+from routes import auth_routes, enrollment_routes, document_routes, agreement_routes, admin_routes
 from routes import signing_routes, qa_routes, developer_routes, submission_routes
 from routes import report_routes, project_routes, perch_routes
 
@@ -39,6 +39,7 @@ def create_app():
     app.register_blueprint(report_routes.bp)
     app.register_blueprint(project_routes.bp)
     app.register_blueprint(perch_routes.bp)
+    app.register_blueprint(admin_routes.bp)
 
     @app.route("/", methods=["GET"])
     def index():

@@ -102,6 +102,11 @@
       <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
       Customers
     </div>
+    <div class="nav-link" data-view="reps" id="nav-reps" style="display:none;"
+         onclick="showView('reps')">
+      <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      Reps
+    </div>
     <div class="sidebar-spacer"></div>
     <div class="nav-label">Account</div>
     <div class="nav-link" onclick="resetAll()">
@@ -130,6 +135,67 @@
       <div class="page-head"><div><h1>My projects</h1><div class="sub">Community solar projects you're approved to enroll customers into.</div></div></div>
       <div id="projects-list"></div>
     </div>
+
+    <div class="view" id="view-reps">
+
+      <div class="page-head">
+
+        <div><h1>Rep management</h1><div class="sub">Create and manage sales rep accounts. Admin only.</div></div>
+
+      </div>
+
+      <div class="card" style="margin-bottom:18px;">
+
+        <h2 style="font-size:16px;margin:0 0 12px;">Add a rep</h2>
+
+        <div class="field"><label for="rep-new-name">Full name</label>
+
+          <input id="rep-new-name" type="text" placeholder="Jane Rivera"></div>
+
+        <div class="field"><label for="rep-new-email">Email</label>
+
+          <input id="rep-new-email" type="email" placeholder="jane@daltonsolar.com"></div>
+
+        <div class="field"><label for="rep-new-pass">Initial password</label>
+
+          <span class="pw-wrap"><input id="rep-new-pass" type="password" placeholder="At least 10 characters"><button type="button" class="pw-eye" id="rep-new-pass-eye" aria-label="Show password" aria-pressed="false" onclick="togglePasswordVisibility('rep-new-pass','rep-new-pass-eye')">&#128065;</button></span></div>
+
+        <div class="field"><label for="rep-new-code">Rep code (optional — auto-generated if blank)</label>
+
+          <input id="rep-new-code" type="text" placeholder="REP-001"></div>
+
+        <div class="field"><label for="rep-new-phone">Phone (optional)</label>
+
+          <input id="rep-new-phone" type="text" placeholder="518-555-0100"></div>
+
+        <div class="field"><label for="rep-new-team">Team (optional)</label>
+
+          <input id="rep-new-team" type="text" placeholder="Capital District"></div>
+
+        <p class="helper" id="rep-form-error" style="display:none;color:var(--danger);margin-top:10px;"></p>
+
+        <p class="helper" id="rep-form-ok" style="display:none;margin-top:10px;"></p>
+
+        <div class="wizard-actions" style="margin-top:12px;">
+
+          <button class="btn btn-primary" id="rep-create-btn" onclick="createRep()">Add rep</button>
+
+        </div>
+
+      </div>
+
+      <div class="card">
+
+        <h2 style="font-size:16px;margin:0 0 12px;">Reps</h2>
+
+        <p class="helper" id="rep-list-error" style="display:none;color:var(--danger);"></p>
+
+        <div id="reps-table"><p class="helper">Loading reps…</p></div>
+
+      </div>
+
+    </div>
+
 
     <div class="view" id="view-customers">
       <div class="page-head">

@@ -235,22 +235,114 @@ def api_call_history(enrollment_id):
 # into Perch's exact multipart contract, refreshing tokens, and recording a
 # URL-free / secret-free audit trail.
 
-def choose_customer_type(details):
-    """Derive Perch customer_type from the authoritative capacity response.
+# Canonical Perch customer_type values Dalton can enroll today. Small commercial
+# is intentionally absent: Perch requires business fields the GUI does not collect.
+CUSTOMER_TYPE_RESIDENTIAL = "Residential"
+CUSTOMER_TYPE_LMI = "LMI"
+SELECTABLE_CUSTOMER_TYPES = (CUSTOMER_TYPE_RESIDENTIAL, CUSTOMER_TYPE_LMI)
 
-    Business is never silently selected because Perch requires extra business
-    fields that Dalton's residential/LMI GUI does not currently collect.
+
+def available_programs(details):
+    """Programs Perch ACTUALLY returned for this location, in a stable shape.
+
+    The capacity response is the single source of truth. Each entry carries the
+    canonical customer_type, the savings percentage from the MATCHING Perch
+    field, and whether LMI proof is required. Nothing is inferred: a program
+    absent from the capacity response never appears here, and a savings value
+    Perch did not send stays None rather than borrowing the other program's.
     """
     details = details or {}
-    if details.get("lmi_capacity_available"):
-        return "LMI", "lmi_capacity_available=True"
+    programs = []
+
     if details.get("residential_capacity_available"):
-        return "Residential", "residential_capacity_available=True"
+        programs.append({
+            "customer_type": CUSTOMER_TYPE_RESIDENTIAL,
+            # Residential reads ONLY the residential field.
+            "savings_percent": _percent(
+                details.get("savings_percent_for_residential_and_commercial_customers")),
+            "lmi_required": False,
+        })
+
+    if details.get("lmi_capacity_available"):
+        programs.append({
+            "customer_type": CUSTOMER_TYPE_LMI,
+            # LMI reads ONLY the LMI field.
+            "savings_percent": _percent(
+                details.get("savings_percent_for_lmi_customers")),
+            # Perch decides whether proof is needed; some LMI programs (Empower
+            # Zone style) require none, so this is never assumed True.
+            "lmi_required": bool(details.get("proof_documents_required", True)),
+        })
+
+    return programs
+
+
+def _percent(value):
+    """Numeric savings percent, or None. Never a default."""
+    if value is None:
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if num > 0 else None
+
+
+def resolve_customer_type(details, requested=None):
+    """Decide the customer_type for POST /enroll.
+
+    (customer_type, reason) or raises PerchValidationError.
+
+    ONE available program  -> selected automatically; there is no ambiguity.
+    BOTH available         -> an explicit, VALID selection is required. Dalton
+                              used to prefer LMI here, which silently denied the
+                              rep the Residential option and could enroll a
+                              customer in the wrong program.
+    Anything requested     -> validated against the capacity response, so a
+                              tampered client cannot select a program Perch did
+                              not offer for this location.
+    """
+    details = details or {}
+    programs = available_programs(details)
+    offered = [p["customer_type"] for p in programs]
+    requested = (requested or "").strip() or None
+
+    if requested:
+        # Case-insensitive match, but the CANONICAL value is what gets sent.
+        match = next((t for t in offered if t.lower() == requested.lower()), None)
+        if match:
+            return match, f"explicit_selection={match}"
+        if requested.lower() not in (t.lower() for t in SELECTABLE_CUSTOMER_TYPES):
+            raise PerchValidationError(
+                f"{requested!r} is not a customer type Dalton can enroll. "
+                f"Choose one of: {', '.join(SELECTABLE_CUSTOMER_TYPES)}.")
+        raise PerchValidationError(
+            f"{requested} capacity is not available for this location. "
+            f"Perch returned: {', '.join(offered) if offered else 'no eligible capacity'}.")
+
+    if len(programs) == 1:
+        only = programs[0]["customer_type"]
+        return only, f"only_available_option={only}"
+
+    if len(programs) > 1:
+        raise PerchValidationError(
+            "This location has more than one available program "
+            f"({', '.join(offered)}). Select which one this customer is "
+            "enrolling in before continuing.")
+
     if details.get("small_commercial_capacity_available"):
         raise PerchValidationError(
             "This service area currently has only small-commercial capacity. "
             "The Dalton GUI does not collect the business fields Perch requires yet.")
-    raise PerchValidationError("No eligible residential or LMI capacity is available for this enrollment.")
+    raise PerchValidationError(
+        "No eligible residential or LMI capacity is available for this enrollment.")
+
+
+def choose_customer_type(details):
+    """Backwards-compatible wrapper. Callers that pass no explicit selection get
+    the same automatic behaviour for unambiguous capacity, and now a clear error
+    instead of a silent LMI preference when both are available."""
+    return resolve_customer_type(details, requested=None)
 
 
 def _rewind_files(files):
@@ -305,7 +397,10 @@ def create_enrollment(enrollment_id, enrollment_payload, user_id=None):
         raise PerchValidationError("A successful Perch capacity check is required before enrollment.")
 
     details = capacity.get("project_details") or {}
-    customer_type, reason = choose_customer_type(details)
+    # The selection is validated against THIS enrollment's capacity response, so
+    # a client cannot submit a program Perch did not offer here.
+    requested_type = (enrollment_payload or {}).get("customer_type")
+    customer_type, reason = resolve_customer_type(details, requested=requested_type)
     payload = dict(enrollment_payload or {})
     payload["customer_type"] = customer_type
     payload["utility_name"] = capacity["utility_slug"]

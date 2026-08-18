@@ -294,15 +294,25 @@ def main():
     t, why = choose_customer_type({"residential_capacity_available": True,
                                    "lmi_capacity_available": False})
     check("residential-only capacity -> Residential", t == "Residential")
-    check("  ...with a stated reason", "residential_capacity_available" in why)
+    # Reason wording changed with the program-selection milestone: it now states
+    # WHY the type was chosen (sole option vs explicit pick) rather than echoing
+    # the raw capacity flag.
+    check("  ...with a stated reason", "only_available_option" in why)
     t, _ = choose_customer_type({"lmi_capacity_available": True,
                                  "residential_capacity_available": False})
     check("LMI-only capacity -> LMI", t == "LMI")
 
-    # KNOWN LIMITATION, asserted so it cannot change silently.
-    t, _ = choose_customer_type({"lmi_capacity_available": True,
-                                 "residential_capacity_available": True})
-    check("when BOTH are available, LMI is chosen automatically", t == "LMI")
+    # SUPERSEDED: this used to auto-select LMI whenever LMI capacity existed,
+    # which silently denied the rep the Residential option. Ambiguous capacity
+    # now REQUIRES an explicit selection - see test_program_selection.py.
+    try:
+        choose_customer_type({"lmi_capacity_available": True,
+                              "residential_capacity_available": True})
+        auto_selected = True
+    except PerchValidationError:
+        auto_selected = False
+    check("when BOTH are available, LMI is NO LONGER chosen automatically",
+          not auto_selected)
 
     for bad in ({"small_commercial_capacity_available": True}, {}):
         try:

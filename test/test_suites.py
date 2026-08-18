@@ -100,3 +100,9 @@ def test_phase_a_ui_data():
     """Phase A UI/data correctness + non-LMI branch."""
     import test_phase_a_ui_data as suite
     suite.main()
+
+
+def test_program_selection():
+    """Program availability + explicit customer type selection."""
+    import test_program_selection as suite
+    suite.main()

@@ -875,3 +875,41 @@ def perch_enrollment_status(enrollment_id):
     except PerchError as e:
         return _perch_error_response(enrollment_id, "status", e)
     return jsonify(_safe_status(status_payload) or {})
+
+
+@bp.route("/enrollments/<int:enrollment_id>/programs", methods=["GET"])
+@require_auth
+def enrollment_available_programs(enrollment_id):
+    """Program choices Perch returned for THIS enrollment's capacity result.
+
+    Read-only and side-effect free - it reads the persisted capacity row and
+    makes no Perch call. This is the endpoint Phase B's selection UI will use:
+    it must only ever offer programs Perch actually returned.
+    """
+    enrollment, err = _visible(enrollment_id)
+    if err:
+        return err
+
+    capacity = adapter.latest_capacity_check(enrollment_id)
+    if not capacity:
+        return jsonify({
+            "enrollment_id": enrollment_id,
+            "capacity_checked": False,
+            "available_programs": [],
+            "selection_required": False,
+            "message": "Run a capacity check before choosing a program.",
+        })
+
+    details = capacity.get("project_details") or {}
+    programs = adapter.available_programs(details)
+    return jsonify({
+        "enrollment_id": enrollment_id,
+        "capacity_checked": True,
+        "capacity_available": bool(capacity.get("capacity_available")),
+        "utility_slug": capacity.get("utility_slug"),
+        "zip_code": capacity.get("zip_code"),
+        "available_programs": programs,
+        # True only when the rep genuinely has a choice to make. One option is
+        # unambiguous and is selected automatically at enroll time.
+        "selection_required": len(programs) > 1,
+    })

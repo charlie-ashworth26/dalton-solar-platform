@@ -91,8 +91,14 @@ def main():
     card = fn_body("renderAgreementCard")
     check("the completed view makes NO network call",
           "apiFetch" not in card and "fetch(" not in card and "agrFetch" not in card)
-    check("it explains why documents are no longer retrievable",
-          "no longer" in card.lower())
+    # UPDATED in Phase A: the old copy ("no longer retrievable through Dalton")
+    # read like a catastrophic error. The requirement is now that the limitation
+    # is stated subtly and honestly - the agreements exist, Perch simply issues
+    # time-limited links once the stage has advanced.
+    check("it explains the link limitation without alarming wording",
+          "time-limited" in card and "Perch records" in card)
+    check("  ...and does not claim the agreements are gone",
+          "no longer retrievable through Dalton" not in card)
     check("lock is applied before rendering, so no control is briefly live",
           open_body.index("lockEnrollmentReadOnly") < open_body.index("mountAgreements({"))
 

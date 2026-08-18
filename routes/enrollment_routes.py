@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime
 
@@ -69,6 +70,52 @@ def _serialize_enrollment(row, requester_role):
         # URL-free workflow payload, so a completed enrollment can be rendered
         # read-only without calling Perch. Contains contract NAMES, never URLs.
         "workflow_last_response": json_or_none(wf["last_response_json"]) if wf else None,
+        # Persisted Perch savings for this enrollment, or None. Never computed.
+        "program_savings": _program_savings(row["id"]),
+    }
+
+
+def _program_savings(enrollment_id):
+    """Savings percent for THIS enrollment, from data Perch already gave us.
+
+    Reads two already-persisted values and does no arithmetic of its own:
+      perch_capacity_checks.savings_percent_lmi / _res_commercial   (Perch)
+      perch_workflow_state customer_type from the /enroll response  (Perch)
+
+    Returns None whenever either input is missing. The UI must then OMIT the
+    field - a guessed or hardcoded discount on a contract summary would be a
+    misrepresentation, not a cosmetic default.
+    """
+    row = query_one(
+        """SELECT savings_percent_res_commercial, savings_percent_lmi
+             FROM perch_capacity_checks
+            WHERE enrollment_id = ?
+         ORDER BY id DESC LIMIT 1""", (enrollment_id,))
+    if not row:
+        return None
+
+    # customer_type is stored on the workflow state written by POST /enroll.
+    customer_type = None
+    state = query_one("SELECT last_response_json FROM perch_workflow_state "
+                      "WHERE enrollment_id = ?", (enrollment_id,))
+    if state and state["last_response_json"]:
+        try:
+            customer_type = (json.loads(state["last_response_json"]) or {}).get("customer_type")
+        except (TypeError, ValueError):
+            customer_type = None
+
+    is_lmi = str(customer_type or "").strip().upper() == "LMI"
+    value = row["savings_percent_lmi"] if is_lmi else row["savings_percent_res_commercial"]
+    if value is None:
+        return None
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        return None
+    return {
+        "percent": percent,
+        # Which Perch figure this came from, so the UI never has to infer it.
+        "basis": "lmi" if is_lmi else "residential_commercial",
     }
 
 

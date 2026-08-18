@@ -216,7 +216,6 @@ function showView(name){
   document.getElementById('view-'+name).classList.add('active');
   document.querySelectorAll('.nav-link[data-view]').forEach(n=>n.classList.toggle('active', n.dataset.view===name));
   if(name==='dashboard') renderDashboard();
-  if(name==='projects') renderProjects('projects-list', true);
   if(name==='customers') renderCustomers('');
   window.scrollTo({top:0});
 
@@ -255,23 +254,47 @@ async function loadEnrollments(){
 // dashboard-display grouping only — the real status string is always shown
 // as-is in the Customers table and everywhere else.
 const DASH_BUCKETS = [
-  { label: 'In Progress', statuses: ['Draft','Information Needed','Utility Bill Uploaded','Utility Validation','LMI Review','Agreement Ready'] },
-  { label: 'Signature Pending', statuses: ['Signature Pending'] },
-  { label: 'In Review', statuses: ['Signed','Internal Review','Needs Work','Rejected'] },
-  { label: 'Submitted', statuses: ['Verified','Submitted','Developer Review'] },
-  { label: 'Active', statuses: ['Accepted','Project Assigned','Active'] },
+  { label: 'In Progress',         keys: ['service_area','capacity_result','enroll',
+                                         'proof_docs','self_attestation',
+                                         'self_attestation_accept','contracts'] },
+  { label: 'Awaiting Acceptance', keys: ['contracts_review','contracts_accept'] },
+  { label: 'Complete',            keys: ['contracts_accepted'] },
+  // Blocked, unrecognised, or unmapped states land here rather than being
+  // silently miscounted or dropped.
+  { label: 'Needs Attention',     keys: ['no_capacity','enroll_outcome_uncertain',
+                                         'contracts_accept_uncertain',
+                                         'unknown_next_step','status'] },
 ];
+
+// Counters derive from the PERCH WORKFLOW state, never enrollments.status.
+// enrollments.status belongs to the legacy QA/developer pipeline and is
+// deliberately never advanced by the Perch flow (see the comments in
+// enrollment_routes.py and services/perch/workflow.py), so bucketing it meant a
+// COMPLETE enrollment still read "Draft" and counted as In Progress - exactly
+// the "5 In Progress / 0 everything else" the dashboard was showing.
+// workflow_step_key IS advanced by the Perch flow and is already on every list
+// row, so this needs no backend change and writes nothing.
+function dashBucketFor(e){
+  const key = e.workflow_step_key || null;
+  if(e.workflow_is_terminal === true) return 'Complete';
+  if(e.workflow_is_blocked === true) return 'Needs Attention';
+  for(const b of DASH_BUCKETS){
+    if(key && b.keys.indexOf(key) !== -1) return b.label;
+  }
+  // No workflow row yet (created, not started) is genuinely in progress; an
+  // unrecognised key is surfaced rather than hidden.
+  return key ? 'Needs Attention' : 'In Progress';
+}
 
 async function renderDashboard(){
   document.getElementById('dash-greeting').textContent = 'Good afternoon, ' + (currentUser ? (currentUser.full_name || currentUser.email).split(' ')[0] : '');
-  await Promise.all([loadProjects(), loadEnrollments()]);
+  await loadEnrollments();   // Projects UI removed; Perch assigns projects
 
   document.getElementById('dash-stats').innerHTML = DASH_BUCKETS.map(bucket => {
-    const n = enrollments.filter(e => bucket.statuses.includes(e.status)).length;
-    return '<div class="stat-card'+(bucket.label==='Active' ? ' stat-verified' : '')+'"><div class="sc-num">'+n+'</div><div class="sc-label">'+bucket.label+'</div></div>';
+    const n = enrollments.filter(e => dashBucketFor(e) === bucket.label).length;
+    return '<div class="stat-card'+(bucket.label==='Complete' ? ' stat-verified' : '')+'"><div class="sc-num">'+n+'</div><div class="sc-label">'+bucket.label+'</div></div>';
   }).join('');
 
-  renderProjects('dash-projects', false);
 
   const recent = [...enrollments].sort((a,b)=> (a.updated_at < b.updated_at ? 1 : -1)).slice(0, 5);
   document.getElementById('dash-recent-body').innerHTML = recent.length
@@ -726,7 +749,6 @@ async function submitCapacity(){
   perchContext.nextStepKey = (((body.workflow||{}).step||{}).perch_next_step||{}).resolved_step || null;
   state.customer.email = values.email;
   state.project.utility = perchContext.utilityDisplay;
-  if(!state.project.name) state.project.name = 'Assigned by Perch';
   currentWorkflow = body.workflow;
   renderWorkflowStep(currentWorkflow);
 }
@@ -1708,10 +1730,8 @@ function fillReview(){
   document.getElementById('rv-email').textContent = state.customer.email;
   document.getElementById('rv-phone').textContent = state.customer.phone;
   document.getElementById('rv-acct').textContent = state.customer.acct;
-  document.getElementById('rv-project').textContent = state.project.name || 'Assigned by Perch';
   document.getElementById('rv-utility').textContent = state.project.utility || perchContext.utilityDisplay || perchContext.utilitySlug;
   document.getElementById('rv-address').textContent = state.address.street+(state.address.unit ? ', '+state.address.unit : '')+', '+state.address.city+', NY '+state.address.zip;
-  document.getElementById('rv-bill').textContent = state.bill.amount;
   document.getElementById('rv-lmi').textContent = perchContext.proofSubmitted
     ? (state.lmi.docType+' — '+state.lmi.fileName)
     : 'Not required by Perch for this enrollment';
@@ -1955,13 +1975,16 @@ function agrEscKey(e){ if(e.key === 'Escape') closeAgreements(); }
 function agrBackdrop(e){ if(e.target && e.target.id === 'agr-overlay') closeAgreements(); }
 /* Opening documents NEVER accepts. Only the checkbox + button below does. */
 function agrSummaryFromState(){
+  const detail = currentEnrollmentDetail || {};
   const addr = state.address || {};
   const line = [addr.street, addr.unit, addr.city].filter(Boolean).join(', ');
   return {
     customerName: [state.customer.first, state.customer.last].filter(Boolean).join(' '),
     utility: (state.project && state.project.utility) || perchContext.utilitySlug || '',
     serviceAddress: line ? (line + (addr.zip ? ', NY ' + addr.zip : '')) : '',
-    project: (state.project && state.project.name) || '',
+    savings: formatSavings(detail.program_savings),
+    programType: formatProgramType(detail.program_savings),
+    enrollmentCode: (currentDraft && currentDraft.enrollment_code) || detail.enrollment_code || '',
   };
 }
 
@@ -1972,7 +1995,9 @@ function agrSummaryFromEnrollment(e){
     customerName: e.customer ? [e.customer.first_name, e.customer.last_name].filter(Boolean).join(' ') : '',
     utility: e.utility_account ? e.utility_account.utility_name : '',
     serviceAddress: line ? (line + (a.zip ? ', NY ' + a.zip : '')) : '',
-    project: e.project ? e.project.name : '',
+    savings: formatSavings(e.program_savings),
+    programType: formatProgramType(e.program_savings),
+    enrollmentCode: e.enrollment_code || '',
   };
 }
 
@@ -2068,12 +2093,19 @@ function renderAgreementCard(){
   if(!host) return;
   const s = Agreements.summary || {};
 
+  // Deliberately NOT shown: project ("Assigned by Perch" told the rep nothing)
+  // and average monthly bill. Savings and the eligibility type replace them,
+  // and each row is dropped entirely when its value is absent - the filter
+  // below is what guarantees nothing is ever invented to fill a gap.
   const rows = [
     ['Name', s.customerName],
     ['Email', s.email],
     ['Electric utility', s.utility],
+    ['Savings', s.savings],                 // omitted unless Perch supplied it
+    ['Program', s.programType],             // shown only for LMI enrollments
     ['Service address', s.serviceAddress],
     ['Account number', s.accountNumber],
+    ['Enrollment ID', s.enrollmentCode],
   ].filter(function(r){ return r[1]; });
 
   let html = '<div class="card">';
@@ -2098,15 +2130,29 @@ function renderAgreementCard(){
 
   if(Agreements.readOnly){
     if(Agreements.contracts.length){
-      html += '<p class="agr-docs-label">Agreements on file</p><ul class="agr-docs-list">';
+      html += '<p class="agr-docs-label">Agreements</p><ul class="agr-docs-list">';
       Agreements.contracts.forEach(function(c){
         html += '<li>' + agrEsc(c.contract_name || c) + '</li>';
       });
       html += '</ul>';
+      // Honest and low-key. The agreements were generated and accepted; Perch
+      // simply stops issuing fresh links once the stage advances. Do NOT imply
+      // they were deleted or never existed, and do NOT pretend Dalton can
+      // fetch them.
+      html += '<p class="helper agr-quiet">Perch issues time-limited links, so these ' +
+              'documents open from your Perch records rather than from Dalton.</p>';
     }
-    html += '<p class="helper">Your agreements are held by Perch and are no longer ' +
-            'retrievable through Dalton once an enrollment is complete.</p>';
-    html += '</div>';
+    // Actor-aware final action. A customer must never be offered the rep
+    // dashboard, and "Done" must not sign a rep out.
+    html += '<div class="agr-actions agr-final">';
+    if(Agreements.actor === 'customer'){
+      html += '<button type="button" class="btn btn-primary btn-lg" ' +
+              'onclick="finishCustomerEnrollment()">Done</button>';
+    } else {
+      html += '<button type="button" class="btn btn-primary btn-lg" ' +
+              'onclick="backToDashboard()">Back to dashboard</button>';
+    }
+    html += '</div></div>';
     host.innerHTML = html;
     return;
   }
@@ -2580,3 +2626,45 @@ async function loadEnvironmentBanner(){
   }catch(e){ /* never block the app on the banner */ }
 }
 document.addEventListener('DOMContentLoaded', loadEnvironmentBanner);
+
+
+/* Rep: return to the dashboard. Does NOT touch the session. */
+function backToDashboard(){
+  resetWizardState();
+  showView('dashboard');
+}
+
+/* Customer: end their enrollment cleanly.
+   Clears ONLY the customer token, never the rep session, and returns them to
+   the customer sign-in screen rather than exposing any rep surface. */
+function finishCustomerEnrollment(){
+  try { CustomerAuth.clear(); } catch(e){}
+  customerEnrollmentId = null;
+  activateScreen('screen-customer-login');
+  const msg = document.getElementById('cust-login-error');
+  if(msg){
+    msg.textContent = 'Your enrollment is complete. You can close this window.';
+    msg.style.color = '';
+    msg.style.display = 'block';
+  }
+}
+
+
+/* Savings string from the PERSISTED Perch value only.
+   program_savings is null whenever Perch did not supply a figure for this
+   enrollment's customer type - in that case this returns null and the row is
+   dropped. Never hardcode or infer a percentage onto a contract summary. */
+function formatSavings(programSavings){
+  if(!programSavings || typeof programSavings.percent !== 'number') return null;
+  const pct = Number(programSavings.percent);
+  if(!isFinite(pct) || pct <= 0) return null;
+  const shown = Number.isInteger(pct) ? String(pct) : pct.toFixed(1);
+  return shown + '% savings';
+}
+
+/* Programme label. Shown ONLY for LMI, because "Residential" on every other
+   enrollment is noise. Derived from the persisted Perch basis, not guessed. */
+function formatProgramType(programSavings){
+  if(!programSavings) return null;
+  return programSavings.basis === 'lmi' ? 'Income-eligible (LMI)' : null;
+}

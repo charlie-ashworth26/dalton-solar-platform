@@ -27,7 +27,7 @@ def upsert_user(email, password, role, full_name):
 def seed():
     init_db(reset=True)
 
-    admin_id = upsert_user("admin@daltonsolar.com", "AdminPass1!", "admin", "Jordan Ellis")
+    admin_id = upsert_user("admin@daltonsolar.com", "AdminPass1!", "admin", "ADMIN ACCOUNT")
     rep_user_id = upsert_user("charlie@daltonsolar.com", "RepPass1!", "sales_rep", "Charlie Mren")
     qa_id = upsert_user("qa@daltonsolar.com", "QaPass1!", "qa_reviewer", "Sam Rivera")
     dev_id = upsert_user("developer@perchenergy.com", "DevPass1!", "developer", "Arcadia Review Team")

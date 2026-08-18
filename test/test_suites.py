@@ -94,3 +94,9 @@ def test_hosting_readiness():
     """Render staging hosting readiness."""
     import test_hosting_readiness as suite
     suite.main()
+
+
+def test_phase_a_ui_data():
+    """Phase A UI/data correctness + non-LMI branch."""
+    import test_phase_a_ui_data as suite
+    suite.main()

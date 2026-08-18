@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, g
 
-from db import query_one
+from db import query_one, execute
 from auth import (
     verify_password, issue_token, require_auth,
     issue_customer_token, require_customer_auth, normalize_email,
@@ -128,9 +128,53 @@ def customer_me():
             "last_name": g.current_customer["last_name"],
             "email": g.current_customer["email"],
         },
-        "project_name": project["name"] if project else None,
+        # Savings comes from the SAME persisted-Perch resolver the rep view uses,
+        # so a customer can never be shown a different (or invented) figure.
+        "program_savings": _customer_program_savings(enrollment_id),
         "workflow_step_key": step_key,
         "workflow_step_label": perch_workflow.step_label(step_key) if step_key else None,
         "workflow_is_terminal": perch_workflow.is_terminal(step_key),
         "workflow_is_blocked": perch_workflow.is_blocked(step_key),
     })
+
+
+@bp.route("/me/profile", methods=["PATCH"])
+@require_auth
+def update_own_profile():
+    """Change YOUR OWN display name. Deliberately narrow.
+
+    Exists because the seeded admin shipped with the placeholder name
+    "Jordan Ellis" and there was no way to correct it without SQL. Any
+    authenticated staff user may fix their own name; nobody can change anyone
+    else's, and no other field is editable here.
+
+    CANNOT change: role, email, is_active, password, or any other user - and it
+    touches nothing that carries enrollment ownership or history (those
+    reference users.id, never the name).
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    if "full_name" not in data:
+        return jsonify({"error": "Send full_name to update your display name."}), 400
+
+    full_name = (data.get("full_name") or "").strip()
+    if not full_name:
+        return jsonify({"error": "Display name cannot be blank."}), 400
+    if len(full_name) > 120:
+        return jsonify({"error": "Display name must be 120 characters or fewer."}), 400
+
+    # Ignore anything else that was sent: this endpoint edits ONE field.
+    execute("UPDATE users SET full_name = ?, updated_at = datetime('now') WHERE id = ?",
+            (full_name, g.current_user["id"]))
+    audit.log("user_profile_updated", user_id=g.current_user["id"],
+              details={"field": "full_name"}, ip_address=request.remote_addr)
+
+    row = query_one("SELECT id, email, role, full_name, is_active FROM users WHERE id = ?",
+                    (g.current_user["id"],))
+    return jsonify(dict(row))
+
+
+def _customer_program_savings(enrollment_id):
+    """Delegates to the single resolver in enrollment_routes so the rep-facing
+    and customer-facing savings figures can never diverge."""
+    from routes.enrollment_routes import _program_savings
+    return _program_savings(enrollment_id)

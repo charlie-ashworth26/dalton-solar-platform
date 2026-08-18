@@ -73,7 +73,6 @@
       <p class="lead">Here's where your enrollment stands.</p>
       <div class="review-block">
         <div class="review-head">Your agreement</div>
-        <div class="review-line"><span class="rl-label">Project</span><span class="rl-val" id="portal-project"></span></div>
         <div class="review-line"><span class="rl-label">Status</span><span class="rl-val"><span class="badge badge-gold">Awaiting your signature</span></span></div>
       </div>
       <button class="btn btn-primary btn-full btn-lg" id="portal-open-btn" onclick="openCustomerContracts()">Review &amp; sign agreement</button>
@@ -94,10 +93,6 @@
     <div class="nav-link active" data-view="dashboard" onclick="showView('dashboard')">
       <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
       Dashboard
-    </div>
-    <div class="nav-link" data-view="projects" onclick="showView('projects')">
-      <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-      Projects
     </div>
     <div class="nav-link" data-view="customers" onclick="showView('customers')">
       <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
@@ -123,8 +118,6 @@
         <button class="btn btn-primary" onclick="startWizardFresh()">+ New enrollment</button>
       </div>
       <div class="stat-grid" id="dash-stats"></div>
-      <div class="section-title">My projects <a onclick="showView('projects')">View all →</a></div>
-      <div id="dash-projects" style="margin-bottom:30px;"></div>
       <div class="section-title">Recent customers <a onclick="showView('customers')">View all →</a></div>
       <div class="table-wrap"><table class="data-table">
         <thead><tr><th>Name</th><th>Project</th><th>Status</th><th>Last modified</th><th></th></tr></thead>
@@ -132,10 +125,7 @@
       </table></div>
     </div>
 
-    <div class="view" id="view-projects">
-      <div class="page-head"><div><h1>My projects</h1><div class="sub">Community solar projects you're approved to enroll customers into.</div></div></div>
-      <div id="projects-list"></div>
-    </div>
+    
 
     <div class="view" id="view-reps">
 
@@ -383,7 +373,7 @@
             <div class="card">
               <p class="card-eyebrow">New enrollment</p>
               <h2>Review contracts</h2>
-              <p class="lead">Review the personalized Perch contract packet for this enrollment. Final acceptance is intentionally disabled in this milestone.</p>
+              <p class="lead">Review the agreements for this enrollment before completing it.</p>
               <div class="review-block">
                 <div class="review-head">Customer</div>
                 <div class="review-line"><span class="rl-label">Name</span><span class="rl-val" id="rv-name"></span></div>
@@ -393,10 +383,8 @@
               </div>
               <div class="review-block">
                 <div class="review-head">Project</div>
-                <div class="review-line"><span class="rl-label">Project</span><span class="rl-val" id="rv-project"></span></div>
                 <div class="review-line"><span class="rl-label">Utility</span><span class="rl-val" id="rv-utility"></span></div>
                 <div class="review-line"><span class="rl-label">Service address</span><span class="rl-val" id="rv-address"></span></div>
-                <div class="review-line"><span class="rl-label">Avg. monthly bill</span><span class="rl-val" id="rv-bill"></span></div>
                 <div class="review-line"><span class="rl-label">LMI</span><span class="rl-val" id="rv-lmi"></span></div>
               </div>
               <div id="pre-send">

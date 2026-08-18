@@ -59,6 +59,50 @@ let customers = [];
 
 const steps = [1,2,3,4,5];
 const stepIds = {1:'step-project',2:'step-bill',3:'step-contact',4:'step-lmi',5:'step-agreement'};
+
+// ── Branch-aware wizard navigation ───────────────────────────────────────
+// The LMI/eligibility step (4) exists ONLY on the LMI branch. Which branch we
+// are on is decided by the BACKEND: the customer_type resolved from the Perch
+// capacity response (see services/perch/adapter.resolve_customer_type). This is
+// never inferred in JS - selectedProgram is set from the /programs response and
+// from the persisted enrollment on resume.
+//
+// Residential does not merely HIDE step 4: activeSteps() removes it, so Next
+// from step 3 goes to 5, Back from 5 goes to 3, and the progress indicator has
+// four dots instead of five.
+let selectedProgram = null;   // { customer_type, savings_percent, lmi_required }
+
+function programRequiresLmi(){
+  // Absent information is treated as "not yet known", NOT as "no LMI".
+  if(!selectedProgram) return null;
+  return selectedProgram.lmi_required === true;
+}
+
+function activeSteps(){
+  const needsLmi = programRequiresLmi();
+  // Until the program is known, keep the full sequence so nothing is skipped
+  // prematurely; step 4 is only dropped once we KNOW it is Residential.
+  if(needsLmi === false) return [1,2,3,5];
+  return [1,2,3,4,5];
+}
+
+function stepPosition(n){
+  const seq = activeSteps();
+  const i = seq.indexOf(n);
+  return i === -1 ? 0 : i;
+}
+
+function nextStepAfter(n){
+  const seq = activeSteps();
+  const i = seq.indexOf(n);
+  return (i === -1 || i === seq.length - 1) ? n : seq[i + 1];
+}
+
+function prevStepBefore(n){
+  const seq = activeSteps();
+  const i = seq.indexOf(n);
+  return i <= 0 ? seq[0] : seq[i - 1];
+}
 const stepLabels = ['Capacity','Bill','Contact','LMI','Agreement'];
 
 let state = {
@@ -617,6 +661,9 @@ function renderWorkflowStep(wf){
     : '';
 
   const fields = (step.fields||[]).map(renderField).join('');
+  // Program options render below the availability fields once capacity returns.
+  const programSlot = (step.key === 'capacity_result' || step.key === 'service_area')
+    ? '<div id="program-options" class="prog-wrap"></div>' : '';
   const panels = (step.panels||[]).map(renderPanel).join('');
 
   const pa = step.primary_action;
@@ -640,6 +687,7 @@ function renderWorkflowStep(wf){
       (step.subtitle ? '<p class="lead">' + esc(step.subtitle) + '</p>' : '') +
       draftBanner +
       fields +
+      programSlot +
       panels +
       '<p class="helper" id="wf-form-error" style="display:none;color:var(--danger);margin-top:12px;"></p>' +
 
@@ -751,6 +799,9 @@ async function submitCapacity(){
   state.project.utility = perchContext.utilityDisplay;
   currentWorkflow = body.workflow;
   renderWorkflowStep(currentWorkflow);
+  // Capacity succeeded, so ask the backend which programs it ACTUALLY returned.
+  // Never derived from project_details in JS.
+  await loadProgramOptions();
 }
 
 function advanceFromCapacity(){
@@ -1063,15 +1114,20 @@ function quadPoint(t){
 function goStep(n){
   document.querySelectorAll('.wizard-step').forEach(s=>s.classList.remove('active'));
   document.getElementById(stepIds[n]).classList.add('active');
-  const t = (n-1)/(steps.length-1);
+  const seq = activeSteps();
+  const t = seq.length > 1 ? stepPosition(n)/(seq.length-1) : 0;
   const pt = quadPoint(t);
   document.getElementById('arc-sun').setAttribute('cx', pt.x);
   document.getElementById('arc-sun').setAttribute('cy', pt.y);
   document.getElementById('arc-progress').setAttribute('stroke-dashoffset', 1-t);
+  // Labels are rendered from the ACTIVE sequence, so a Residential enrollment
+  // never shows an eligibility step it will not visit.
+  renderStepLabels();
+  const pos = stepPosition(n);
   document.querySelectorAll('.step-label').forEach((el,i)=>{
     el.classList.remove('done','now');
-    if(i < n-1) el.classList.add('done');
-    if(i === n-1) el.classList.add('now');
+    if(i < pos) el.classList.add('done');
+    if(i === pos) el.classList.add('now');
   });
   hydrateStep(n);
   if(n===5) fillReview();
@@ -1087,10 +1143,12 @@ function hydrateStep(n){
     document.getElementById('a-street').value = state.address.street;
     document.getElementById('a-unit').value = state.address.unit;
     document.getElementById('a-city').value = state.address.city;
+    document.getElementById('a-state').value = state.address.state || 'NY';
     document.getElementById('a-zip').value = state.address.zip;
     document.getElementById('bill-amount').value = state.bill.amount || '';
     document.getElementById('billing-same').checked = state.billing.sameAsService !== false;
     document.getElementById('b-street').value = state.billing.street || '';
+    document.getElementById('b-state').value = state.billing.state || state.address.state || 'NY';
     document.getElementById('b-unit').value = state.billing.unit || '';
     document.getElementById('b-city').value = state.billing.city || '';
     document.getElementById('b-zip').value = state.billing.zip || '';
@@ -1148,6 +1206,9 @@ function syncBillingFromService(){
   document.getElementById('b-street').value = document.getElementById('a-street').value;
   document.getElementById('b-unit').value = document.getElementById('a-unit').value;
   document.getElementById('b-city').value = document.getElementById('a-city').value;
+  // State is now selectable, so it must be mirrored too - otherwise a
+  // same-as-service billing address would silently keep the default NY.
+  document.getElementById('b-state').value = document.getElementById('a-state').value;
   document.getElementById('b-zip').value = document.getElementById('a-zip').value;
 }
 
@@ -1254,7 +1315,9 @@ async function submitBill(){
     street: document.getElementById('a-street').value.trim(),
     unit: document.getElementById('a-unit').value.trim(),
     city: document.getElementById('a-city').value.trim(),
-    state: 'NY',
+    // Read the SELECTED state. This was hardcoded 'NY' while the field was a
+    // readonly NY input, so the new dropdown would have been silently ignored.
+    state: (document.getElementById('a-state').value || 'NY').trim(),
     zip: document.getElementById('a-zip').value.trim()
   };
   const sameBilling = document.getElementById('billing-same').checked;
@@ -1263,7 +1326,8 @@ async function submitBill(){
     street: sameBilling ? state.address.street : document.getElementById('b-street').value.trim(),
     unit: sameBilling ? state.address.unit : document.getElementById('b-unit').value.trim(),
     city: sameBilling ? state.address.city : document.getElementById('b-city').value.trim(),
-    state: 'NY',
+    state: sameBilling ? state.address.state
+                       : (document.getElementById('b-state').value || 'NY').trim(),
     zip: sameBilling ? state.address.zip : document.getElementById('b-zip').value.trim()
   };
   state.bill.amount = document.getElementById('bill-amount').value;
@@ -1312,7 +1376,14 @@ async function submitContact(){
       body:JSON.stringify({customer:{first_name:state.customer.first,last_name:state.customer.last,email:state.customer.email,phone:state.customer.phone,password:state.customer.password}})
     });
     if(!perchContext.enrollmentSubmitted){
-      const body = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/enroll', {method:'POST', body:JSON.stringify({document_id:state.bill.documentId})});
+      // customer_type is the rep's SELECTION. The backend re-validates it against
+      // this enrollment's persisted capacity response, so this is a request, not
+      // an instruction - an unoffered program is rejected server-side.
+      const enrollBody = {document_id: state.bill.documentId};
+      if(selectedProgram && selectedProgram.customer_type){
+        enrollBody.customer_type = selectedProgram.customer_type;
+      }
+      const body = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/enroll', {method:'POST', body:JSON.stringify(enrollBody)});
       perchContext.enrollmentSubmitted = true;
       perchContext.nextStepKey = body.next_step_key;
     }
@@ -2515,6 +2586,7 @@ async function loadReps(){
     if(err){ err.textContent = e.message; err.style.display = 'block'; }
     return;
   }
+  adminRepCache = reps;
   if(!reps.length){ host.innerHTML = '<p class="helper">No reps yet.</p>'; return; }
   host.innerHTML =
     '<table class="table"><thead><tr>' +
@@ -2571,32 +2643,6 @@ async function createRep(){
   ok.style.display = 'block';
   loadReps();
 }
-
-async function editRep(userId){
-  const phone = prompt('Phone (leave blank to clear):');
-  if(phone === null) return;
-  const team = prompt('Team (leave blank to clear):');
-  if(team === null) return;
-  const code = prompt('Rep code (leave blank to keep unchanged):');
-  if(code === null) return;
-  const payload = {phone: phone, team: team};
-  if(code.trim()) payload.rep_code = code.trim();
-  try{
-    await apiFetch('/api/admin/reps/' + userId, {method:'PATCH', body: JSON.stringify(payload)});
-  }catch(e){ alert(e.message); return; }
-  loadReps();
-}
-
-async function resetRepPassword(userId){
-  const pw = prompt('New password (at least 10 characters):');
-  if(pw === null) return;
-  try{
-    await apiFetch('/api/admin/reps/' + userId + '/password',
-                   {method:'POST', body: JSON.stringify({password: pw})});
-  }catch(e){ alert(e.message); return; }
-  alert('Password updated. Give it to the rep directly — it is not emailed.');
-}
-
 async function toggleRep(userId, isActive){
   const action = isActive ? 'deactivate' : 'activate';
   if(isActive && !confirm('Deactivate this rep? They will be signed out immediately. ' +
@@ -2667,4 +2713,244 @@ function formatSavings(programSavings){
 function formatProgramType(programSavings){
   if(!programSavings) return null;
   return programSavings.basis === 'lmi' ? 'Income-eligible (LMI)' : null;
+}
+
+
+const STEP_LABEL_TEXT = {1:'Availability', 2:'Bill', 3:'Customer', 4:'Eligibility', 5:'Agreements'};
+
+function renderStepLabels(){
+  const host = document.getElementById('step-labels');
+  if(!host) return;
+  host.innerHTML = activeSteps().map(function(n){
+    return '<div class="step-label">' + esc(STEP_LABEL_TEXT[n] || ('Step ' + n)) + '</div>';
+  }).join('');
+}
+
+
+/* ═══════════ Program availability + selection ═══════════
+   Consumes GET /api/perch/enrollments/<id>/programs, which returns ONLY the
+   programs Perch actually offered for this location, each with its own savings
+   percentage from the matching Perch field.
+
+   NO business logic lives here. The frontend renders what the backend returned
+   and sends back a choice; services/perch/adapter.resolve_customer_type()
+   re-validates that choice against the capacity response, so a tampered client
+   cannot enrol a program Perch did not offer. */
+
+let availablePrograms = [];
+// Reps from the last GET /api/admin/reps, so the edit modal can prefill.
+let adminRepCache = [];
+
+function programHostEl(){ return document.getElementById('program-options'); }
+
+async function loadProgramOptions(){
+  const host = programHostEl();
+  if(!host || !currentDraft) return null;
+  host.innerHTML = '<p class="helper">Checking available programs…</p>';
+  let body;
+  try{
+    body = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/programs');
+  }catch(err){
+    host.innerHTML = '<p class="helper">Could not load available programs: ' +
+                     esc(err.message) + '</p>';
+    return null;
+  }
+  availablePrograms = body.available_programs || [];
+
+  // Exactly one option is unambiguous - the backend selects it automatically at
+  // enroll time, so preselect it here purely so the rep can SEE what they get.
+  if(availablePrograms.length === 1){
+    selectedProgram = availablePrograms[0];
+  } else if(selectedProgram){
+    // Drop a stale selection that is not in the new response.
+    const still = availablePrograms.filter(function(p){
+      return p.customer_type === selectedProgram.customer_type; })[0];
+    selectedProgram = still || null;
+  }
+  renderProgramOptions(body);
+  return body;
+}
+
+function programLabel(p){
+  return p.customer_type === 'LMI' ? 'Residential LMI' : 'Residential';
+}
+
+function programBlurb(p){
+  return p.lmi_required
+    ? 'Income-eligible program. Requires proof of participation in a qualifying program.'
+    : 'Standard residential program. No eligibility documentation needed.';
+}
+
+function renderProgramOptions(body){
+  const host = programHostEl();
+  if(!host) return;
+
+  if(!body || body.capacity_checked !== true){
+    host.innerHTML = '';
+    return;
+  }
+  if(!availablePrograms.length){
+    // No invented programme, no fake choice.
+    host.innerHTML = '<div class="prog-none"><strong>No community solar capacity ' +
+      'is available for this address right now.</strong><p class="helper">' +
+      'Perch did not return an eligible program for this ZIP and utility. ' +
+      'Check the ZIP and utility, or try again later.</p></div>';
+    return;
+  }
+
+  const multiple = availablePrograms.length > 1;
+  let html = '<div class="prog-head">' +
+    (multiple ? 'Choose the program this customer is enrolling in'
+              : 'Available program') + '</div>';
+
+  html += '<div class="prog-list">' + availablePrograms.map(function(p){
+    const selected = selectedProgram && selectedProgram.customer_type === p.customer_type;
+    // Savings is rendered ONLY when Perch supplied it. Never a placeholder.
+    const savings = (typeof p.savings_percent === 'number' && p.savings_percent > 0)
+      ? '<span class="prog-savings">' + esc(String(p.savings_percent)) + '% savings</span>'
+      : '<span class="prog-savings prog-savings-none">Savings not published</span>';
+    return '<button type="button" class="prog-option' + (selected ? ' selected' : '') +
+      '" role="radio" aria-checked="' + (selected ? 'true' : 'false') +
+      '" onclick="selectProgram(\'' + esc(p.customer_type) + '\')">' +
+      '<span class="prog-main"><span class="prog-name">' + esc(programLabel(p)) + '</span>' +
+      savings + '</span>' +
+      '<span class="prog-blurb">' + esc(programBlurb(p)) + '</span></button>';
+  }).join('') + '</div>';
+
+  if(multiple && !selectedProgram){
+    html += '<p class="helper" id="prog-hint">Select a program to continue.</p>';
+  }
+  host.innerHTML = html;
+  updateProgramContinueState();
+}
+
+function selectProgram(customerType){
+  const match = availablePrograms.filter(function(p){
+    return p.customer_type === customerType; })[0];
+  if(!match) return;             // never select something not offered
+  selectedProgram = match;
+  renderProgramOptions({capacity_checked: true});
+}
+
+/* Blocks Continue only when the rep genuinely has an unmade choice. The backend
+   enforces this too - this is convenience, not the security boundary. */
+function updateProgramContinueState(){
+  const btn = document.getElementById('wf-primary');
+  if(!btn) return;
+  if(availablePrograms.length > 1 && !selectedProgram){
+    btn.disabled = true;
+  } else if(availablePrograms.length){
+    btn.disabled = false;
+  }
+}
+
+
+/* ═══════════ Admin modal (replaces prompt()) ═══════════
+   One reusable in-app dialog. Every action still calls the SAME admin APIs with
+   the same permissions - this changes how the values are collected, nothing
+   about what is allowed. No deletion, no role mutation. */
+
+let adminModalSubmit = null;
+
+function openAdminModal(title, bodyHtml, onSubmit, saveLabel){
+  document.getElementById('admin-modal-title').textContent = title;
+  document.getElementById('admin-modal-body').innerHTML = bodyHtml;
+  const err = document.getElementById('admin-modal-error');
+  if(err){ err.style.display = 'none'; err.textContent = ''; }
+  const save = document.getElementById('admin-modal-save');
+  save.textContent = saveLabel || 'Save';
+  save.disabled = false;
+  adminModalSubmit = onSubmit;
+  document.getElementById('admin-modal').classList.add('open');
+  document.body.style.overflow = 'hidden';
+  document.addEventListener('keydown', adminModalEsc);
+  const first = document.querySelector('#admin-modal-body input, #admin-modal-body select');
+  if(first) first.focus();
+}
+
+function closeAdminModal(){
+  document.getElementById('admin-modal').classList.remove('open');
+  document.body.style.overflow = '';
+  document.removeEventListener('keydown', adminModalEsc);
+  adminModalSubmit = null;
+}
+function adminModalEsc(e){ if(e.key === 'Escape') closeAdminModal(); }
+function adminModalBackdrop(e){ if(e.target && e.target.id === 'admin-modal') closeAdminModal(); }
+
+function adminModalError(message){
+  const err = document.getElementById('admin-modal-error');
+  if(err){ err.textContent = message; err.style.display = 'block'; }
+  const save = document.getElementById('admin-modal-save');
+  if(save){ save.disabled = false; save.textContent = save.dataset.label || 'Save'; }
+}
+
+async function submitAdminModal(){
+  if(!adminModalSubmit) return;
+  const save = document.getElementById('admin-modal-save');
+  save.dataset.label = save.textContent;
+  save.disabled = true; save.textContent = 'Saving…';
+  try{
+    await adminModalSubmit();
+    closeAdminModal();
+    loadReps();
+  }catch(err){
+    adminModalError(err.message || 'Could not save.');
+  }
+}
+
+function adminField(id, label, value, opts){
+  opts = opts || {};
+  return '<div class="field"><label for="' + id + '">' + esc(label) + '</label>' +
+    '<input id="' + id + '" type="' + (opts.type || 'text') + '" value="' + esc(value || '') +
+    '"' + (opts.placeholder ? ' placeholder="' + esc(opts.placeholder) + '"' : '') + '></div>';
+}
+
+/* Edit phone / team / rep code - exactly the fields PATCH /api/admin/reps
+   already accepts. Role, email and active state are deliberately absent. */
+function editRep(userId){
+  const rep = (adminRepCache || []).filter(function(r){ return r.user_id === userId; })[0] || {};
+  openAdminModal('Edit ' + (rep.full_name || 'rep'),
+    adminField('adm-phone', 'Phone', rep.phone) +
+    adminField('adm-team', 'Team', rep.team) +
+    adminField('adm-code', 'Rep code', rep.rep_code) +
+    '<p class="helper">Role, email and active status are managed separately.</p>',
+    async function(){
+      const payload = {
+        phone: document.getElementById('adm-phone').value,
+        team: document.getElementById('adm-team').value,
+      };
+      const code = document.getElementById('adm-code').value.trim();
+      if(code && code !== (rep.rep_code || '')) payload.rep_code = code;
+      await apiFetch('/api/admin/reps/' + userId, {method:'PATCH', body: JSON.stringify(payload)});
+    });
+}
+
+function resetRepPassword(userId){
+  const rep = (adminRepCache || []).filter(function(r){ return r.user_id === userId; })[0] || {};
+  openAdminModal('Reset password for ' + (rep.full_name || 'rep'),
+    '<div class="field"><label for="adm-pw">New password</label>' +
+      '<span class="pw-wrap"><input id="adm-pw" type="password" placeholder="At least 10 characters">' +
+      '<button type="button" class="pw-eye" id="adm-pw-eye" aria-label="Show password" ' +
+      'aria-pressed="false" onclick="togglePasswordVisibility(\'adm-pw\',\'adm-pw-eye\')">&#128065;</button>' +
+      '</span></div>' +
+    '<p class="helper">Give the new password to the rep directly &mdash; it is not emailed.</p>',
+    async function(){
+      const pw = document.getElementById('adm-pw').value;
+      await apiFetch('/api/admin/reps/' + userId + '/password',
+                     {method:'POST', body: JSON.stringify({password: pw})});
+    }, 'Set password');
+}
+
+/* Admin edits their OWN display name via PATCH /api/auth/me/profile. */
+function editOwnProfile(){
+  openAdminModal('Your profile',
+    adminField('adm-name', 'Display name', currentUser ? currentUser.full_name : '') +
+    '<p class="helper">This is the name shown across the app. Your role and email cannot be changed here.</p>',
+    async function(){
+      const name = document.getElementById('adm-name').value;
+      const body = await apiFetch('/api/auth/me/profile',
+                                  {method:'PATCH', body: JSON.stringify({full_name: name})});
+      if(currentUser) currentUser.full_name = body.full_name;
+      syncAdminNav();
+    });
 }

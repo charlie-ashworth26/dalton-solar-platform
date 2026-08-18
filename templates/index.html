@@ -248,7 +248,7 @@
               <div class="field"><label>Unit / Apt <span style="font-weight:400;color:var(--ink-faint);">(optional)</span></label><input type="text" id="a-unit" oninput="syncBillingFromService()"></div>
               <div class="row3">
                 <div class="field"><label>City</label><input type="text" id="a-city" oninput="syncBillingFromService(); checkBillReady()"></div>
-                <div class="field"><label>State</label><input type="text" id="a-state" value="NY" readonly style="background:#FBFCFB;color:var(--ink-muted);"></div>
+                <div class="field"><label for="a-state">State</label><select id="a-state" onchange="syncBillingFromService(); checkBillReady()"><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY" selected>NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select></div>
                 <div class="field"><label>ZIP</label><input type="text" id="a-zip" class="mono-field" maxlength="5" oninput="syncBillingFromService(); checkBillReady()"></div>
               </div>
               <div class="field" style="margin-top:4px;">
@@ -259,7 +259,7 @@
                 <div class="field"><label>Billing unit / Apt <span style="font-weight:400;color:var(--ink-faint);">(optional)</span></label><input type="text" id="b-unit"></div>
                 <div class="row3">
                   <div class="field"><label>Billing city</label><input type="text" id="b-city" oninput="checkBillReady()"></div>
-                  <div class="field"><label>State</label><input type="text" id="b-state" value="NY" readonly style="background:#FBFCFB;color:var(--ink-muted);"></div>
+                  <div class="field"><label for="b-state">State</label><select id="b-state"><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY" selected>NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select></div>
                   <div class="field"><label>Billing ZIP</label><input type="text" id="b-zip" class="mono-field" maxlength="5" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,5); checkBillReady();"></div>
                 </div>
               </div>
@@ -434,6 +434,26 @@
       <p class="agr-note err" id="agr-error" style="display:none;"></p>
       <div class="agr-actions">
         <button type="button" class="btn btn-primary" onclick="closeAgreements()">Done reading</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="cee-modal-overlay" id="admin-modal" role="dialog" aria-modal="true"
+     aria-labelledby="admin-modal-title" onclick="adminModalBackdrop(event)">
+  <div class="cee-modal">
+    <div class="cee-modal-head">
+      <h2 id="admin-modal-title">Edit</h2>
+      <button type="button" class="cee-modal-close" aria-label="Close"
+              onclick="closeAdminModal()">&times;</button>
+    </div>
+    <div class="cee-modal-body" id="admin-modal-body"></div>
+    <div class="cee-modal-foot">
+      <p class="helper" id="admin-modal-error" style="display:none;color:var(--danger);"></p>
+      <div class="cee-modal-actions">
+        <button type="button" class="btn btn-ghost" onclick="closeAdminModal()">Cancel</button>
+        <button type="button" class="btn btn-primary" id="admin-modal-save"
+                onclick="submitAdminModal()">Save</button>
       </div>
     </div>
   </div>

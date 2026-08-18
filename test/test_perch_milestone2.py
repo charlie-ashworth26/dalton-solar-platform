@@ -378,8 +378,14 @@ def main():
           "savings_percent_for_lmi_customers" not in js and "available_capacity_kw" not in js)
     check("bill OCR handler still uses the original extraction/parser path",
           "async function handleBillUpload" in js and "extractTextFromFile(f)" in js and "parseUtilityBill(text)" in js)
+    # B1 moved this into an enrollBody object so the rep's validated
+    # customer_type selection can travel alongside it. The document id is still
+    # the same saved bill.
     check("same saved bill document ID is sent to /enroll",
-          "document_id:state.bill.documentId" in js)
+          "document_id: state.bill.documentId" in js
+          or "document_id:state.bill.documentId" in js)
+    check("  ...and the selected customer_type travels with it",
+          "enrollBody.customer_type = selectedProgram.customer_type" in js)
     check("/enroll branches on Perch next_step instead of a hardcoded LMI page",
           "continueFromPerchNextStep" in js and "next_step_key" in js)
     # INTENTIONALLY UPDATED: acceptance is now implemented. Review must remain a

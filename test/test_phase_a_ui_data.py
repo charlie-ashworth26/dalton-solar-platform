@@ -351,6 +351,16 @@ def main():
     check("no LMI programme label for residential",
           "'lmi'" in JS and "Income-eligible" in JS)
 
+    section("B1 — state dropdown / program UI / branching / admin modal (runtime)")
+    import subprocess as _sp
+    _h = os.path.join(ROOT, "test", "b1_ui_harness.js")
+    check("B1 harness exists", os.path.exists(_h))
+    _r = _sp.run(["node", _h], capture_output=True, text=True, timeout=120)
+    for _l in (_r.stdout + _r.stderr).splitlines():
+        if "[FAIL]" in _l:
+            print("      " + _l.strip())
+    check("B1 runtime behaviour verified", _r.returncode == 0)
+
     print(f"\n{'='*72}\nPHASE A - ALL CHECKS PASSED\n{'='*72}")
 
 

@@ -329,8 +329,11 @@ def main():
     check("three capacity segments rendered", len(wf2["step"]["panels"][0]["segments"]) == 3)
     check("savings shown without spurious decimals",
           wf2["step"]["panels"][0]["metrics"][0]["value"] == "10%")
-    check("proof-document requirement surfaced as a notice",
-          any("proof documents" in n["text"] for n in wf2["step"]["panels"][0]["notices"]))
+    # Wording tightened in the capacity-copy fix: the proof requirement is now
+    # stated as "proof of participation" and only when an LMI program is
+    # actually on offer. The requirement is still surfaced.
+    check("proof requirement surfaced as a notice",
+          any("proof" in n["text"].lower() for n in wf2["step"]["panels"][0]["notices"]))
     check("Perch's next_step exposed to the UI", wf2["step"]["perch_next_step"]["resolved_step"] == "enroll")
     check("continue is enabled now that the existing Dalton bill/OCR screen owns the enroll UX",
           wf2["step"]["primary_action"]["enabled"] is True)

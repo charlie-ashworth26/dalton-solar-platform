@@ -100,33 +100,49 @@ def create_draft():
     never be the durable key. The Dalton Enrollment ID is issued first and is
     what everything else - documents, signatures, VIPR reconciliation - hangs off.
     """
-    rep = _rep_for_current_user()
     data = request.get_json(force=True, silent=True) or {}
-    project_id = data.get("project_id")
+    created, err = _create_enrollment_row(data.get("project_id"))
+    if err:
+        return err
+    return jsonify(created), 201
+
+
+def _create_enrollment_row(project_id=None):
+    """Insert one enrollment and its initial workflow state.
+
+    (payload, None) or (None, error_response). Shared by POST /drafts and by the
+    deferred creation path, so there is exactly ONE place an enrollment row is
+    born and ownership stamping cannot drift between them.
+    """
+    rep = _rep_for_current_user()
     utility_slug = None
     if project_id:
         project = query_one("SELECT * FROM projects WHERE id = ?", (project_id,))
         if not project:
-            return jsonify({"error": "Project not found"}), 404
+            return None, (jsonify({"error": "Project not found"}), 404)
         utility_slug = utilities.resolve_slug(project["utility"])
         if not utility_slug:
-            return jsonify({"error": "This Dalton project does not map to a published Perch utility slug."}), 400
+            return None, (jsonify({"error": "This Dalton project does not map to a "
+                                            "published Perch utility slug."}), 400)
     code = next_enrollment_code()
     cur = execute(
-        """INSERT INTO enrollments (enrollment_code, project_id, sales_rep_id, status, utility_name, created_by_user_id, updated_by_user_id)
+        """INSERT INTO enrollments (enrollment_code, project_id, sales_rep_id, status,
+                                    utility_name, created_by_user_id, updated_by_user_id)
            VALUES (?, ?, ?, 'Draft', ?, ?, ?)""",
-        (code, project_id, rep["id"] if rep else None, utility_slug, g.current_user["id"], g.current_user["id"]),
+        (code, project_id, rep["id"] if rep else None, utility_slug,
+         g.current_user["id"], g.current_user["id"]),
     )
     enrollment_id = cur.lastrowid
     workflow.set_state(enrollment_id, "service_area")
-    audit.log("enrollment_draft_created", enrollment_id=enrollment_id, user_id=g.current_user["id"],
-              details={"enrollment_code": code}, ip_address=request.remote_addr)
-    return jsonify({
+    audit.log("enrollment_draft_created", enrollment_id=enrollment_id,
+              user_id=g.current_user["id"], details={"enrollment_code": code},
+              ip_address=request.remote_addr)
+    return {
         "enrollment_id": enrollment_id,
         "enrollment_code": code,
         "status": "Draft",
         "rep_name": g.current_user["full_name"],
-    }), 201
+    }, None
 
 
 @bp.route("/utilities", methods=["GET"])
@@ -451,6 +467,17 @@ def create_perch_enrollment(enrollment_id):
                 "utility_bills": [pdf_path],
             }],
         }
+        # The program choice is authoritative from the DATABASE. It used to be
+        # read only from the request body - and the body value was never copied
+        # into `payload` - so resolve_customer_type() always saw None and every
+        # dual-program location (e.g. 10901) failed with "select which one".
+        # A body value is still accepted for a first-time selection, but the
+        # persisted value wins on retries/resume, and the adapter re-validates
+        # whatever arrives against this enrollment's capacity response.
+        chosen = (data.get("customer_type")
+                  or enrollment["selected_customer_type"] or None)
+        if chosen:
+            payload["customer_type"] = chosen
         result = adapter.create_enrollment(enrollment_id, payload, user_id=g.current_user["id"])
     except PerchAmbiguousOutcomeError as e:
         # Perch returned success but the response could not be read, so the
@@ -912,4 +939,135 @@ def enrollment_available_programs(enrollment_id):
         # True only when the rep genuinely has a choice to make. One option is
         # unambiguous and is selected automatically at enroll time.
         "selection_required": len(programs) > 1,
+        # The persisted choice, so the wizard hydrates from the backend instead
+        # of relying on transient JS state. Only returned when it is still one
+        # of the programs currently on offer.
+        "selected_customer_type": (
+            enrollment["selected_customer_type"]
+            if enrollment["selected_customer_type"] in [p["customer_type"] for p in programs]
+            else None),
     })
+
+
+@bp.route("/workflow/new", methods=["GET"])
+@require_auth
+@require_role("sales_rep", "admin")
+def new_enrollment_workflow():
+    """The first wizard step, rendered WITHOUT creating anything.
+
+    Opening "New enrollment" used to POST /drafts immediately, so a rep who
+    opened the screen and clicked Back left a blank enrollment in the database
+    and on every dashboard. Nothing is persisted here - no enrollment, no
+    workflow row, no audit entry. The row is created by
+    POST /enrollments/capacity below, once real data has been submitted.
+    """
+    step = workflow._step_service_area(None, None)
+    return jsonify({"enrollment_id": None, "step": step})
+
+
+@bp.route("/enrollments/capacity", methods=["POST"])
+@require_auth
+@require_role("sales_rep", "admin")
+def create_enrollment_and_check_capacity():
+    """FIRST real action: create the enrollment, then run the capacity check.
+
+    This is the earliest point at which the rep has supplied data worth keeping
+    (email + ZIP + utility), so it is the safest place to persist. Creating the
+    row here rather than at screen-open is what stops blank drafts.
+
+    IDEMPOTENCE: if the caller already has an enrollment_id (a retry after a
+    failed capacity call), it is REUSED rather than creating a second row.
+    Ownership is enforced on that path exactly as everywhere else.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    existing_id = data.get("enrollment_id")
+
+    if existing_id:
+        # Retry against an enrollment the caller already created.
+        enrollment, err = _visible(existing_id)
+        if err:
+            return err
+        enrollment_id = enrollment["id"]
+    else:
+        # Validate BEFORE persisting, so a malformed submission still creates
+        # nothing.
+        email = (data.get("email") or "").strip()
+        zip_code = (data.get("zip_code") or "").strip()
+        utility_name = (data.get("utility_name") or "").strip()
+        missing = [n for n, v in (("email", email), ("zip_code", zip_code),
+                                  ("utility_name", utility_name)) if not v]
+        if missing:
+            return jsonify({
+                "error": "Enter the customer's email, ZIP code and utility before "
+                         "checking availability.",
+                "missing": missing,
+            }), 400
+        created, cerr = _create_enrollment_row(data.get("project_id"))
+        if cerr:
+            return cerr
+        enrollment_id = created["enrollment_id"]
+
+    # Delegate to the existing capacity handler so there is ONE capacity
+    # implementation, not a near-copy that can drift. The enrollment identity is
+    # merged into the successful response because the browser does not know it
+    # yet on a first submission.
+    resp = check_capacity(enrollment_id)
+    body, status = (resp if isinstance(resp, tuple) else (resp, 200))
+    if status == 200:
+        try:
+            payload = body.get_json() or {}
+            row = query_one("SELECT enrollment_code FROM enrollments WHERE id = ?",
+                            (enrollment_id,))
+            payload["enrollment_id"] = enrollment_id
+            payload["enrollment_code"] = row["enrollment_code"] if row else None
+            return jsonify(payload), 200
+        except Exception:
+            return resp
+    return resp
+
+
+@bp.route("/enrollments/<int:enrollment_id>/program", methods=["POST"])
+@require_auth
+@require_role("sales_rep", "admin")
+def select_enrollment_program(enrollment_id):
+    """Persist the rep's explicit program choice.
+
+    The selection must survive leaving the screen, navigating back, and
+    reloading, so it lives in the database rather than a JS variable.
+
+    The requested type is VALIDATED against this enrollment's own capacity
+    response, so a tampered client cannot persist a program Perch did not offer
+    here. Clearing (customer_type: null) is allowed and returns to "not chosen".
+    """
+    enrollment, err = _visible(enrollment_id)
+    if err:
+        return err
+
+    data = request.get_json(force=True, silent=True) or {}
+    requested = data.get("customer_type")
+
+    if requested in (None, "", "null"):
+        execute("UPDATE enrollments SET selected_customer_type = NULL, "
+                "updated_at = datetime('now'), updated_by_user_id = ? WHERE id = ?",
+                (g.current_user["id"], enrollment_id))
+        return jsonify({"enrollment_id": enrollment_id, "selected_customer_type": None})
+
+    capacity = adapter.latest_capacity_check(enrollment_id)
+    if not capacity:
+        return jsonify({"error": "Run a capacity check before choosing a program."}), 400
+
+    details = capacity.get("project_details") or {}
+    try:
+        # Reuses the SAME validator the enroll path uses, so the two can never
+        # disagree about what is selectable.
+        canonical, _reason = adapter.resolve_customer_type(details, requested=requested)
+    except PerchValidationError as e:
+        return jsonify({"error": str(e), "perch_error": "PerchValidationError"}), 400
+
+    execute("UPDATE enrollments SET selected_customer_type = ?, "
+            "updated_at = datetime('now'), updated_by_user_id = ? WHERE id = ?",
+            (canonical, g.current_user["id"], enrollment_id))
+    audit.log("enrollment_program_selected", enrollment_id=enrollment_id,
+              user_id=g.current_user["id"], details={"customer_type": canonical},
+              ip_address=request.remote_addr)
+    return jsonify({"enrollment_id": enrollment_id, "selected_customer_type": canonical})

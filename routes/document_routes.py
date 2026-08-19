@@ -134,6 +134,17 @@ def correct_extraction(enrollment_id, document_id):
     if _authz_err:
         return _authz_err
     data = request.get_json(force=True, silent=True) or {}
+
+    # The document must belong to THIS enrollment. The UPDATE below was already
+    # scoped, so another enrollment's document was never modified - but without
+    # this check the route still returned 200 and audit-logged a correction that
+    # never happened, which is both misleading to the caller and false in the
+    # audit trail.
+    doc = query_one("SELECT id FROM documents WHERE id = ? AND enrollment_id = ?",
+                    (document_id, enrollment_id))
+    if not doc:
+        return jsonify({"error": "Document not found for this enrollment"}), 404
+
     execute("UPDATE documents SET corrected_data_json=? WHERE id=? AND enrollment_id=?",
             (to_json(data.get("corrected_fields", {})), document_id, enrollment_id))
     audit.log("extraction_corrected", enrollment_id=enrollment_id, user_id=g.current_user["id"],

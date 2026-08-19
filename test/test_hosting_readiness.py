@@ -405,6 +405,54 @@ print("FACTORY", hasattr(m, 'create_app'))
                     bad.append(f"{folder}/{fn}:{token}")
     check(f"no hardcoded local paths or loopback hosts (found {bad})", not bad)
 
+    section("DATABASE HANDLE LIFECYCLE (Windows WinError 32 regression)")
+    # A suite that read the DB with bare query_one() calls - outside any Flask
+    # app context, so teardown_appcontext never fired - left a thread-local
+    # sqlite connection open. POSIX allows unlink on an open file so it was
+    # invisible; on Windows the NEXT suite's init_db(reset=True) failed with
+    # WinError 32, and WAL made it worse by holding -wal/-shm too.
+    rr = run_py("""
+import sys, gc, sqlite3, os; sys.path.insert(0,'.')
+import db
+from db import init_db, query_one
+
+def usable():
+    gc.collect()
+    n = 0
+    for c in [o for o in gc.get_objects() if isinstance(o, sqlite3.Connection)]:
+        try:
+            c.execute("SELECT 1"); n += 1
+        except Exception:
+            pass
+    return n
+
+init_db(reset=True)
+query_one("SELECT 1 AS x")                 # bare call: leaks without the fix
+print("LEAKED_BEFORE", hasattr(db._local, "conn"))
+init_db(reset=True)                        # must release BEFORE deleting
+print("LEAKED_AFTER", hasattr(db._local, "conn"))
+print("USABLE_AFTER", usable())
+os.remove(db.DB_PATH)                      # the operation that failed on Windows
+print("REMOVED", not os.path.exists(db.DB_PATH))
+""")
+    check("the lifecycle probe runs", rr.returncode == 0)
+    o = dict(l.split(" ", 1) for l in rr.stdout.strip().splitlines() if " " in l)
+    check("a bare query DOES cache a connection", o.get("LEAKED_BEFORE") == "True")
+    check("init_db(reset=True) RELEASES it", o.get("LEAKED_AFTER") == "False")
+    check("  ...leaving zero usable connections", o.get("USABLE_AFTER") == "0")
+    check("  ...so the database file can be deleted", o.get("REMOVED") == "True")
+
+    db_src = open(os.path.join(ROOT, "db", "__init__.py"), encoding="utf-8").read()
+    check("init_db closes before deleting", "close_db()" in db_src.split("if reset:")[0][-900:])
+    check("  ...and the reason is documented", "WinError 32" in db_src)
+    check("no retry loop around os.remove", "except PermissionError" not in db_src)
+    check("no sleep-based workaround", "time.sleep" not in db_src)
+    check("reset still deletes the WAL sidecars",
+          '("", "-wal", "-shm", "-journal")' in db_src)
+    check("production still closes per request via teardown",
+          "teardown_appcontext(close_db)" in
+          open(os.path.join(ROOT, "app.py"), encoding="utf-8").read())
+
     print(f"\n{'='*72}\nHOSTING READINESS - ALL CHECKS PASSED\n{'='*72}")
 
 

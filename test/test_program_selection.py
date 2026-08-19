@@ -166,14 +166,17 @@ def main():
     check("None details -> no programs", available_programs(None) == [])
     check("no capacity is rejected", rejects(NONE, None))
     check("  ...and a request cannot conjure one", rejects(NONE, "Residential"))
-    check("commercial-only -> no selectable programs",
-          available_programs(COMMERCIAL_ONLY) == [])
-    try:
-        resolve_customer_type(COMMERCIAL_ONLY)
-        cmsg = ""
-    except PerchValidationError as e:
-        cmsg = str(e)
-    check("commercial-only keeps its specific message", "small-commercial" in cmsg)
+    # SUPERSEDED by Perch Engineering (2026-08): "yes if you see small cs/resi =
+    # resi". small_commercial_capacity_available is STANDARD RESIDENTIAL in this
+    # NY funnel, so it now yields a Residential option rather than a dead end.
+    # This does NOT add a Small Commercial product - see test_post_b2_followups.
+    check("small-commercial capacity now maps to Residential",
+          [p["customer_type"] for p in available_programs(COMMERCIAL_ONLY)] == ["Residential"])
+    check("  ...and resolves without a selection prompt",
+          resolve_customer_type(COMMERCIAL_ONLY)[0] == "Residential")
+    check("  ...but is never offered as its own product type",
+          all(p["customer_type"] in ("Residential", "LMI")
+              for p in available_programs(COMMERCIAL_ONLY)))
 
     # Savings must never be fabricated.
     missing = {"residential_capacity_available": True}
@@ -306,7 +309,9 @@ def main():
               os.path.join(ROOT, "services", "perch", "territories.py")))
     with app.app_context():
         migrations = query("SELECT filename FROM schema_migrations")
-    check("no new migration added", len(migrations) == 7)
+    # 008_program_selection added later for dual-program persistence; this
+    # milestone itself still added none.
+    check("this milestone added no migration of its own", len(migrations) == 8)
 
     print(f"\n{'='*72}\nPROGRAM SELECTION - ALL CHECKS PASSED\n{'='*72}")
 

@@ -4,6 +4,7 @@ Document ingestion + OCR robustness.
 Run: python test/test_document_ingestion.py
 """
 import io
+import subprocess as _subprocess
 import json
 import os
 import sys
@@ -12,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("PERCH_API_MODE", "mock")
 
 from app import app
-from db import init_db, query, query_one, execute
+from db import init_db, query, query_one, execute, close_db as _close_db
 import seed
 from services import extraction_engine as engine
 
@@ -455,6 +456,81 @@ def main():
     check("download still forces an attachment",
           "attachment" in (d.headers.get("Content-Disposition") or ""))
     check("  ...and still returns the original", d.data == pdf_bytes)
+
+    section("CROSS-ENROLLMENT DOCUMENT ISOLATION")
+    # A stale filename from a previous enrollment appeared in the next
+    # enrollment's upload UI. That was frontend state (see
+    # upload_isolation_harness.js), but it prompted a full backend audit -
+    # which found correct_extraction returning 200 for another enrollment's
+    # document.
+    iso_a = new_enrollment()
+    iso_b = new_enrollment()
+    with open(BILL_PDF, "rb") as fh:
+        iso_pdf = fh.read()
+    ra = c.post(f"/api/enrollments/{iso_a}/documents", headers=rep,
+                     data={"category": "utility_bill",
+                           "file": (io.BytesIO(iso_pdf), "iso-A.pdf")},
+                     content_type="multipart/form-data")
+    check("enrollment A uploads its bill", ra.status_code == 201)
+    doc_a = ra.get_json()["document_id"]
+
+    detail_b = c.get(f"/api/enrollments/{iso_b}", headers=rep).get_json()
+    check("a fresh enrollment has an EMPTY document list",
+          (detail_b.get("documents") or []) == [])
+
+    check("B cannot VIEW A's document",
+          c.get(f"/api/enrollments/{iso_b}/documents/{doc_a}/view", headers=rep).status_code == 404)
+    check("B cannot DOWNLOAD A's document",
+          c.get(f"/api/enrollments/{iso_b}/documents/{doc_a}/download", headers=rep).status_code == 404)
+    check("B cannot CORRECT A's document",
+          c.post(f"/api/enrollments/{iso_b}/documents/{doc_a}/correct", headers=rep,
+                     json={"corrected_fields": {"tampered": True}}).status_code == 404)
+    check("  ...and A's extraction is untouched",
+          query_one("SELECT corrected_data_json FROM documents WHERE id = ?",
+                    (doc_a,))["corrected_data_json"] in (None, "", "{}"))
+    check("A CAN correct its own document",
+          c.post(f"/api/enrollments/{iso_a}/documents/{doc_a}/correct", headers=rep,
+                     json={"corrected_fields": {"account_number": "123"}}).status_code == 200)
+
+    set_a = c.post(f"/api/enrollments/{iso_a}/document-sets", headers=rep,
+                        data={"category": "utility_bill",
+                              "files": [(io.BytesIO(iso_pdf), "iso-A2.pdf")]},
+                        content_type="multipart/form-data")
+    check("A creates a document set", set_a.status_code == 200)
+    set_id = set_a.get_json()["document_set_id"]
+    check("B cannot READ A's document set",
+          c.get(f"/api/enrollments/{iso_b}/document-sets/{set_id}", headers=rep).status_code == 404)
+    check("B cannot DELETE from A's document set",
+          c.delete(f"/api/enrollments/{iso_b}/document-sets/{set_id}/files/{doc_a}", headers=rep).status_code == 404)
+    check("  ...A's document survives",
+          query_one("SELECT COUNT(*) n FROM documents WHERE id = ?", (doc_a,))["n"] == 1)
+    check("B still owns ZERO documents",
+          query_one("SELECT COUNT(*) n FROM documents WHERE enrollment_id = ?",
+                    (iso_b,))["n"] == 0)
+    check("A's documents remain scoped to A",
+          all(r["enrollment_id"] == iso_a for r in
+              query("SELECT enrollment_id FROM documents WHERE id = ?", (doc_a,))))
+
+    section("FRONTEND UPLOAD-STATE RESET (runtime)")
+    _uh = os.path.join(ROOT, "test", "upload_isolation_harness.js")
+    check("upload isolation harness exists", os.path.exists(_uh))
+    _ur = _subprocess.run(["node", _uh], capture_output=True, text=True, timeout=120)
+    for _l in (_ur.stdout + _ur.stderr).splitlines():
+        if "[FAIL]" in _l:
+            print("      " + _l.strip())
+    check("upload state does not leak between enrollments", _ur.returncode == 0)
+
+    # Release this process's database handle before returning.
+    #
+    # Several assertions above read the database directly with bare query_one()
+    # calls - outside any Flask app context - so teardown_appcontext never fires
+    # and the thread-local connection stays open. On Windows that open handle
+    # (plus the WAL -wal/-shm sidecars) makes the NEXT suite's
+    # init_db(reset=True) fail with WinError 32.
+    #
+    # init_db() now releases it too, so this is belt-and-braces - but a suite
+    # should leave the process as it found it.
+    _close_db()
 
     print(f"\n{'='*72}\nDOCUMENT INGESTION + OCR ROBUSTNESS - ALL CHECKS PASSED\n{'='*72}")
 

@@ -39,6 +39,46 @@ DOCUMENTED_NEXT_STEP_CAPACITY = "https://api.perchenergy.com/affiliate_partners/
 # ZIP prefix -> the project_details Perch would return for that service area.
 # Field names and value types are exactly as published.
 _FIXTURES = {
+    # ── Fixtures mirroring REAL Perch staging responses, so the small-CS
+    # mapping is exercised against shapes we have actually observed rather
+    # than invented ones. Values transcribed from live staging, 2026-08.
+    "124": {  # 12401 Kingston / Central Hudson - small CS only, NO LMI.
+              # Perch: "if you see small cs/resi = resi", so this is a
+              # standard Residential enrollment at the res/commercial rate.
+        "utility_slug": "central-hudson-gas-electric",
+        "project_details": {
+            "residential_capacity_available": False,
+            "small_commercial_capacity_available": True,
+            "lmi_capacity_available": False,
+            "proof_documents_required": False,
+            "savings_percent_for_residential_and_commercial_customers": 5,
+            # Present but MUST NOT be used for Residential.
+            "savings_percent_for_lmi_customers": 10,
+        },
+    },
+    "109": {  # 10901 Suffern / Orange & Rockland - small CS + LMI, so BOTH
+              # programs are offered and the rep must choose.
+        "utility_slug": "orange-and-rockland",
+        "project_details": {
+            "residential_capacity_available": False,
+            "small_commercial_capacity_available": True,
+            "lmi_capacity_available": True,
+            "proof_documents_required": True,
+            "savings_percent_for_residential_and_commercial_customers": 5,
+            "savings_percent_for_lmi_customers": 20,
+        },
+    },
+    "129": {  # 12901 / NYSEG - LMI only.
+        "utility_slug": "nyseg",
+        "project_details": {
+            "residential_capacity_available": False,
+            "small_commercial_capacity_available": False,
+            "lmi_capacity_available": True,
+            "proof_documents_required": True,
+            "savings_percent_for_residential_and_commercial_customers": 0,
+            "savings_percent_for_lmi_customers": 20,
+        },
+    },
     "133": {  # Upstate NY - full LMI + residential, IRA project requiring proof docs
         "utility_slug": "national-grid-ny",
         "project_details": {

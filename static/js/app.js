@@ -405,12 +405,60 @@ function enrollmentRowHtml(e){
   const custName = e.customer ? (e.customer.first_name+' '+e.customer.last_name) : '(no customer info yet)';
   const custEmail = e.customer ? e.customer.email : '';
   const projectName = e.project ? e.project.name : '—';
-  return '<tr><td><div class="cust-name">'+esc(custName)+'</div><div class="cust-sub">'+esc(custEmail)+'</div></td><td>'+esc(projectName)+'</td><td>'+workflowPillHtml(e)+'</td><td>'+formatDate(e.updated_at)+'</td><td style="text-align:right;">'+openActionHtml(e)+'</td></tr>';
+  // data-label drives the <=820px card layout (CSS turns each cell into a
+  // labelled row), so the table never scrolls sideways on a phone.
+  // The Project column has shown "—" for every enrollment since Perch began
+  // assigning projects, so it carries the enrollment code instead - which
+  // Phase A asked to surface anyway.
+  return '<tr>' +
+    '<td data-label="Customer"><div class="cust-name">'+esc(custName)+'</div><div class="cust-sub">'+esc(custEmail)+'</div></td>' +
+    '<td data-label="Enrollment"><span class="mono">'+esc(e.enrollment_code || '—')+'</span></td>' +
+    '<td data-label="Status">'+workflowPillHtml(e)+'</td>' +
+    '<td data-label="Last modified">'+formatTimestamp(e.updated_at)+'</td>' +
+    '<td data-label="" style="text-align:right;">'+openActionHtml(e)+'</td></tr>';
 }
 
+/* Backend timestamps are SQLite datetime('now') values: UTC, formatted
+   "YYYY-MM-DD HH:MM:SS" with NO timezone marker. Left as-is, JS would parse
+   them as LOCAL time and display a value hours adrift. Appending 'Z' is what
+   makes them parse as the UTC they actually are, after which toLocaleString
+   renders them in the viewer's own timezone.
+
+   These are always real persisted values - nothing here manufactures a "now". */
+function parseBackendTimestamp(value){
+  if(!value) return null;
+  let text = String(value).trim();
+  if(!text) return null;
+  if(text.indexOf('T') === -1) text = text.replace(' ', 'T');
+  // Only stamp UTC when the backend did not already supply an offset.
+  if(!/[Zz]$|[+-]\d{2}:?\d{2}$/.test(text)) text += 'Z';
+  const d = new Date(text);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/* "Aug 18, 2026 at 4:12 PM" - never a raw ISO string. */
+function formatTimestamp(value){
+  const d = parseBackendTimestamp(value);
+  if(!d) return '—';
+  try{
+    return d.toLocaleString(undefined, {
+      month:'short', day:'numeric', year:'numeric',
+      hour:'numeric', minute:'2-digit'
+    }).replace(', ', ', ').replace(/,([^,]*)$/, ' at$1');
+  }catch(e){
+    return d.toISOString().slice(0,10);
+  }
+}
+
+/* Date only, for compact table cells. */
 function formatDate(iso){
-  if(!iso) return '—';
-  return iso.slice(0,10);
+  const d = parseBackendTimestamp(iso);
+  if(!d) return '—';
+  try{
+    return d.toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'});
+  }catch(e){
+    return String(iso).slice(0,10);
+  }
 }
 
 async function renderCustomers(query){
@@ -427,7 +475,13 @@ async function renderCustomers(query){
         const custName = e.customer ? (e.customer.first_name+' '+e.customer.last_name) : '(no customer info yet)';
         const custEmail = e.customer ? e.customer.email : '';
         const projectName = e.project ? e.project.name : '—';
-        return '<tr><td><div class="cust-name">'+esc(custName)+'</div><div class="cust-sub">'+esc(custEmail)+'</div></td><td>'+esc(projectName)+'</td><td>'+workflowPillHtml(e)+'</td><td>'+formatDate(e.created_at)+'</td><td>'+formatDate(e.updated_at)+'</td><td style="text-align:right;">'+openActionHtml(e)+'</td></tr>';
+        return '<tr>' +
+        '<td data-label="Customer"><div class="cust-name">'+esc(custName)+'</div><div class="cust-sub">'+esc(custEmail)+'</div></td>' +
+        '<td data-label="Enrollment"><span class="mono">'+esc(e.enrollment_code || '—')+'</span></td>' +
+        '<td data-label="Status">'+workflowPillHtml(e)+'</td>' +
+        '<td data-label="Added">'+formatTimestamp(e.created_at)+'</td>' +
+        '<td data-label="Last modified">'+formatTimestamp(e.updated_at)+'</td>' +
+        '<td data-label="" style="text-align:right;">'+openActionHtml(e)+'</td></tr>';
       }).join('')
     : '<tr><td colspan="6" style="text-align:center;color:var(--ink-faint);padding:26px;">No enrollments match that search.</td></tr>';
 }
@@ -440,6 +494,13 @@ function resetWizardState(){
   state.lmi = {mode:'doc',docType:'',fileName:'',documentId:null,householdSize:'',incomeBelow:null,nameOnDocument:'',relationship:'self',documentFormat:''};
   billRuntimeFile = null; billUploadPromise = null; billUploadGeneration += 1;
   lmiRuntimeFile = null; lmiUploadPromise = null; lmiUploadGeneration += 1;
+  // RC-6: DocSets holds the MULTI-FILE upload state (document_set id, the file
+  // list, and the rendered filenames). It was never cleared, so the previous
+  // enrollment's filename stayed on screen for the next one - looking like a
+  // bill had been uploaded when none had. state.bill was already reset here,
+  // which is why Continue still correctly blocked: the visible list and the
+  // real state had diverged.
+  docSetResetAll();
   perchContracts = [];
   perchContext = freshPerchContext();
   currentCustomerId = null;
@@ -466,6 +527,12 @@ function clearWizardForms(){
   document.getElementById('bill-amount').value='';
   document.getElementById('bill-file-chip').innerHTML='';
   document.getElementById('bill-file').value='';
+  // The DocSets containers are separate elements from the legacy chip and must
+  // be emptied too, or a stale filename survives visually.
+  ['bill-fileset','lmi-fileset'].forEach(function(id){
+    const el = document.getElementById(id); if(el) el.innerHTML = '';
+  });
+  const lf = document.getElementById('lmi-file'); if(lf) lf.value = '';
   document.getElementById('billing-same').checked=true;
   document.getElementById('billing-address-fields').style.display='none';
   document.getElementById('pod-id-field').style.display='none';
@@ -551,17 +618,20 @@ async function startWizardFresh(){
   goStep(1);
   renderWorkflowLoading('Starting a new enrollment...');
 
-  // A Dalton Enrollment ID is issued before any Perch call. Perch's enrollment
-  // token is session-scoped and expires in 1 hour, so it can never be the
-  // durable key for an enrollment.
+  // NOTHING IS PERSISTED HERE. Opening the wizard used to POST /drafts
+  // immediately, so a rep who opened the screen and pressed Back left a blank
+  // enrollment on every dashboard. The Dalton Enrollment ID is still issued
+  // before any Perch call - just at the FIRST REAL SUBMISSION (email + ZIP +
+  // utility) in submitCapacity(), not at screen-open.
+  currentDraft = null;
   try {
     await loadUtilityRules();
-    currentDraft = await apiFetch('/api/perch/drafts', {method: 'POST', body: JSON.stringify({})});
+    const body = await apiFetch('/api/perch/workflow/new');
+    currentWorkflow = {step: body.step};
+    renderWorkflowStep(currentWorkflow);
   } catch(err){
     renderWorkflowError('Could not start a new enrollment: ' + err.message);
-    return;
   }
-  await loadWorkflow();
 }
 
 async function loadWorkflow(){
@@ -771,17 +841,28 @@ async function submitCapacity(){
 
   const btn = document.getElementById('wf-primary');
   btn.disabled = true;
-  btn.textContent = 'Checking with Perch...';
+  btn.textContent = 'Checking availability…';
 
   let body;
   try {
-    body = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/capacity', {
-      method: 'POST',
-      // email is sent because Perch requires it on POST /token, which the
-      // backend issues before the capacity call.
-      body: JSON.stringify({zip_code: values.zip_code, utility_name: values.utility_name,
-                            email: values.email}),
-    });
+    // FIRST REAL ACTION. The backend creates the enrollment here - not when the
+    // wizard opened - so abandoning an untouched screen persists nothing.
+    // Passing an existing enrollment_id makes a retry REUSE that row instead of
+    // creating a duplicate.
+    const payload = {zip_code: values.zip_code, utility_name: values.utility_name,
+                     // email is required by Perch on POST /token, which the
+                     // backend issues before the capacity call.
+                     email: values.email};
+    if(currentDraft && currentDraft.enrollment_id){
+      payload.enrollment_id = currentDraft.enrollment_id;
+    }
+    body = await apiFetch('/api/perch/enrollments/capacity',
+                          {method: 'POST', body: JSON.stringify(payload)});
+    // Adopt the enrollment the backend created (or confirmed) on this call.
+    if(body.enrollment_id && (!currentDraft || !currentDraft.enrollment_id)){
+      currentDraft = {enrollment_id: body.enrollment_id,
+                      enrollment_code: body.enrollment_code || null};
+    }
   } catch(err){
     btn.disabled = false;
     btn.textContent = step.primary_action.label;
@@ -890,6 +971,15 @@ async function openEnrollment(enrollmentId){
   perchContext.nextStepKey = e.workflow_step_key || null;
 
   currentEnrollmentDetail = e;   // persisted workflow_last_response for resume
+
+  // Hydrate the branch from the PERSISTED choice so a resumed LMI enrollment
+  // shows 5 steps with Eligibility, and a resumed Residential one shows 4 and
+  // skips it. Falls back to null (full sequence) when nothing was chosen, which
+  // is the safe default - nothing is skipped on a guess.
+  selectedProgram = e.selected_customer_type
+    ? {customer_type: e.selected_customer_type,
+       lmi_required: e.selected_customer_type === 'LMI'}
+    : null;
   const key = e.workflow_step_key || 'service_area';
   const terminal = e.workflow_is_terminal === true;
   const blocked  = e.workflow_is_blocked === true;
@@ -1114,6 +1204,15 @@ function quadPoint(t){
 function goStep(n){
   document.querySelectorAll('.wizard-step').forEach(s=>s.classList.remove('active'));
   document.getElementById(stepIds[n]).classList.add('active');
+
+  // Returning to the availability step must RESTORE the program cards. They
+  // were previously loaded only once, right after the capacity submission, so
+  // navigating back left the step blank and the rep unable to see or change
+  // their choice. loadProgramOptions() re-reads the backend, which also
+  // re-hydrates the persisted selection.
+  if(n === 1 && currentDraft && currentDraft.enrollment_id){
+    loadProgramOptions();
+  }
   const seq = activeSteps();
   const t = seq.length > 1 ? stepPosition(n)/(seq.length-1) : 0;
   const pt = quadPoint(t);
@@ -1379,6 +1478,8 @@ async function submitContact(){
       // customer_type is the rep's SELECTION. The backend re-validates it against
       // this enrollment's persisted capacity response, so this is a request, not
       // an instruction - an unoffered program is rejected server-side.
+      // The backend also reads the PERSISTED selection, so this is belt and
+      // braces rather than the only source of truth.
       const enrollBody = {document_id: state.bill.documentId};
       if(selectedProgram && selectedProgram.customer_type){
         enrollBody.customer_type = selectedProgram.customer_type;
@@ -1525,12 +1626,14 @@ async function handleBillUpload(files){
     if(generation !== billUploadGeneration) return;
     const parsed = parseUtilityBill(text);
     renderPrefillScope('utility_bill');
-    if(parsed.first) document.getElementById('c-first').value = parsed.first;
-    if(parsed.last) document.getElementById('c-last').value = parsed.last;
-    if(parsed.acct) document.getElementById('c-acct').value = parsed.acct;
-    if(parsed.street) document.getElementById('a-street').value = parsed.street;
-    if(parsed.city) document.getElementById('a-city').value = parsed.city;
-    if(parsed.zip) document.getElementById('a-zip').value = parsed.zip;
+    // Same assignments as before; markOcrFilled only flashes the field so the
+    // rep can SEE what the bill supplied. Values stay fully editable.
+    if(parsed.first){ document.getElementById('c-first').value = parsed.first; markOcrFilled('c-first'); }
+    if(parsed.last){ document.getElementById('c-last').value = parsed.last; markOcrFilled('c-last'); }
+    if(parsed.acct){ document.getElementById('c-acct').value = parsed.acct; markOcrFilled('c-acct'); }
+    if(parsed.street){ document.getElementById('a-street').value = parsed.street; markOcrFilled('a-street'); }
+    if(parsed.city){ document.getElementById('a-city').value = parsed.city; markOcrFilled('a-city'); }
+    if(parsed.zip){ document.getElementById('a-zip').value = parsed.zip; markOcrFilled('a-zip'); }
     if(parsed.amount != null) document.getElementById('bill-amount').value = amountToBracket(parsed.amount);
     syncBillingFromService();
     c.innerHTML = '<div class="ocr-panel"><div class="ocr-head">Pulled from the bill</div>' +
@@ -2069,6 +2172,9 @@ function agrSummaryFromEnrollment(e){
     savings: formatSavings(e.program_savings),
     programType: formatProgramType(e.program_savings),
     enrollmentCode: e.enrollment_code || '',
+    // Real persisted values, formatted for the viewer's timezone.
+    createdAt: formatTimestamp(e.created_at),
+    updatedAt: formatTimestamp(e.updated_at),
   };
 }
 
@@ -2177,6 +2283,8 @@ function renderAgreementCard(){
     ['Service address', s.serviceAddress],
     ['Account number', s.accountNumber],
     ['Enrollment ID', s.enrollmentCode],
+    ['Created', s.createdAt],
+    ['Last modified', s.updatedAt],
   ].filter(function(r){ return r[1]; });
 
   let html = '<div class="card">';
@@ -2414,6 +2522,16 @@ function docSetReset(category){
   renderDocSetList(category);
 }
 
+/* Clear EVERY document-set category. Iterating the object means a category
+   added later is reset automatically rather than being silently forgotten -
+   which is exactly how the stale-filename bug happened. */
+function docSetResetAll(){
+  Object.keys(DocSets).forEach(function(cat){
+    DocSets[cat] = {id: null, files: []};
+    renderDocSetList(cat);
+  });
+}
+
 function docSetAddFiles(category, fileList){
   const set = DocSets[category];
   if(!set) return [];
@@ -2577,7 +2695,7 @@ async function loadReps(){
   const err = document.getElementById('rep-list-error');
   if(err) err.style.display = 'none';
   if(!host) return;
-  host.innerHTML = '<p class="helper">Loading reps…</p>';
+  host.innerHTML = ceeLoading('Loading reps');
   let reps;
   try{
     reps = await apiFetch('/api/admin/reps');
@@ -2596,15 +2714,15 @@ async function loadReps(){
     reps.map(function(r){
       const active = r.is_active === 1;
       return '<tr>' +
-        '<td>' + esc(r.full_name) + '</td>' +
-        '<td>' + esc(r.email) + '</td>' +
-        '<td>' + esc(r.rep_code || '') + '</td>' +
-        '<td>' + esc(r.phone || '—') + '</td>' +
-        '<td>' + esc(r.team || '—') + '</td>' +
-        '<td>' + r.enrollment_count + '</td>' +
-        '<td><span class="status-pill ' + (active ? 'status-verified' : 'status-danger') + '">' +
+        '<td data-label="Name">' + esc(r.full_name) + '</td>' +
+        '<td data-label="Email">' + esc(r.email) + '</td>' +
+        '<td data-label="Rep code"><span class="mono">' + esc(r.rep_code || '') + '</span></td>' +
+        '<td data-label="Phone">' + esc(r.phone || '—') + '</td>' +
+        '<td data-label="Team">' + esc(r.team || '—') + '</td>' +
+        '<td data-label="Enrollments">' + r.enrollment_count + '</td>' +
+        '<td data-label="Status"><span class="status-pill ' + (active ? 'status-verified' : 'status-danger') + '">' +
           (active ? 'Active' : 'Inactive') + '</span></td>' +
-        '<td style="text-align:right;white-space:nowrap;">' +
+        '<td data-label="" style="text-align:right;white-space:nowrap;">' +
           '<button class="btn btn-ghost btn-sm" onclick="editRep(' + r.user_id + ')">Edit</button> ' +
           '<button class="btn btn-ghost btn-sm" onclick="resetRepPassword(' + r.user_id + ')">Reset password</button> ' +
           '<button class="btn btn-ghost btn-sm" onclick="toggleRep(' + r.user_id + ',' + active + ')">' +
@@ -2746,7 +2864,7 @@ function programHostEl(){ return document.getElementById('program-options'); }
 async function loadProgramOptions(){
   const host = programHostEl();
   if(!host || !currentDraft) return null;
-  host.innerHTML = '<p class="helper">Checking available programs…</p>';
+  host.innerHTML = ceeLoading('Checking available programs');
   let body;
   try{
     body = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/programs');
@@ -2757,15 +2875,25 @@ async function loadProgramOptions(){
   }
   availablePrograms = body.available_programs || [];
 
-  // Exactly one option is unambiguous - the backend selects it automatically at
-  // enroll time, so preselect it here purely so the rep can SEE what they get.
-  if(availablePrograms.length === 1){
+  // HYDRATE FROM THE BACKEND. The persisted choice is authoritative, so the
+  // selection survives leaving the screen, navigating back, and reloading -
+  // none of which a JS variable can do.
+  const persisted = body.selected_customer_type || null;
+  if(persisted){
+    selectedProgram = availablePrograms.filter(function(p){
+      return p.customer_type === persisted; })[0] || null;
+  } else if(availablePrograms.length === 1){
+    // Exactly one option is unambiguous - the backend selects it at enroll time
+    // anyway, so preselect it here purely so the rep can SEE what they get.
     selectedProgram = availablePrograms[0];
   } else if(selectedProgram){
-    // Drop a stale selection that is not in the new response.
+    // Drop a stale selection that is no longer offered.
     const still = availablePrograms.filter(function(p){
       return p.customer_type === selectedProgram.customer_type; })[0];
     selectedProgram = still || null;
+  } else {
+    // Two programs and no persisted choice: NOTHING is auto-selected.
+    selectedProgram = null;
   }
   renderProgramOptions(body);
   return body;
@@ -2824,11 +2952,38 @@ function renderProgramOptions(body){
   updateProgramContinueState();
 }
 
-function selectProgram(customerType){
+async function selectProgram(customerType){
   const match = availablePrograms.filter(function(p){
     return p.customer_type === customerType; })[0];
   if(!match) return;             // never select something not offered
+
+  // Optimistic paint so the card responds instantly...
   selectedProgram = match;
+  renderProgramOptions({capacity_checked: true, selected_customer_type: customerType});
+
+  // ...then PERSIST. The server re-validates against this enrollment's capacity
+  // response, so this is a request rather than an instruction.
+  if(!currentDraft || !currentDraft.enrollment_id) return;
+  try{
+    const saved = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/program',
+                                 {method:'POST', body: JSON.stringify({customer_type: customerType})});
+    const confirmed = availablePrograms.filter(function(p){
+      return p.customer_type === saved.selected_customer_type; })[0] || null;
+    selectedProgram = confirmed;
+  }catch(err){
+    // Roll the paint back rather than leave the rep believing a rejected
+    // choice was saved.
+    selectedProgram = null;
+    const host = programHostEl();
+    if(host){
+      renderProgramOptions({capacity_checked: true});
+      const note = document.createElement('p');
+      note.className = 'helper';
+      note.style.color = 'var(--danger)';
+      note.textContent = err.message || 'That program could not be selected.';
+      host.appendChild(note);
+    }
+  }
   renderProgramOptions({capacity_checked: true});
 }
 
@@ -2953,4 +3108,31 @@ function editOwnProfile(){
       if(currentUser) currentUser.full_name = body.full_name;
       syncAdminNav();
     });
+}
+
+
+/* Loading affordances.
+   A spinner tells the rep the system is working; a bare sentence does not.
+   Both respect prefers-reduced-motion via the CSS token overrides. */
+function ceeLoading(message){
+  return '<div class="cee-loading"><span class="cee-spinner" aria-hidden="true"></span>' +
+         '<span>' + esc(message || 'Loading') + '…</span></div>';
+}
+
+function ceeSkeletonRows(count){
+  let out = '';
+  for(let i = 0; i < (count || 3); i++){
+    out += '<div class="cee-skel" style="height:52px;margin-bottom:10px;"></div>';
+  }
+  return out;
+}
+
+/* Briefly highlights a field the OCR just populated, then fades out. The value
+   stays fully editable - this marks provenance, it does not lock anything. */
+function markOcrFilled(id){
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.classList.remove('ocr-filled');
+  void el.offsetWidth;          // restart the animation
+  el.classList.add('ocr-filled');
 }

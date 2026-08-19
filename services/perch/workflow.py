@@ -75,6 +75,12 @@ def set_state(enrollment_id, step_key, next_step_url=None, recognized=True, last
 # Each returns the contract the frontend renderer consumes.
 
 def _step_service_area(enrollment, last_check):
+    # enrollment is None when the wizard is opened but nothing has been entered
+    # yet. No enrollment row exists at that point ON PURPOSE - opening the
+    # screen must not persist anything - so the step renders with empty
+    # prefills. Every use below is a .get() lookup, so an empty dict is a
+    # complete substitute.
+    enrollment = enrollment or {}
     return {
         "key": "service_area",
         "eyebrow": "New enrollment",
@@ -170,17 +176,52 @@ def _pct(v):
 
 
 def _capacity_notices(d):
+    """Copy that matches the ACTUAL capacity response.
+
+    The previous version fired on lmi_capacity_available is False and said
+    "Residential capacity may still be available" WITHOUT checking whether
+    residential was available - so a screen showing Residential: Not available
+    still claimed it might be. Every branch below is now derived from the flags
+    that were really returned.
+
+    Standard residential is available when EITHER residential_capacity_available
+    or small_commercial_capacity_available is set: Perch confirmed that small
+    CS = resi in this NY funnel.
+    """
+    d = d or {}
     notices = []
-    if d.get("proof_documents_required"):
+
+    residential = bool(d.get("residential_capacity_available")
+                       or d.get("small_commercial_capacity_available"))
+    lmi = bool(d.get("lmi_capacity_available"))
+
+    # Only mention proof documents when an LMI program is actually on offer -
+    # otherwise it warns about a branch this enrollment cannot take.
+    if lmi and d.get("proof_documents_required"):
         notices.append({
             "tone": "warn",
-            "text": "This project may require proof documents. Perch confirms the required branch after customer enrollment.",
+            "text": "The income-qualified program requires proof of participation. "
+                    "Perch confirms the exact documents after the customer is enrolled.",
         })
-    if d.get("lmi_capacity_available") is False:
+
+    if residential and lmi:
+        # Both available: the program cards carry the detail, so say nothing.
+        pass
+    elif residential and not lmi:
         notices.append({
             "tone": "info",
-            "text": "No income-qualified capacity here. Residential capacity may still be "
-                    "available at the standard savings rate.",
+            "text": "Standard residential capacity is available here. The "
+                    "income-qualified program is not available at this location.",
+        })
+    elif lmi and not residential:
+        notices.append({
+            "tone": "info",
+            "text": "Only the income-qualified program is available at this location.",
+        })
+    else:
+        notices.append({
+            "tone": "warn",
+            "text": "Perch returned no available program for this ZIP and utility.",
         })
     return notices
 

@@ -314,13 +314,17 @@ def main():
     check("when BOTH are available, LMI is NO LONGER chosen automatically",
           not auto_selected)
 
-    for bad in ({"small_commercial_capacity_available": True}, {}):
-        try:
-            choose_customer_type(bad)
-            refused = False
-        except PerchValidationError:
-            refused = True
-        check(f"unsupported capacity {bad} is refused, never guessed", refused)
+    # small_commercial is NO LONGER unsupported - Perch confirmed small cs = resi
+    # for this NY funnel, so it resolves to Residential.
+    check("small-commercial capacity resolves to Residential",
+          choose_customer_type({"small_commercial_capacity_available": True})[0]
+          == "Residential")
+    try:
+        choose_customer_type({})
+        refused = False
+    except PerchValidationError:
+        refused = True
+    check("genuinely empty capacity is still refused, never guessed", refused)
 
     # Full residential run against the residential-only fixture (ZIP prefix 120).
     res_eid = c.post("/api/perch/drafts", headers=rep).get_json()["enrollment_id"]
@@ -360,6 +364,15 @@ def main():
         if "[FAIL]" in _l:
             print("      " + _l.strip())
     check("B1 runtime behaviour verified", _r.returncode == 0)
+
+    section("B2 — design system + responsive (runtime)")
+    _h2 = os.path.join(ROOT, "test", "b2_design_harness.js")
+    check("B2 harness exists", os.path.exists(_h2))
+    _r2 = _sp.run(["node", _h2], capture_output=True, text=True, timeout=120)
+    for _l in (_r2.stdout + _r2.stderr).splitlines():
+        if "[FAIL]" in _l:
+            print("      " + _l.strip())
+    check("B2 design system verified, no functional loss", _r2.returncode == 0)
 
     print(f"\n{'='*72}\nPHASE A - ALL CHECKS PASSED\n{'='*72}")
 

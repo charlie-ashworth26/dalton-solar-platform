@@ -1,0 +1,13 @@
+-- Persist the rep's explicit program choice.
+--
+-- WHY A MIGRATION WAS NECESSARY (no existing field fits):
+--   * perch_workflow_state.last_response_json is overwritten by every later
+--     step, so a selection stored there is lost on the next set_state.
+--   * enrollments.lmi_path is a different concept - HOW an LMI customer proves
+--     eligibility (self-attestation vs proof docs), not WHICH program was
+--     chosen. Reusing it would conflate the two and break LMI logic.
+--
+-- Nullable with no backfill: existing enrollments never made an explicit
+-- choice, and NULL correctly means "not chosen yet". Single-program locations
+-- still resolve automatically, so nothing pre-existing needs a value.
+ALTER TABLE enrollments ADD COLUMN selected_customer_type TEXT;

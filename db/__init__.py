@@ -62,6 +62,24 @@ def close_db(exception=None):
 def init_db(reset=False):
     """Create the database from schema_sqlite.sql, then apply any pending
     migrations from db/migrations/. If reset=True, drop and recreate first."""
+    # RELEASE THIS THREAD'S CONNECTION FIRST.
+    #
+    # get_db() caches a connection on threading.local. Flask closes it via
+    # teardown_appcontext after every request, so a SERVING process never holds
+    # one open. But any query made OUTSIDE an app context - which is how the
+    # test suites read the database directly - creates a connection that no
+    # teardown ever closes.
+    #
+    # On POSIX an open handle does not block unlink, so this was invisible.
+    # On Windows os.remove() then fails with WinError 32 (file in use), and WAL
+    # makes it worse by holding -wal and -shm open as well. The first suite to
+    # leave a bare-call connection open broke every later suite that resets.
+    #
+    # Closing here is the correct lifecycle, not a workaround: after a reset the
+    # cached connection points at a DELETED file, so continuing to use it would
+    # be a bug in its own right.
+    close_db()
+
     if reset:
         # WAL mode keeps committed pages in a SIDECAR file. Deleting only the
         # .db leaves dalton_solar.db-wal behind, and SQLite REPLAYS it on the

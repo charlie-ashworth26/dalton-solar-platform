@@ -254,10 +254,30 @@ def available_programs(details):
     details = details or {}
     programs = []
 
-    if details.get("residential_capacity_available"):
+    # STANDARD RESIDENTIAL is available when EITHER flag is set.
+    #
+    # Perch Engineering, 2026-08: "For the most part our Resi capacity and our
+    # small cs capacity sign the same forms and are both accepted within the
+    # funnel. For our resi in NY, that's the same as small cs <25kW that is
+    # non-demand." and "yes if you see small cs/resi = resi".
+    #
+    # So in THIS NY residential funnel, small_commercial_capacity_available is
+    # standard residential capacity. Real staging examples: 12401/Central Hudson
+    # and 10901/Orange & Rockland both return residential=false with
+    # small_commercial=true, and both are residential enrollments.
+    #
+    # This is deliberately NARROW. It does NOT add a Small Commercial product:
+    # the rep-facing choices remain Residential and Residential LMI. True
+    # commercial enrollment has a separate Perch channel and is out of scope.
+    residential_available = bool(details.get("residential_capacity_available")
+                                 or details.get("small_commercial_capacity_available"))
+
+    if residential_available:
         programs.append({
             "customer_type": CUSTOMER_TYPE_RESIDENTIAL,
-            # Residential reads ONLY the residential field.
+            # Perch returns residential and commercial savings TOGETHER in one
+            # field, so this is correct for both sources. Never falls back to
+            # the LMI figure.
             "savings_percent": _percent(
                 details.get("savings_percent_for_residential_and_commercial_customers")),
             "lmi_required": False,
@@ -330,10 +350,9 @@ def resolve_customer_type(details, requested=None):
             f"({', '.join(offered)}). Select which one this customer is "
             "enrolling in before continuing.")
 
-    if details.get("small_commercial_capacity_available"):
-        raise PerchValidationError(
-            "This service area currently has only small-commercial capacity. "
-            "The Dalton GUI does not collect the business fields Perch requires yet.")
+    # small_commercial_capacity_available is handled ABOVE as standard
+    # residential, so reaching here means Perch returned no usable capacity at
+    # all for this location.
     raise PerchValidationError(
         "No eligible residential or LMI capacity is available for this enrollment.")
 

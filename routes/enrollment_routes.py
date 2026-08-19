@@ -72,6 +72,10 @@ def _serialize_enrollment(row, requester_role):
         "workflow_last_response": json_or_none(wf["last_response_json"]) if wf else None,
         # Persisted Perch savings for this enrollment, or None. Never computed.
         "program_savings": _program_savings(row["id"]),
+        # The rep's explicit program choice, so a resumed wizard hydrates the
+        # correct branch (Residential skips eligibility) instead of falling back
+        # to the full sequence.
+        "selected_customer_type": d.get("selected_customer_type"),
     }
 
 

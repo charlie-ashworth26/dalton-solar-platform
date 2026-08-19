@@ -120,7 +120,7 @@
       <div class="stat-grid" id="dash-stats"></div>
       <div class="section-title">Recent customers <a onclick="showView('customers')">View all →</a></div>
       <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Name</th><th>Project</th><th>Status</th><th>Last modified</th><th></th></tr></thead>
+        <thead><tr><th>Customer</th><th>Enrollment</th><th>Status</th><th>Last modified</th><th></th></tr></thead>
         <tbody id="dash-recent-body"></tbody>
       </table></div>
     </div>
@@ -194,7 +194,7 @@
         <input class="search-input" placeholder="Search customers…" oninput="renderCustomers(this.value)">
       </div>
       <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Name</th><th>Project</th><th>Status</th><th>Date added</th><th>Last modified</th><th></th></tr></thead>
+        <thead><tr><th>Customer</th><th>Enrollment</th><th>Status</th><th>Added</th><th>Last modified</th><th></th></tr></thead>
         <tbody id="customers-body"></tbody>
       </table></div>
     </div>
@@ -246,7 +246,7 @@
               <div class="field" id="pod-id-field" style="display:none;"><label>Secondary account identifier / POD ID</label><input type="text" class="mono-field" id="c-pod" maxlength="20" oninput="checkBillReady()"><p class="helper" id="pod-rule-help"></p></div>
               <div class="field"><label>Street address</label><input type="text" id="a-street" placeholder="123 Maple Ave" oninput="syncBillingFromService(); checkBillReady()"></div>
               <div class="field"><label>Unit / Apt <span style="font-weight:400;color:var(--ink-faint);">(optional)</span></label><input type="text" id="a-unit" oninput="syncBillingFromService()"></div>
-              <div class="row3">
+              <div class="row3 address-grid">
                 <div class="field"><label>City</label><input type="text" id="a-city" oninput="syncBillingFromService(); checkBillReady()"></div>
                 <div class="field"><label for="a-state">State</label><select id="a-state" onchange="syncBillingFromService(); checkBillReady()"><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY" selected>NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select></div>
                 <div class="field"><label>ZIP</label><input type="text" id="a-zip" class="mono-field" maxlength="5" oninput="syncBillingFromService(); checkBillReady()"></div>
@@ -257,7 +257,7 @@
               <div id="billing-address-fields" style="display:none;">
                 <div class="field"><label>Billing street address</label><input type="text" id="b-street" placeholder="123 Maple Ave" oninput="checkBillReady()"></div>
                 <div class="field"><label>Billing unit / Apt <span style="font-weight:400;color:var(--ink-faint);">(optional)</span></label><input type="text" id="b-unit"></div>
-                <div class="row3">
+                <div class="row3 address-grid">
                   <div class="field"><label>Billing city</label><input type="text" id="b-city" oninput="checkBillReady()"></div>
                   <div class="field"><label for="b-state">State</label><select id="b-state"><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY" selected>NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select></div>
                   <div class="field"><label>Billing ZIP</label><input type="text" id="b-zip" class="mono-field" maxlength="5" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,5); checkBillReady();"></div>
@@ -285,7 +285,7 @@
               <p class="card-eyebrow">New enrollment</p>
               <h2>Contact &amp; login</h2>
               <p class="lead">These aren't on the bill — enter the customer's contact info and set the credentials they'll use to sign in later.</p>
-              <div class="field"><label>Email</label><input type="email" id="c-email" placeholder="name@email.com" readonly style="background:#FBFCFB;color:var(--ink-muted);"><p class="helper">Set during the Perch availability check. Go back to change it.</p></div>
+              <div class="field"><label>Email</label><input type="email" id="c-email" placeholder="name@email.com" readonly style="background:#FBFCFB;color:var(--ink-muted);"><p class="helper">This is the email Perch opened the enrollment session with. To change it, go back to the availability step and re-check &mdash; that re-opens the session with the new address.</p></div>
               <div class="field"><label>Phone number</label><input type="tel" id="c-phone" placeholder="(555) 555-5555"></div>
               <p class="helper" style="margin:-6px 0 14px;">Set login credentials for the customer — they'll use these to sign in and review their agreement.</p>
               <div class="row2">

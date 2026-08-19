@@ -106,3 +106,21 @@ def test_program_selection():
     """Program availability + explicit customer type selection."""
     import test_program_selection as suite
     suite.main()
+
+
+def test_post_b2_followups():
+    """Enrollment lifecycle, small-CS mapping, capacity copy, timestamps."""
+    import test_post_b2_followups as suite
+    suite.main()
+
+
+def test_program_persistence():
+    """Dual-program selection persists across navigation and resume."""
+    import test_program_persistence as suite
+    suite.main()
+
+
+def test_contract_branch_routing():
+    """Persisted program choice governs the Perch enrollment and contracts."""
+    import test_contract_branch_routing as suite
+    suite.main()

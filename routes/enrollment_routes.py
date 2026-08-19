@@ -9,7 +9,7 @@ from auth import require_auth, require_role
 from helpers import mask_account_number, next_enrollment_code, json_or_none, to_json
 from services import audit, status_machine, lmi_validation
 from services.authz import visible_enrollment
-from services.perch import workflow as perch_workflow
+from services.perch import workflow as perch_workflow, utilities
 
 bp = Blueprint("enrollment_routes", __name__, url_prefix="/api/enrollments")
 
@@ -62,6 +62,15 @@ def _serialize_enrollment(row, requester_role):
         "lmi_qualification": dict(lmi) if lmi else None,
         # Rep-facing progress. next_step_url is a Perch endpoint URL, not a
         # presigned document URL, so it is safe to expose.
+        # UTILITY for the dashboard column. enrollments.utility_name persists the
+        # Perch SLUG chosen at Availability, so it survives refresh, Back,
+        # resume, completion and reload. It was persisted all along but never
+        # serialized, which is why the column rendered "—" for every row.
+        # Resolved to the published display name; the slug is a readable
+        # fallback, and a legacy row with no value stays None so the UI can show
+        # "—" honestly rather than inventing one. Never inferred from ZIP or
+        # project.
+        "utility_name": _utility_display(d.get("utility_name")),
         "workflow_step_key": step_key,
         "workflow_step_label": perch_workflow.step_label(step_key) if step_key else None,
         "workflow_is_terminal": perch_workflow.is_terminal(step_key),
@@ -77,6 +86,20 @@ def _serialize_enrollment(row, requester_role):
         # to the full sequence.
         "selected_customer_type": d.get("selected_customer_type"),
     }
+
+
+
+def _utility_display(slug):
+    """Published display name for a persisted utility slug, or None."""
+    if not slug:
+        return None
+    try:
+        row = utilities.by_slug(slug)
+        if row and row["display_name"]:
+            return row["display_name"]
+    except Exception:
+        pass
+    return slug          # readable even if the utility table lacks the row
 
 
 def _program_savings(enrollment_id):
@@ -98,15 +121,30 @@ def _program_savings(enrollment_id):
     if not row:
         return None
 
-    # customer_type is stored on the workflow state written by POST /enroll.
-    customer_type = None
-    state = query_one("SELECT last_response_json FROM perch_workflow_state "
-                      "WHERE enrollment_id = ?", (enrollment_id,))
-    if state and state["last_response_json"]:
-        try:
-            customer_type = (json.loads(state["last_response_json"]) or {}).get("customer_type")
-        except (TypeError, ValueError):
-            customer_type = None
+    # WHICH PROGRAM. enrollments.selected_customer_type is the authoritative
+    # record of the rep's choice (migration 008) and is what /enroll itself
+    # resolves against.
+    #
+    # This previously read customer_type out of
+    # perch_workflow_state.last_response_json. That column holds the LAST step
+    # response, and every step after /enroll overwrites it - the capacity
+    # response, for one, carries no customer_type at all. So by the time the rep
+    # reached Review the lookup returned None, is_lmi went False, and an LMI
+    # enrollment was shown the RESIDENTIAL percentage: 5% instead of 20%.
+    row_sel = query_one("SELECT selected_customer_type FROM enrollments WHERE id = ?",
+                        (enrollment_id,))
+    customer_type = row_sel["selected_customer_type"] if row_sel else None
+
+    if not customer_type:
+        # Fall back to the /enroll response only when no explicit selection was
+        # ever persisted (single-program locations resolve server-side).
+        state = query_one("SELECT last_response_json FROM perch_workflow_state "
+                          "WHERE enrollment_id = ?", (enrollment_id,))
+        if state and state["last_response_json"]:
+            try:
+                customer_type = (json.loads(state["last_response_json"]) or {}).get("customer_type")
+            except (TypeError, ValueError):
+                customer_type = None
 
     is_lmi = str(customer_type or "").strip().upper() == "LMI"
     value = row["savings_percent_lmi"] if is_lmi else row["savings_percent_res_commercial"]

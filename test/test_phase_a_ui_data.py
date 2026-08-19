@@ -374,6 +374,16 @@ def main():
             print("      " + _l.strip())
     check("B2 design system verified, no functional loss", _r2.returncode == 0)
 
+    section("GUI PASS 1 + PASS 2 (runtime)")
+    for _name in ("pass1_structure_harness.js", "pass2_visual_harness.js"):
+        _hp = os.path.join(ROOT, "test", _name)
+        check(f"{_name} exists", os.path.exists(_hp))
+        _hr = _sp.run(["node", _hp], capture_output=True, text=True, timeout=120)
+        for _l in (_hr.stdout + _hr.stderr).splitlines():
+            if "[FAIL]" in _l:
+                print("      " + _l.strip())
+        check(f"{_name} green", _hr.returncode == 0)
+
     print(f"\n{'='*72}\nPHASE A - ALL CHECKS PASSED\n{'='*72}")
 
 

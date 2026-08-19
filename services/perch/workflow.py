@@ -84,9 +84,8 @@ def _step_service_area(enrollment, last_check):
     return {
         "key": "service_area",
         "eyebrow": "New enrollment",
-        "title": "Service area",
-        "subtitle": "Enter the customer's email, ZIP code, and utility. Perch returns the "
-                    "capacity, savings, and document requirements that apply.",
+        "title": "Check availability",
+        "subtitle": "Enter the customer's email, ZIP code and utility to see available savings programs.",
         "fields": [
             {
                 # POST /token requires the customer's email (OpenAPI spec), so it
@@ -99,7 +98,7 @@ def _step_service_area(enrollment, last_check):
                 "required": True,
                 "placeholder": "customer@example.com",
                 "value": enrollment.get("perch_token_email") or "",
-                "help": "Perch requires this to open an enrollment session, and uses it to resume one.",
+                "help": "Used to start and securely resume this enrollment.",
                 "validation": {"pattern": r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
                                 "message": "Enter a valid email address."},
             },
@@ -201,7 +200,7 @@ def _capacity_notices(d):
         notices.append({
             "tone": "warn",
             "text": "The income-qualified program requires proof of participation. "
-                    "Perch confirms the exact documents after the customer is enrolled.",
+                    "The exact documents are confirmed once the customer is enrolled.",
         })
 
     if residential and lmi:
@@ -250,8 +249,7 @@ def _step_capacity_result(enrollment, check):
         "key": "capacity_result",
         "eyebrow": "New enrollment",
         "title": "Capacity confirmed",
-        "subtitle": "These rates are what Perch will enforce at enrollment. They are re-checked "
-                    "before submission rather than cached.",
+        "subtitle": "These rates apply to this enrollment.",
         "fields": [],
         "uploads": [],
         "panels": _capacity_panels(check),

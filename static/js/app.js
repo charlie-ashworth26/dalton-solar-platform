@@ -58,7 +58,11 @@ let projects = []; // populated by loadProjects() from GET /api/projects — see
 let customers = [];
 
 const steps = [1,2,3,4,5];
-const stepIds = {1:'step-project',2:'step-bill',3:'step-contact',4:'step-lmi',5:'step-agreement'};
+// Step 3 (Contact & Login) was MERGED into step 2 (Customer & Bill): it only
+// repeated the email and collected phone + password, which now live in the
+// combined screen. The numbering is preserved so backend workflow keys and the
+// existing branch logic keep mapping to the same screens.
+const stepIds = {1:'step-project',2:'step-bill',4:'step-lmi',5:'step-agreement'};
 
 // ── Branch-aware wizard navigation ───────────────────────────────────────
 // The LMI/eligibility step (4) exists ONLY on the LMI branch. Which branch we
@@ -80,10 +84,13 @@ function programRequiresLmi(){
 
 function activeSteps(){
   const needsLmi = programRequiresLmi();
-  // Until the program is known, keep the full sequence so nothing is skipped
-  // prematurely; step 4 is only dropped once we KNOW it is Residential.
-  if(needsLmi === false) return [1,2,3,5];
-  return [1,2,3,4,5];
+  // Step 3 no longer exists (merged into step 2).
+  //   Residential : Availability -> Customer & Bill -> Agreements
+  //   LMI         : Availability -> Customer & Bill -> Eligibility -> Agreements
+  // Until the program is known, the Eligibility step is KEPT so nothing is
+  // skipped on a guess; it is dropped only once we know it is Residential.
+  if(needsLmi === false) return [1,2,5];
+  return [1,2,4,5];
 }
 
 function stepPosition(n){
@@ -389,13 +396,27 @@ function statusPillHtml(status){
 
 // Perch workflow state is the accurate rep-facing progress. enrollments.status
 // is left alone - it still drives QA/reporting and is not rep-facing here.
+/* STATUS IS THE RESUME CONTROL. There is no separate Open column.
+   It calls openEnrollment(id) - the same backend-authoritative resume path the
+   old Open link used. The visible label is never parsed to decide where to go;
+   the backend workflow state does that. Rendered as a real <button> so it is
+   keyboard reachable and announced correctly. */
 function workflowPillHtml(e){
   const label = e.workflow_step_label || 'In progress';
   const cls = e.workflow_is_terminal ? 'status-verified'
             : (e.workflow_is_blocked ? 'status-danger' : 'status-opp');
-  return '<span class="status-pill '+cls+'">'+esc(label)+'</span>';
+  const verb = e.workflow_is_terminal ? 'View' : 'Resume';
+  return '<button type="button" class="status-pill status-action ' + cls + '" ' +
+         'onclick="openEnrollment(' + e.id + ')" ' +
+         'aria-label="' + esc(verb + ' enrollment ' + (e.enrollment_code || e.id) +
+                              ' — ' + label) + '">' +
+         esc(label) + '<svg class="sp-go" viewBox="0 0 16 16" aria-hidden="true">' +
+         '<path d="M6 3.5L10.5 8L6 12.5" fill="none" stroke="currentColor" ' +
+         'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>';
 }
 
+/* Superseded: the STATUS badge is the resume control now, so no row has a
+   separate Open cell. Retained for any external caller. */
 function openActionHtml(e){
   const label = e.workflow_is_terminal ? 'View' : 'Open';
   return '<span class="resume-link" onclick="openEnrollment('+e.id+')">'+label+'</span>';
@@ -410,12 +431,17 @@ function enrollmentRowHtml(e){
   // The Project column has shown "—" for every enrollment since Perch began
   // assigning projects, so it carries the enrollment code instead - which
   // Phase A asked to surface anyway.
-  return '<tr>' +
-    '<td data-label="Customer"><div class="cust-name">'+esc(custName)+'</div><div class="cust-sub">'+esc(custEmail)+'</div></td>' +
-    '<td data-label="Enrollment"><span class="mono">'+esc(e.enrollment_code || '—')+'</span></td>' +
-    '<td data-label="Status">'+workflowPillHtml(e)+'</td>' +
-    '<td data-label="Last modified">'+formatTimestamp(e.updated_at)+'</td>' +
-    '<td data-label="" style="text-align:right;">'+openActionHtml(e)+'</td></tr>';
+  return '<tr class="crm-row">' +
+    '<td data-label="Customer" class="cell-cust">' +
+      '<span class="cust-name">'+esc(custName)+'</span>' +
+      (custEmail ? '<span class="cust-sub">'+esc(custEmail)+'</span>' : '') +
+    '</td>' +
+    '<td data-label="Enrollment" class="cell-code"><span class="mono">'+esc(e.enrollment_code || '—')+'</span></td>' +
+    '<td data-label="Status" class="cell-status">'+workflowPillHtml(e)+'</td>' +
+    '<td data-label="Utility" class="cell-util">'+esc(e.utility_name || '—')+'</td>' +
+    '<td data-label="Added" class="cell-date">'+formatTimestamp(e.created_at)+'</td>' +
+    '<td data-label="Last modified" class="cell-date">'+formatTimestamp(e.updated_at)+'</td>' +
+  '</tr>';
 }
 
 /* Backend timestamps are SQLite datetime('now') values: UTC, formatted
@@ -475,15 +501,18 @@ async function renderCustomers(query){
         const custName = e.customer ? (e.customer.first_name+' '+e.customer.last_name) : '(no customer info yet)';
         const custEmail = e.customer ? e.customer.email : '';
         const projectName = e.project ? e.project.name : '—';
-        return '<tr>' +
-        '<td data-label="Customer"><div class="cust-name">'+esc(custName)+'</div><div class="cust-sub">'+esc(custEmail)+'</div></td>' +
-        '<td data-label="Enrollment"><span class="mono">'+esc(e.enrollment_code || '—')+'</span></td>' +
-        '<td data-label="Status">'+workflowPillHtml(e)+'</td>' +
-        '<td data-label="Added">'+formatTimestamp(e.created_at)+'</td>' +
-        '<td data-label="Last modified">'+formatTimestamp(e.updated_at)+'</td>' +
-        '<td data-label="" style="text-align:right;">'+openActionHtml(e)+'</td></tr>';
+        // Same CRM shape as the dashboard; status is the resume control, so
+        // there is no separate Open column here either.
+        return '<tr class="crm-row">' +
+        '<td data-label="Customer" class="cell-cust"><span class="cust-name">'+esc(custName)+'</span>' +
+          (custEmail ? '<span class="cust-sub">'+esc(custEmail)+'</span>' : '') + '</td>' +
+        '<td data-label="Enrollment" class="cell-code"><span class="mono">'+esc(e.enrollment_code || '—')+'</span></td>' +
+        '<td data-label="Status" class="cell-status">'+workflowPillHtml(e)+'</td>' +
+        '<td data-label="Utility" class="cell-util">'+esc(e.utility_name || '—')+'</td>' +
+        '<td data-label="Added" class="cell-date">'+formatTimestamp(e.created_at)+'</td>' +
+        '<td data-label="Last modified" class="cell-date">'+formatTimestamp(e.updated_at)+'</td></tr>';
       }).join('')
-    : '<tr><td colspan="6" style="text-align:center;color:var(--ink-faint);padding:26px;">No enrollments match that search.</td></tr>';
+    : '<tr><td colspan="6" class="crm-empty">No enrollments match that search.</td></tr>';
 }
 
 function resetWizardState(){
@@ -524,7 +553,6 @@ function resetWizardState(){
 }
 function clearWizardForms(){
   ['c-first','c-last','c-email','c-phone','c-acct','c-pod','c-pass','c-pass-confirm','a-street','a-unit','a-city','a-zip','b-street','b-unit','b-city','b-zip','lmi-name-on-doc'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
-  document.getElementById('bill-amount').value='';
   document.getElementById('bill-file-chip').innerHTML='';
   document.getElementById('bill-file').value='';
   // The DocSets containers are separate elements from the legacy chip and must
@@ -597,7 +625,7 @@ function freshPerchContext(){
   return {email:'', capacityZip:'', utilitySlug:'', utilityDisplay:'', projectDetails:null,
           nextStepKey:null, enrollmentSubmitted:false, proofSubmitted:false, contractsGenerated:false,
           acceptanceEnabled:false, acceptanceSubmitted:false, acceptanceInFlight:false,
-          agreementBackStep:3};
+          agreementBackStep:2};
 }
 let perchContext = freshPerchContext();
 
@@ -731,9 +759,16 @@ function renderWorkflowStep(wf){
     : '';
 
   const fields = (step.fields||[]).map(renderField).join('');
-  // Program options render below the availability fields once capacity returns.
-  const programSlot = (step.key === 'capacity_result' || step.key === 'service_area')
-    ? '<div id="program-options" class="prog-wrap"></div>' : '';
+  // LIVE BUG FIX. This used to inject a SECOND element with id="program-options"
+  // into the step-1 workflow root. step-project precedes step-bill in the
+  // document, so document.getElementById('program-options') returned THAT one -
+  // sitting inside a hidden .wizard-step. Every card rendered into an invisible
+  // container while the real one on Customer & Bill stayed empty, which is
+  // exactly the "heading with nothing under it" seen in the browser.
+  //
+  // The slot belonged to the pre-merge layout, when capacity_result was its own
+  // screen. Customer & Bill now owns the only #program-options.
+  const programSlot = '';
   const panels = (step.panels||[]).map(renderPanel).join('');
 
   const pa = step.primary_action;
@@ -772,11 +807,11 @@ function renderWorkflowStep(wf){
 // presentational only - the authoritative sequence is Perch's next_step URLs.
 function applyProgressHint(progress){
   if(!progress) return;
-  const wrap = document.getElementById('step-labels');
-  if(!wrap) return;
-  wrap.innerHTML = progress.map(p =>
-    '<div class="step-label ' + (p.state === 'done' ? 'done' : (p.state === 'current' ? 'now' : '')) + '">' +
-    esc(p.label) + '</div>').join('');
+  // The backend progress hint is presentational only. The stepper is now
+  // rendered from activeSteps() - the authoritative branch - so this hint is
+  // deliberately not drawn; drawing it would let a backend hint contradict the
+  // branch the rep is actually on.
+  return;
 }
 
 /* ---------- validation driven by the descriptor, not hardcoded ---------- */
@@ -793,7 +828,10 @@ function collectAndValidate(step){
 
     let msg = null;
     if(f.required && !val){
-      msg = (f.validation && f.validation.message) || (f.label + ' is required.');
+      // An EMPTY required field is missing, not malformed. This previously
+      // reused f.validation.message, so a blank ZIP reported "ZIP code must be
+      // exactly 5 digits" - which reads as a rejected valid ZIP.
+      msg = (f.label || 'This field') + ' is required.';
     } else if(val && f.validation && f.validation.pattern){
       if(!(new RegExp(f.validation.pattern)).test(val)){
         msg = f.validation.message || ('That ' + f.label + ' does not look right.');
@@ -840,6 +878,14 @@ async function submitCapacity(){
   if(error) return;
 
   const btn = document.getElementById('wf-primary');
+  const restoreBtn = () => {
+    // Always restore, on EVERY exit path. Previously this happened only in the
+    // catch block, so a non-error early return left the control latched at
+    // "Checking availability…" and disabled - visible after navigating Back.
+    if(!btn) return;
+    btn.disabled = false;
+    btn.textContent = (step.primary_action && step.primary_action.label) || 'Check availability';
+  };
   btn.disabled = true;
   btn.textContent = 'Checking availability…';
 
@@ -864,8 +910,7 @@ async function submitCapacity(){
                       enrollment_code: body.enrollment_code || null};
     }
   } catch(err){
-    btn.disabled = false;
-    btn.textContent = step.primary_action.label;
+    restoreBtn();
     formErr.textContent = err.message;
     formErr.style.display = 'block';
     return;
@@ -879,15 +924,28 @@ async function submitCapacity(){
   state.customer.email = values.email;
   state.project.utility = perchContext.utilityDisplay;
   currentWorkflow = body.workflow;
-  renderWorkflowStep(currentWorkflow);
-  // Capacity succeeded, so ask the backend which programs it ACTUALLY returned.
-  // Never derived from project_details in JS.
-  await loadProgramOptions();
+
+  // BUG 1 FIX. This previously rendered the backend's capacity_result descriptor
+  // into the step-1 workflow root - which IS the standalone "Capacity confirmed"
+  // page. The live path showed it while the resume path
+  // (WORKFLOW_STEP_TO_WIZARD) went to Customer & Bill: two destinations for one
+  // state. The capacity LOOKUP, its validation and the returned data are
+  // untouched; we consume the result instead of rendering it as a screen.
+  const resolvedKey = ((body.workflow || {}).step || {}).key || null;
+  if(resolvedKey === 'no_capacity'){
+    // A genuine dead end - still rendered on step 1.
+    restoreBtn();
+    renderWorkflowStep(currentWorkflow);
+    return;
+  }
+  restoreBtn();                 // step 1 is reusable if the rep navigates Back
+  await loadProgramOptions();   // feeds the cards shown at the top of step 2
+  goStep(2);                    // straight into Customer & Bill
 }
 
 function advanceFromCapacity(){
   if(!currentDraft || !perchContext.email || perchContext.nextStepKey !== 'enroll') return;
-  buildStepLabels();
+  // buildStepLabels() belonged to the removed arc; goStep() renders the stepper.
   configureBillUtilityRules();
   goStep(2);
 }
@@ -915,13 +973,19 @@ async function startWizardForProject(projId){
    a new Perch session, and issues no Perch API call until the rep does something
    that actually needs Perch. All state comes from what Dalton already persisted. */
 
+// Backend workflow key -> wizard screen. Step 3 (Contact & Login) was merged
+// into step 2, so the keys that used to resume there now resume on the combined
+// Customer & Bill screen. capacity_result also resolves to step 2: the capacity
+// LOOKUP is unchanged, but its result is now context at the top of that screen
+// rather than a page of its own.
 const WORKFLOW_STEP_TO_WIZARD = {
-  service_area: 1, capacity_result: 1, no_capacity: 1,
-  enroll: 3,                    // customer/contact details
+  service_area: 1, no_capacity: 1,
+  capacity_result: 2,           // result shown as context on Customer & Bill
+  enroll: 2,                    // customer + contact details (merged screen)
   proof_docs: 4, self_attestation: 4, self_attestation_accept: 4,
   contracts: 5, contracts_review: 5, contracts_accept: 5,
   status: 5, unknown_next_step: 5,
-  enroll_outcome_uncertain: 3,
+  enroll_outcome_uncertain: 2,
   contracts_accepted: 5, contracts_accept_uncertain: 5,
 };
 
@@ -972,6 +1036,12 @@ async function openEnrollment(enrollmentId){
 
   currentEnrollmentDetail = e;   // persisted workflow_last_response for resume
 
+  // RESTORE THE PERSISTED BILL. The document record survives on the server, but
+  // nothing rehydrated state.bill, so a resumed enrollment looked as though the
+  // upload had vanished and reps re-uploaded a bill Dalton already had.
+  // Represent what exists; never fabricate a file object.
+  rehydrateDocumentsFromDetail(e);
+
   // Hydrate the branch from the PERSISTED choice so a resumed LMI enrollment
   // shows 5 steps with Eligibility, and a resumed Residential one shows 4 and
   // skips it. Falls back to null (full sequence) when nothing was chosen, which
@@ -985,7 +1055,15 @@ async function openEnrollment(enrollmentId){
   const blocked  = e.workflow_is_blocked === true;
 
   showView('wizard');
-  goStep(WORKFLOW_STEP_TO_WIZARD[key] || 1);
+  // The backend workflow may still sit on an LMI step from before the rep
+  // switched programs. The PERSISTED selection is authoritative for the branch,
+  // so a Residential enrollment never resumes into Eligibility - it returns to
+  // Customer & Bill, which is the correct next editable stage for it.
+  let target = WORKFLOW_STEP_TO_WIZARD[key] || 1;
+  if(activeSteps().indexOf(target) === -1){
+    target = (selectedProgram && !programRequiresLmi()) ? 2 : (activeSteps()[0] || 1);
+  }
+  goStep(target);
   renderResumeBanner(e, key, terminal, blocked);
 
   // RC-1: straight-through created perchContracts + acceptanceEnabled in memory
@@ -1155,7 +1233,7 @@ function renderResumeBanner(e, key, terminal, blocked){
 // because nothing re-enabled them. readOnlyLocked lets resetWizardState() undo
 // it deterministically.
 const READ_ONLY_LOCK_IDS = [
-  'btn-project-next', 'btn-bill-next', 'btn-contact-next', 'btn-lmi-next',
+  'btn-project-next', 'btn-bill-next', 'btn-lmi-next',   // btn-contact-next removed with the merge
   // Shared agreement component controls.
   'agr-agree-btn', 'agr-ack-check', 'agr-open-btn',
 ];
@@ -1183,27 +1261,56 @@ function lockEnrollmentReadOnly(blocked){
 
 function exitWizard(){ showView('dashboard'); }
 
+/* Back from Eligibility.
+
+   The button used to call goStep(3) - the Contact & Login step REMOVED in the
+   merge. stepIds[3] is undefined, so getElementById(undefined) returned null
+   and .classList.add() threw AFTER every .wizard-step had already had 'active'
+   removed. The result was a blank page, and because nothing was persisted the
+   enrollment resumed to Eligibility again: the trap.
+
+   This navigates via the ACTIVE sequence, so it lands on Customer & Bill with
+   all state intact. */
+function backFromLmi(){
+  goStep(prevStepBefore(4) || 2);
+}
+
 function backFromCustomer(){
   if(currentWorkflow){
     goStep(1);
     renderWorkflowStep(currentWorkflow);
+    // renderWorkflowStep rebuilds the inputs EMPTY from the step descriptor, so
+    // the rep's email/ZIP/utility vanished on Back and an empty ZIP then read as
+    // malformed. Restore what was actually submitted.
+    rehydrateAvailability();
   } else { exitWizard(); }
 }
 
-function buildStepLabels(){
-  const wrap = document.getElementById('step-labels');
-  wrap.innerHTML = '';
-  stepLabels.forEach(l=>{ const s=document.createElement('div'); s.className='step-label'; s.textContent=l; wrap.appendChild(s); });
+/* Restore the Availability fields from saved enrollment state. */
+function rehydrateAvailability(){
+  const put = (name, value) => {
+    const el = document.getElementById('wf-' + name);
+    if(el && value != null && value !== '') el.value = value;
+  };
+  put('email', state.customer.email || perchContext.email);
+  put('zip_code', perchContext.capacityZip || state.address.zip);
+  put('utility_name', perchContext.utilitySlug);
 }
-function quadPoint(t){
-  const p0={x:20,y:66}, p1={x:200,y:4}, p2={x:380,y:66};
-  const x = (1-t)*(1-t)*p0.x + 2*(1-t)*t*p1.x + t*t*p2.x;
-  const y = (1-t)*(1-t)*p0.y + 2*(1-t)*t*p1.y + t*t*p2.y;
-  return {x,y};
-}
+
+let currentStep = 1;
 function goStep(n){
+  // Defensive: an unknown step must never blank the wizard. Removing 'active'
+  // from every screen and then throwing is precisely how the Eligibility Back
+  // button produced an empty page.
+  const targetId = stepIds[n];
+  if(!targetId || !document.getElementById(targetId)){
+    const fallback = activeSteps()[0] || 1;
+    if(n === fallback) return;
+    return goStep(fallback);
+  }
+  currentStep = n;
   document.querySelectorAll('.wizard-step').forEach(s=>s.classList.remove('active'));
-  document.getElementById(stepIds[n]).classList.add('active');
+  document.getElementById(targetId).classList.add('active');
 
   // Returning to the availability step must RESTORE the program cards. They
   // were previously loaded only once, right after the capacity submission, so
@@ -1213,23 +1320,15 @@ function goStep(n){
   if(n === 1 && currentDraft && currentDraft.enrollment_id){
     loadProgramOptions();
   }
-  const seq = activeSteps();
-  const t = seq.length > 1 ? stepPosition(n)/(seq.length-1) : 0;
-  const pt = quadPoint(t);
-  document.getElementById('arc-sun').setAttribute('cx', pt.x);
-  document.getElementById('arc-sun').setAttribute('cy', pt.y);
-  document.getElementById('arc-progress').setAttribute('stroke-dashoffset', 1-t);
-  // Labels are rendered from the ACTIVE sequence, so a Residential enrollment
-  // never shows an eligibility step it will not visit.
-  renderStepLabels();
-  const pos = stepPosition(n);
-  document.querySelectorAll('.step-label').forEach((el,i)=>{
-    el.classList.remove('done','now');
-    if(i < pos) el.classList.add('done');
-    if(i === pos) el.classList.add('now');
-  });
+  // One call renders nodes, connectors and states from the ACTIVE sequence.
+  renderStepper(n);
   hydrateStep(n);
-  if(n===5) fillReview();
+  if(n===5){
+    // Populate the persisted detail FIRST so a live enrollment reads the same
+    // backend values a resumed one does; fillReview re-runs once it lands.
+    fillReview();
+    refreshEnrollmentDetail().then(function(){ fillReview(); });
+  }
   window.scrollTo({top:0,behavior:'smooth'});
 }
 function hydrateStep(n){
@@ -1244,8 +1343,7 @@ function hydrateStep(n){
     document.getElementById('a-city').value = state.address.city;
     document.getElementById('a-state').value = state.address.state || 'NY';
     document.getElementById('a-zip').value = state.address.zip;
-    document.getElementById('bill-amount').value = state.bill.amount || '';
-    document.getElementById('billing-same').checked = state.billing.sameAsService !== false;
+      document.getElementById('billing-same').checked = state.billing.sameAsService !== false;
     document.getElementById('b-street').value = state.billing.street || '';
     document.getElementById('b-state').value = state.billing.state || state.address.state || 'NY';
     document.getElementById('b-unit').value = state.billing.unit || '';
@@ -1253,13 +1351,18 @@ function hydrateStep(n){
     document.getElementById('b-zip').value = state.billing.zip || '';
     toggleBillingAddress(false);
     if(state.bill.fileName){ showBillChip(state.bill.fileName); }
-    checkBillReady();
-  }
-  if(n===3){
-    document.getElementById('c-email').value = state.customer.email || perchContext.email;
-    document.getElementById('c-phone').value = state.customer.phone;
+    // Contact & login moved onto THIS screen, so its hydration moved with it -
+    // otherwise phone/password would not restore on Back or resume.
+    const email = state.customer.email || perchContext.email || '';
+    document.getElementById('c-email').value = email;
+    const disp = document.getElementById('c-email-display');
+    if(disp) disp.textContent = email || '—';   // element removed with the strip
+    document.getElementById('c-phone').value = state.customer.phone || '';
     document.getElementById('c-pass').value = state.customer.password || '';
     document.getElementById('c-pass-confirm').value = state.customer.password || '';
+    renderServiceContext();
+    if(currentDraft && currentDraft.enrollment_id) loadProgramOptions();
+    checkBillReady();
   }
   if(n===4){
     const mode = state.lmi.mode || 'doc';
@@ -1336,7 +1439,7 @@ function checkBillReady(){
   const street = document.getElementById('a-street').value.trim();
   const city = document.getElementById('a-city').value.trim();
   const zip = document.getElementById('a-zip').value.trim();
-  const amt = document.getElementById('bill-amount').value;
+  const amt = 'n/a';   // Average monthly bill amount removed - nothing consumed it.
   const rule = currentUtilityRule();
   const expected = rule && rule.account_number_length ? Number(rule.account_number_length) : null;
   const acctOk = /^\d+$/.test(acct) && (!expected || acct.length === expected);
@@ -1352,6 +1455,9 @@ function checkBillReady(){
   // the account number is 11 digits (National Grid is 10) and a POD ID is
   // required. Previously this reduced ~9 conditions to one silent boolean.
   const missing = [];
+  // A dual-program location has no branch until the rep chooses, so Continue
+  // stays disabled and the reason is listed with the rest.
+  if(availablePrograms.length > 1 && !selectedProgram) missing.push('Choose a savings program');
   if(!state.bill.fileName) missing.push('Upload the utility bill');
   if(!first || !last) missing.push('Customer first and last name');
   if(!acct){
@@ -1406,6 +1512,10 @@ async function submitBill(){
   const btn = document.getElementById('btn-bill-next');
   if(btn.disabled) return;
 
+  // Program first: the error belongs beside the choice, and nothing should be
+  // submitted before the branch is known. The backend re-validates regardless.
+  if(!validateProgramSelection()) return;
+
   state.customer.first = document.getElementById('c-first').value.trim();
   state.customer.last = document.getElementById('c-last').value.trim();
   state.customer.acct = document.getElementById('c-acct').value.trim();
@@ -1429,7 +1539,9 @@ async function submitBill(){
                        : (document.getElementById('b-state').value || 'NY').trim(),
     zip: sameBilling ? state.address.zip : document.getElementById('b-zip').value.trim()
   };
-  state.bill.amount = document.getElementById('bill-amount').value;
+  // Contact & login now live on this screen; collect them with the rest.
+  state.customer.phone = (document.getElementById('c-phone').value || '').trim();
+  state.customer.password = document.getElementById('c-pass').value || '';
 
   btn.disabled=true; btn.textContent='Saving…';
   try{
@@ -1443,7 +1555,13 @@ async function submitBill(){
     };
     if(state.project.id) payload.project_id = state.project.id;
     await apiFetch('/api/enrollments/' + currentDraft.enrollment_id, {method:'PATCH', body:JSON.stringify(payload)});
-    goStep(3);
+    // ONE merged Continue: Dalton data is saved above, then contact/login is
+    // validated and the Perch enrollment created, then the backend decides the
+    // branch. No second page, no second button.
+    const ok = await submitContactDetails();
+    if(!ok) return;
+    await continueFromPerchNextStep('contact');
+    return;
   }catch(err){
     errEl.textContent=err.message; errEl.style.display='block';
   }finally{
@@ -1451,54 +1569,86 @@ async function submitBill(){
   }
 }
 
-async function submitContact(){
+/* Shows a field-specific validation error and focuses the offending control.
+   Top level and fully parameterised - it closes over nothing. */
+function wizardFieldError(target, msg, focusId){
+  if(target){ target.textContent = msg; target.style.display = 'block'; }
+  const el = focusId && document.getElementById(focusId);
+  if(el){ el.classList.add('err'); el.focus(); }
+  return false;
+}
+
+/* Contact + login validation and the Perch enrollment call for the MERGED
+   Customer & Bill screen.
+
+   BUG 2 FIX. This used to behave like it owned its own page: it re-read a
+   #c-email field, produced a single generic "Fill in every field" message for
+   four different problems, and drove #btn-contact-next - a button the merge
+   removed, so it threw and the screen simply never advanced.
+
+   Now:
+     * the enrollment email comes from perchContext (the authoritative Perch
+       session value), not from a hidden DOM field
+     * each failure has its OWN message and focuses the offending control
+     * the one real Continue button (#btn-bill-next) is driven
+   Returns true on success so the caller knows whether to proceed. */
+async function submitContactDetails(){
   const errEl = document.getElementById('contact-submit-error');
-  errEl.style.display='none';
-  const email = document.getElementById('c-email').value.trim();
-  const phone = document.getElementById('c-phone').value.trim();
-  const pass = document.getElementById('c-pass').value;
-  const passConfirm = document.getElementById('c-pass-confirm').value;
-  if(!email || !phone || !pass || !passConfirm){ errEl.textContent='Fill in every field before continuing.'; errEl.style.display='block'; return; }
-  if(pass.length < 6){ errEl.textContent='Password should be at least 6 characters.'; errEl.style.display='block'; return; }
-  if(pass !== passConfirm){ errEl.textContent='Passwords don\'t match.'; errEl.style.display='block'; return; }
-  if(email.toLowerCase() !== (perchContext.email || '').toLowerCase()){
-    errEl.textContent='Email must match the address used for the Perch availability check. Go back to change it.'; errEl.style.display='block'; return;
-  }
+  if(errEl) errEl.style.display = 'none';
+
+  const email = (perchContext.email || state.customer.email || '').trim();
+  const phone = (document.getElementById('c-phone').value || '').trim();
+  const pass = document.getElementById('c-pass').value || '';
+  const passConfirm = document.getElementById('c-pass-confirm').value || '';
+
+  ['c-phone','c-pass','c-pass-confirm'].forEach(function(id){
+    const el = document.getElementById(id); if(el) el.classList.remove('err');
+  });
+
+  // The Perch session email is established at the availability step; it cannot
+  // be missing here without a broken session.
+  if(!email) return wizardFieldError(errEl, 'Re-run the availability check before continuing.');
+  if(!phone) return wizardFieldError(errEl, 'Enter the customer\'s phone number.', 'c-phone');
+  if(!pass) return wizardFieldError(errEl, 'Create a password for the customer.', 'c-pass');
+  if(pass.length < 6) return wizardFieldError(errEl, 'Password should be at least 6 characters.', 'c-pass');
+  if(!passConfirm) return wizardFieldError(errEl, 'Confirm the password.', 'c-pass-confirm');
+  if(pass !== passConfirm) return wizardFieldError(errEl, 'Passwords don\'t match.', 'c-pass-confirm');
+
   state.customer.email = email;
   state.customer.phone = phone;
   state.customer.password = pass;
-  const btn=document.getElementById('btn-contact-next');
-  btn.disabled=true; btn.textContent=perchContext.enrollmentSubmitted ? 'Continuing…' : 'Submitting to Perch…';
-  try{
-    await apiFetch('/api/enrollments/' + currentDraft.enrollment_id, {
-      method:'PATCH',
-      body:JSON.stringify({customer:{first_name:state.customer.first,last_name:state.customer.last,email:state.customer.email,phone:state.customer.phone,password:state.customer.password}})
-    });
-    if(!perchContext.enrollmentSubmitted){
-      // customer_type is the rep's SELECTION. The backend re-validates it against
-      // this enrollment's persisted capacity response, so this is a request, not
-      // an instruction - an unoffered program is rejected server-side.
-      // The backend also reads the PERSISTED selection, so this is belt and
-      // braces rather than the only source of truth.
-      const enrollBody = {document_id: state.bill.documentId};
-      if(selectedProgram && selectedProgram.customer_type){
-        enrollBody.customer_type = selectedProgram.customer_type;
-      }
-      const body = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/enroll', {method:'POST', body:JSON.stringify(enrollBody)});
-      perchContext.enrollmentSubmitted = true;
-      perchContext.nextStepKey = body.next_step_key;
+
+  await apiFetch('/api/enrollments/' + currentDraft.enrollment_id, {
+    method:'PATCH',
+    body:JSON.stringify({customer:{first_name:state.customer.first,
+      last_name:state.customer.last, email:state.customer.email,
+      phone:state.customer.phone, password:state.customer.password}})
+  });
+
+  if(!perchContext.enrollmentSubmitted){
+    // customer_type is the rep's SELECTION; the backend re-validates it against
+    // this enrollment's persisted capacity response and also reads the
+    // persisted value, so this is a request rather than an instruction.
+    const enrollBody = {document_id: state.bill.documentId};
+    if(selectedProgram && selectedProgram.customer_type){
+      enrollBody.customer_type = selectedProgram.customer_type;
     }
-    await continueFromPerchNextStep('contact');
-  }catch(err){
-    errEl.textContent=err.message; errEl.style.display='block';
-  }finally{
-    btn.disabled=false; btn.textContent='Continue';
+    const body = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/enroll',
+                                {method:'POST', body:JSON.stringify(enrollBody)});
+    perchContext.enrollmentSubmitted = true;
+    perchContext.nextStepKey = body.next_step_key;
   }
+  return true;
 }
+
+/* NOTE: the old submitContact() alias was removed. It had zero callers and
+   kept a dead "Contact page" shape alive underneath the merged screen, which is
+   exactly what the merge was meant to eliminate. submitBill() -> 
+   submitContactDetails() -> continueFromPerchNextStep() is the whole path. */
 
 async function continueFromPerchNextStep(origin){
   if(perchContext.contractsGenerated){
-    perchContext.agreementBackStep = origin === 'lmi' ? 4 : 3;
+    perchContext.agreementBackStep = origin === 'lmi' ? 4 : 2;
     goStep(5); mountRepAgreements(false, false); return;
   }
   if(perchContext.nextStepKey === 'proof_docs'){
@@ -1506,7 +1656,9 @@ async function continueFromPerchNextStep(origin){
   }
   if(perchContext.nextStepKey === 'contracts'){
     state.lmi.mode='na'; state.lmi.docType=''; state.lmi.fileName='';
-    await generateContractsAndOpenAgreement(origin === 'lmi' ? 4 : 3); return;
+    // backStep 2, not 3: step 3 (Contact & Login) was merged into Customer &
+    // Bill, so a non-LMI enrollment must return there.
+    await generateContractsAndOpenAgreement(origin === 'lmi' ? 4 : 2); return;
   }
   if(perchContext.nextStepKey === 'self_attestation' || perchContext.nextStepKey === 'self_attestation_accept'){
     throw new Error('Perch requires its self-attestation branch for this enrollment. That branch is intentionally not wired into this milestone, so Dalton will not guess or skip it.');
@@ -1634,7 +1786,8 @@ async function handleBillUpload(files){
     if(parsed.street){ document.getElementById('a-street').value = parsed.street; markOcrFilled('a-street'); }
     if(parsed.city){ document.getElementById('a-city').value = parsed.city; markOcrFilled('a-city'); }
     if(parsed.zip){ document.getElementById('a-zip').value = parsed.zip; markOcrFilled('a-zip'); }
-    if(parsed.amount != null) document.getElementById('bill-amount').value = amountToBracket(parsed.amount);
+    // parsed.amount is still produced by the OCR parser; the field it used to
+    // populate was removed because nothing consumed the value.
     syncBillingFromService();
     c.innerHTML = '<div class="ocr-panel"><div class="ocr-head">Pulled from the bill</div>' +
       ocrRow('Customer name', !!parsed.first, parsed.first ? 'Found' : 'Not found — enter manually') +
@@ -1696,7 +1849,18 @@ const lmiTypes = [
   {label:'Disability benefits letter', sourceType:null, defaultDocType:'letter', dac:false, re:/Disability Benefits|SSDI/i},
   {label:'SLIP', sourceType:null, defaultDocType:'', dac:true, re:/\bSLIP\b/i},
 ];
-function lmiTypeForLabel(label){ return lmiTypes.find(x=>x.label===label) || null; }
+function lmiTypeForLabel(value){
+  // The select now carries the Perch source_type directly. Legacy labels are
+  // still accepted so any stored value keeps resolving.
+  if(!value) return null;
+  return lmiTypes.find(x => x.sourceType === value)
+      || lmiTypes.find(x => x.label === value)
+      || null;
+}
+
+/* Program changed: nothing is auto-guessed. Format stays whatever the rep (or
+   OCR) set - we never fabricate the second dimension. */
+function onLmiProgramChange(){ checkLmiReady(); }
 function classifyLmiDoc(rawText){
   const t = cleanText(rawText);
   let matched = null;
@@ -1821,7 +1985,18 @@ async function handleLmiUpload(files){
     if(generation !== lmiUploadGeneration) return;
     const analysis = classifyLmiDoc(text);
     if(analysis.matched){
-      document.getElementById('lmi-doctype').value = analysis.matched.label;
+      // Populate the two dimensions SEPARATELY from what classifyLmiDoc matched.
+      // The classifier is unchanged; only the fields it fills are. A program
+      // with no reliable default format leaves Format for the rep - the missing
+      // dimension is never fabricated.
+      if(analysis.matched.sourceType){
+        document.getElementById('lmi-doctype').value = analysis.matched.sourceType;
+        markOcrFilled('lmi-doctype');
+      }
+      if(analysis.matched.defaultDocType){
+        document.getElementById('lmi-format').value = analysis.matched.defaultDocType;
+        markOcrFilled('lmi-format');
+      }
       state.lmi.docType=analysis.matched.label;
       if(analysis.matched.defaultDocType){
         document.getElementById('lmi-format').value=analysis.matched.defaultDocType;
@@ -1900,15 +2075,95 @@ async function submitLmi(){
 }
 
 function fillReview(){
-  document.getElementById('rv-name').textContent = state.customer.first+' '+state.customer.last;
-  document.getElementById('rv-email').textContent = state.customer.email;
-  document.getElementById('rv-phone').textContent = state.customer.phone;
-  document.getElementById('rv-acct').textContent = state.customer.acct;
-  document.getElementById('rv-utility').textContent = state.project.utility || perchContext.utilityDisplay || perchContext.utilitySlug;
-  document.getElementById('rv-address').textContent = state.address.street+(state.address.unit ? ', '+state.address.unit : '')+', '+state.address.city+', NY '+state.address.zip;
-  document.getElementById('rv-lmi').textContent = perchContext.proofSubmitted
-    ? (state.lmi.docType+' — '+state.lmi.fileName)
-    : 'Not required by Perch for this enrollment';
+  const set = (id, txt) => { const el = document.getElementById(id); if(el) el.textContent = txt; };
+  const detail = currentEnrollmentDetail || {};
+
+  set('rv-name', [state.customer.first, state.customer.last].filter(Boolean).join(' ') || '—');
+  set('rv-email', state.customer.email || perchContext.email || '—');
+  set('rv-phone', formatPhone(state.customer.phone) || '—');
+  set('rv-utility', state.project.utility || perchContext.utilityDisplay
+                    || perchContext.utilitySlug || '—');
+
+  // Address on two lines, as the mockup shows it.
+  const addrEl = document.getElementById('rv-address');
+  if(addrEl){
+    const line1 = state.address.street + (state.address.unit ? ', ' + state.address.unit : '');
+    const st = state.address.state || 'NY';
+    addrEl.innerHTML = esc(line1) + '<br>' +
+      esc([state.address.city, st].filter(Boolean).join(', ') + ' ' + (state.address.zip || '')).trim();
+  }
+  set('rv-acct', maskAccount(state.customer.acct));
+  set('rv-code', (currentDraft && currentDraft.enrollment_code) || detail.enrollment_code || '');
+
+  // PROGRAM + SAVINGS via the ONE resolver, so live, resumed and completed
+  // enrollments all read the same way.
+  const view = resolveProgramView();
+  const isLmi = view.isLmi;
+  set('rv-program', view.label || '—');
+  const savEl = document.getElementById('rv-savings');
+  if(savEl){
+    savEl.innerHTML = view.percent === null ? ''
+      : '<strong>' + esc(String(view.percent)) + '%</strong><span>savings</span>';
+  }
+
+  // LMI PROOF as "<Program> · <Document format>". The uploaded FILENAME is
+  // deliberately not shown - the original document is still stored and
+  // submitted exactly as before; this is presentation only.
+  const lmiRow = document.getElementById('rv-lmi-row');
+  if(perchContext.proofSubmitted && isLmi){
+    const prg = lmiTypeForLabel(state.lmi.docType);
+    const program = prg ? programDisplayName(prg) : (state.lmi.docType || '');
+    const format = formatDisplayName(state.lmi.documentFormat);
+    const text = [program, format].filter(Boolean).join(' · ');
+    set('rv-lmi', text || 'Eligibility document submitted');
+    if(lmiRow) lmiRow.style.display = text ? '' : 'none';
+  } else if(lmiRow){
+    lmiRow.style.display = 'none';
+  }
+
+  // "Ready to complete" appears only once the packet is actually reviewable.
+  const pill = document.getElementById('agr-ready-pill');
+  if(pill) pill.hidden = !(Agreements && Agreements.contracts && Agreements.contracts.length);
+}
+
+/* Display-only phone formatting. The stored value is never altered. */
+function formatPhone(v){
+  const d = String(v || '').replace(/\D/g, '');
+  if(d.length === 10) return '(' + d.slice(0,3) + ') ' + d.slice(3,6) + '-' + d.slice(6);
+  if(d.length === 11 && d[0] === '1') return '(' + d.slice(1,4) + ') ' + d.slice(4,7) + '-' + d.slice(7);
+  return String(v || '');
+}
+
+/* Masked account: last four only, matching the mockup's treatment. */
+function maskAccount(acct){
+  const v = String(acct || '').trim();
+  if(!v) return '—';
+  if(v.length <= 4) return v;
+  return '•'.repeat(Math.min(v.length - 4, 8)) + v.slice(-4);
+}
+
+/* Rep-facing program name for an LMI proof type. The Perch source_type stays
+   authoritative underneath; only the label is friendly. */
+function programDisplayName(type){
+  const MAP = {
+    proof_doc_snap: 'SNAP',
+    proof_doc_medicaid: 'Medicaid',
+    proof_doc_liheap: 'HEAP / EAP / LIHEAP',
+    proof_doc_section_8: 'Section 8 / Housing',
+    proof_doc_ssi: 'Supplemental Security Income (SSI)',
+    proof_doc_lifeline_usac: 'Lifeline',
+    proof_doc_free_reduced_school_lunch_letter: 'Free / reduced school lunch',
+  };
+  if(!type) return '';
+  return MAP[type.sourceType] || type.label || '';
+}
+
+/* Document format label from the stored Perch document_type value. */
+function formatDisplayName(value){
+  const MAP = {card:'Card', letter:'Award letter', account_statement:'Account statement',
+               utility_bill:'Utility bill', voucher:'Voucher', other:'Other', unknown:''};
+  if(!value) return '';
+  return MAP[value] || value;
 }
 
 async function generateContractsAndOpenAgreement(backStep){
@@ -1926,11 +2181,16 @@ async function generateContractsAndOpenAgreement(backStep){
       throw err;
     }
   }
-  perchContext.agreementBackStep=backStep || 3;
+  perchContext.agreementBackStep=backStep || 2;
   goStep(5);
   mountRepAgreements(false, false);
 }
-function backFromAgreement(){ goStep(perchContext.agreementBackStep || 3); }
+function backFromAgreement(){
+  // Step 3 is gone; fall back through the ACTIVE sequence so Residential
+  // returns to Customer & Bill and LMI returns to Eligibility.
+  const target = perchContext.agreementBackStep;
+  goStep(activeSteps().indexOf(target) === -1 ? prevStepBefore(5) : target);
+}
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 // REMOVED: the legacy/mock customer contract engine.
 //
@@ -2157,7 +2417,7 @@ function agrSummaryFromState(){
     utility: (state.project && state.project.utility) || perchContext.utilitySlug || '',
     serviceAddress: line ? (line + (addr.zip ? ', NY ' + addr.zip : '')) : '',
     savings: formatSavings(detail.program_savings),
-    programType: formatProgramType(detail.program_savings),
+    programType: formatProgramType(detail.program_savings, detail.selected_customer_type),
     enrollmentCode: (currentDraft && currentDraft.enrollment_code) || detail.enrollment_code || '',
   };
 }
@@ -2170,7 +2430,7 @@ function agrSummaryFromEnrollment(e){
     utility: e.utility_account ? e.utility_account.utility_name : '',
     serviceAddress: line ? (line + (a.zip ? ', NY ' + a.zip : '')) : '',
     savings: formatSavings(e.program_savings),
-    programType: formatProgramType(e.program_savings),
+    programType: formatProgramType(e.program_savings, e.selected_customer_type),
     enrollmentCode: e.enrollment_code || '',
     // Real persisted values, formatted for the viewer's timezone.
     createdAt: formatTimestamp(e.created_at),
@@ -2179,6 +2439,18 @@ function agrSummaryFromEnrollment(e){
 }
 
 // Rep-side: the wizard already holds the packet in perchContracts.
+/* Refresh the persisted enrollment detail so Review & Finish sees the same
+   backend values during a LIVE enrollment that it sees on resume.
+   currentEnrollmentDetail was only ever assigned by openEnrollment(), so mid-flow
+   it was null and the savings figure simply vanished. */
+async function refreshEnrollmentDetail(){
+  if(!currentDraft || !currentDraft.enrollment_id) return null;
+  try{
+    currentEnrollmentDetail = await apiFetch('/api/enrollments/' + currentDraft.enrollment_id);
+  }catch(err){ /* keep the previous value; resolveProgramView degrades safely */ }
+  return currentEnrollmentDetail;
+}
+
 function mountRepAgreements(readOnly, submitted){
   mountAgreements({
     actor: 'rep',
@@ -2828,21 +3100,54 @@ function formatSavings(programSavings){
 
 /* Programme label. Shown ONLY for LMI, because "Residential" on every other
    enrollment is noise. Derived from the persisted Perch basis, not guessed. */
-function formatProgramType(programSavings){
+/* Program label for an enrollment row.
+
+   This used to infer the program from programSavings.basis, so an enrollment
+   with no savings figure silently read as Residential - which is how a completed
+   LMI enrollment displayed as Residential. It now takes the AUTHORITATIVE
+   selected type, falling back to basis only for legacy rows that never
+   persisted a selection. */
+function formatProgramType(programSavings, selectedType){
+  const t = String(selectedType || '').toUpperCase();
+  if(t === 'LMI') return 'Income-eligible (LMI)';
+  if(t === 'RESIDENTIAL') return null;
   if(!programSavings) return null;
   return programSavings.basis === 'lmi' ? 'Income-eligible (LMI)' : null;
 }
 
 
-const STEP_LABEL_TEXT = {1:'Availability', 2:'Bill', 3:'Customer', 4:'Eligibility', 5:'Agreements'};
+const STEP_LABEL_TEXT = {1:'Availability', 2:'Customer & Bill', 4:'Eligibility', 5:'Agreements'};
 
-function renderStepLabels(){
-  const host = document.getElementById('step-labels');
+/* Renders the stepper for the ACTIVE branch.
+
+   Nodes carry three states - done / current / upcoming - and completed nodes
+   show a checkmark. The connector between nodes fills as progress advances.
+   Eligibility is absent entirely on the Residential branch because
+   activeSteps() does not contain it; nothing is hidden or disabled. */
+function renderStepper(current){
+  const host = document.getElementById('stepper');
   if(!host) return;
-  host.innerHTML = activeSteps().map(function(n){
-    return '<div class="step-label">' + esc(STEP_LABEL_TEXT[n] || ('Step ' + n)) + '</div>';
+  const seq = activeSteps();
+  const pos = stepPosition(current);
+  host.innerHTML = seq.map(function(n, i){
+    const state = i < pos ? 'done' : (i === pos ? 'now' : 'todo');
+    const label = esc(STEP_LABEL_TEXT[n] || ('Step ' + n));
+    const mark = state === 'done'
+      ? '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+      : String(i + 1);
+    const connector = i < seq.length - 1
+      ? '<span class="stp-line' + (i < pos ? ' filled' : '') + '" aria-hidden="true"></span>'
+      : '';
+    return '<div class="stp-item ' + state + '"' +
+             (state === 'now' ? ' aria-current="step"' : '') + '>' +
+             '<span class="stp-node">' + mark + '</span>' +
+             '<span class="stp-label">' + label + '</span>' +
+           '</div>' + connector;
   }).join('');
 }
+
+/* Kept as a thin alias: older call sites still ask for labels only. */
+function renderStepLabels(){ renderStepper(currentStep || 1); }
 
 
 /* ═══════════ Program availability + selection ═══════════
@@ -2883,9 +3188,17 @@ async function loadProgramOptions(){
     selectedProgram = availablePrograms.filter(function(p){
       return p.customer_type === persisted; })[0] || null;
   } else if(availablePrograms.length === 1){
-    // Exactly one option is unambiguous - the backend selects it at enroll time
-    // anyway, so preselect it here purely so the rep can SEE what they get.
+    // Exactly one option is unambiguous - but it must still be PERSISTED.
+    // Previously this only set the local variable, so selected_customer_type
+    // stayed NULL for every single-program location. The server then fell back
+    // to workflow state (which no longer carries customer_type), decided the
+    // enrollment was Residential, and read the wrong savings field - 0% for an
+    // LMI-only ZIP like 12901. On reopen selectedProgram was null too, so an
+    // LMI enrollment rendered as "Residential".
     selectedProgram = availablePrograms[0];
+    if(!persisted && currentDraft && currentDraft.enrollment_id){
+      persistSelectedProgram(selectedProgram.customer_type);
+    }
   } else if(selectedProgram){
     // Drop a stale selection that is no longer offered.
     const still = availablePrograms.filter(function(p){
@@ -2896,6 +3209,10 @@ async function loadProgramOptions(){
     selectedProgram = null;
   }
   renderProgramOptions(body);
+  // The branch may have just become known (single option auto-selected, or a
+  // persisted choice hydrated). Re-render the stepper so Eligibility appears or
+  // disappears via the CSS transition rather than being flashed on a later nav.
+  renderStepper(currentStep || 1);
   return body;
 }
 
@@ -2928,28 +3245,30 @@ function renderProgramOptions(body){
 
   const multiple = availablePrograms.length > 1;
   let html = '<div class="prog-head">' +
-    (multiple ? 'Choose the program this customer is enrolling in'
+    (multiple ? 'Two programs are available at this address. Choose one.'
               : 'Available program') + '</div>';
 
-  html += '<div class="prog-list">' + availablePrograms.map(function(p){
+  html += '<div class="prog-grid">' + availablePrograms.map(function(p){
     const selected = selectedProgram && selectedProgram.customer_type === p.customer_type;
-    // Savings is rendered ONLY when Perch supplied it. Never a placeholder.
+    // Savings renders ONLY when Perch supplied a positive number.
     const savings = (typeof p.savings_percent === 'number' && p.savings_percent > 0)
-      ? '<span class="prog-savings">' + esc(String(p.savings_percent)) + '% savings</span>'
-      : '<span class="prog-savings prog-savings-none">Savings not published</span>';
-    return '<button type="button" class="prog-option' + (selected ? ' selected' : '') +
+      ? '<span class="pg-save">' + esc(String(p.savings_percent)) + '<span class="pg-pct">% savings</span></span>'
+      : '<span class="pg-save pg-save-none">Savings not published</span>';
+    return '<button type="button" class="pg' + (selected ? ' selected' : '') +
       '" role="radio" aria-checked="' + (selected ? 'true' : 'false') +
       '" onclick="selectProgram(\'' + esc(p.customer_type) + '\')">' +
-      '<span class="prog-main"><span class="prog-name">' + esc(programLabel(p)) + '</span>' +
-      savings + '</span>' +
-      '<span class="prog-blurb">' + esc(programBlurb(p)) + '</span></button>';
+      '<span class="pg-check" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>' +
+      '<span class="pg-name">' + esc(programLabel(p)) + '</span>' +
+      savings +
+      '<span class="pg-note">' + esc(p.lmi_required
+        ? 'Eligibility documentation required'
+        : 'Standard residential enrollment') + '</span>' +
+      '</button>';
   }).join('') + '</div>';
 
-  if(multiple && !selectedProgram){
-    html += '<p class="helper" id="prog-hint">Select a program to continue.</p>';
-  }
   host.innerHTML = html;
   updateProgramContinueState();
+  renderRailProgram();
 }
 
 async function selectProgram(customerType){
@@ -2985,18 +3304,20 @@ async function selectProgram(customerType){
     }
   }
   renderProgramOptions({capacity_checked: true});
+  renderStepper(currentStep || 1);
 }
 
 /* Blocks Continue only when the rep genuinely has an unmade choice. The backend
    enforces this too - this is convenience, not the security boundary. */
+/* Continue state has ONE owner: checkBillReady(), which weighs every
+   requirement together. This used to drive #wf-primary - the step-1 button -
+   so on the merged screen it silently controlled nothing. */
 function updateProgramContinueState(){
-  const btn = document.getElementById('wf-primary');
-  if(!btn) return;
-  if(availablePrograms.length > 1 && !selectedProgram){
-    btn.disabled = true;
-  } else if(availablePrograms.length){
-    btn.disabled = false;
+  const stepOne = document.getElementById('wf-primary');
+  if(stepOne && availablePrograms.length){
+    stepOne.disabled = (availablePrograms.length > 1 && !selectedProgram);
   }
+  if(document.getElementById('btn-bill-next')) checkBillReady();
 }
 
 
@@ -3135,4 +3456,211 @@ function markOcrFilled(id){
   el.classList.remove('ocr-filled');
   void el.offsetWidth;          // restart the animation
   el.classList.add('ocr-filled');
+}
+
+
+/* Quiet service context at the top of Customer & Bill.
+   Replaces the dedicated "Capacity confirmed" screen. The capacity LOOKUP and
+   its validation are unchanged - only this presentation is new. Raw
+   available/not-available diagnostics are deliberately not shown; the program
+   cards below carry the decision the rep actually needs. */
+function renderServiceContext(){
+  // The mockup shows a utility treatment in the program section head. It is
+  // bound to the utility ACTUALLY chosen at Availability - never hardcoded.
+  // If no logo asset exists the chip renders the name alone, and if no utility
+  // is known yet the chip is hidden entirely rather than showing a placeholder.
+  const chip = document.getElementById('util-chip');
+  if(chip){
+    const name = perchContext.utilityDisplay || perchContext.utilitySlug || '';
+    if(!name){
+      chip.hidden = true; chip.innerHTML = '';
+    } else {
+      const initials = String(name).replace(/[^A-Za-z ]/g,'').split(/\s+/)
+        .filter(Boolean).slice(0,2).map(w=>w[0].toUpperCase()).join('') || '·';
+      chip.hidden = false;
+      chip.innerHTML = '<span class="util-logo" aria-hidden="true">' + esc(initials) + '</span>' +
+        '<span class="util-txt"><strong>' + esc(name) + '</strong>' +
+        '<small>' + (perchContext.capacityZip ? 'ZIP ' + esc(perchContext.capacityZip)
+                                              : 'Current utility') + '</small></span>';
+      chip.setAttribute('aria-label', 'Current utility ' + name);
+    }
+  }
+  // The old context strip was removed with the mockup layout; these writers
+  // stay tolerant so nothing throws if the element is absent.
+  const host = document.getElementById('svc-context');
+  if(host){
+    const bits = [];
+    const utility = perchContext.utilityDisplay || perchContext.utilitySlug;
+    if(utility) bits.push(['Utility', utility]);
+    if(perchContext.capacityZip) bits.push(['Service area', 'ZIP ' + perchContext.capacityZip]);
+    if(currentDraft && currentDraft.enrollment_code) bits.push(['Enrollment', currentDraft.enrollment_code]);
+    host.innerHTML = bits.map(function(b){
+      return '<span class="svc-item"><span class="svc-k">' + esc(b[0]) +
+             '</span><span class="svc-v">' + esc(b[1]) + '</span></span>';
+    }).join('');
+  }
+}
+
+
+
+/* Concise completion summary. Real values only - a row is omitted when its
+   value is absent, so nothing is invented to fill the shape. */
+function renderCompleteSummary(){
+  const host = document.getElementById('complete-summary');
+  if(!host) return;
+  const detail = currentEnrollmentDetail || {};
+  // Same resolver as Review & Finish - one source of truth, not a second
+  // heuristic. (This supersedes the local patch that read
+  // selectedProgram.savings_percent directly: right for a live enrollment, but
+  // it left the resumed and completed cases reading a different source.)
+  const view = resolveProgramView();
+  const savings = view.percent === null ? '' : view.percent + '% savings';
+  const rows = [
+    ['Customer', [state.customer.first, state.customer.last].filter(Boolean).join(' ')],
+    ['Utility', state.project.utility || perchContext.utilityDisplay || perchContext.utilitySlug],
+    ['Program', (view.label || '—') + (savings ? ' · ' + savings : '')],
+    ['Enrollment', (currentDraft && currentDraft.enrollment_code) || detail.enrollment_code],
+  ].filter(function(r){ return r[1]; });
+  host.innerHTML = '<section class="sum-group"><dl class="sum-dl">' +
+    rows.map(function(r){
+      return '<div><dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd></div>';
+    }).join('') + '</dl></section>';
+}
+
+
+/* Rail summary values. Real data only - "Not selected" is an honest state, not
+   a placeholder standing in for a guess. */
+function renderRailProgram(){
+  const el = document.getElementById('rail-program');
+  if(el){
+    if(selectedProgram){
+      const s = formatSavings({percent: selectedProgram.savings_percent, basis: null});
+      el.textContent = programLabel(selectedProgram) + (s ? ' · ' + s : '');
+      el.classList.remove('rail-empty');
+    } else {
+      el.textContent = availablePrograms.length > 1 ? 'Choose a program' : 'Not selected';
+      el.classList.add('rail-empty');
+    }
+  }
+  const cust = document.getElementById('rail-customer');
+  if(cust){
+    const name = [state.customer.first, state.customer.last].filter(Boolean).join(' ');
+    cust.textContent = name || '—';
+  }
+}
+
+/* Program selection must be resolved BEFORE anything is submitted, and the
+   error belongs beside the choice. Previously the only signal was the backend's
+   422 surfacing at the bottom of the page, far from the control. */
+function validateProgramSelection(){
+  const err = document.getElementById('program-error');
+  if(err){ err.style.display = 'none'; err.textContent = ''; }
+  if(availablePrograms.length > 1 && !selectedProgram){
+    if(err){
+      err.textContent = 'Choose which program this customer is enrolling in.';
+      err.style.display = 'block';
+    }
+    const host = programHostEl();
+    if(host && host.scrollIntoView) host.scrollIntoView({block:'center'});
+    return false;
+  }
+  return true;
+}
+
+
+/* Persist a program choice. Fire-and-forget: the server re-validates against
+   this enrollment's capacity response, and a failure must not block the rep -
+   the value is re-sent on the next explicit selection. */
+function persistSelectedProgram(customerType){
+  if(!customerType || !currentDraft || !currentDraft.enrollment_id) return Promise.resolve(null);
+  return apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id + '/program',
+                  {method:'POST', body: JSON.stringify({customer_type: customerType})})
+    .catch(function(){ return null; });
+}
+
+/* SINGLE SOURCE OF TRUTH for the Review/Completion program + savings.
+
+   Resolution order, identical for live, resumed and completed enrollments:
+     1. the persisted selection (enrollments.selected_customer_type)
+     2. the live selection held in selectedProgram
+   The percentage is then taken for THAT type only:
+     Residential -> the residential/commercial figure
+     LMI         -> the LMI figure
+   No cross-fallback, and nothing is inferred from program_savings.basis. When
+   no figure exists for the selected type the percent is null and the caller
+   omits it rather than showing a wrong number. */
+function resolveProgramView(){
+  const detail = currentEnrollmentDetail || {};
+  const type = detail.selected_customer_type
+            || (selectedProgram && selectedProgram.customer_type)
+            || null;
+  const isLmi = String(type || '').toUpperCase() === 'LMI';
+
+  let percent = null;
+  // Backend value is authoritative when present - it is keyed to the persisted
+  // selection server-side.
+  const ps = detail.program_savings;
+  if(ps && typeof ps.percent === 'number'
+     && (!ps.basis || (ps.basis === 'lmi') === isLmi)){
+    percent = ps.percent;
+  }
+  if(percent === null && availablePrograms.length){
+    // Live fallback: the capacity response for the SELECTED type only.
+    const match = availablePrograms.filter(function(p){
+      return String(p.customer_type).toUpperCase() === (isLmi ? 'LMI' : 'RESIDENTIAL'); })[0];
+    if(match && typeof match.savings_percent === 'number') percent = match.savings_percent;
+  }
+  if(percent === null && selectedProgram
+     && String(selectedProgram.customer_type).toUpperCase() === String(type || '').toUpperCase()
+     && typeof selectedProgram.savings_percent === 'number'){
+    percent = selectedProgram.savings_percent;
+  }
+  return {type: type, isLmi: isLmi, percent: percent,
+          label: type ? (isLmi ? 'Residential LMI' : 'Residential') : null};
+}
+
+
+/* Rebuild the upload UI from documents the SERVER already holds.
+
+   This restores identity only - filename and document id. It does not
+   reconstruct a File object, because the bytes live on the server and are
+   re-fetched on demand; the existing view/remove controls operate on the
+   document id, which is what they already used. */
+function rehydrateDocumentsFromDetail(detail){
+  const docs = (detail && detail.documents) || [];
+  if(!docs.length) return;
+  const byCat = {utility_bill: [], lmi_document: []};
+  docs.forEach(function(d){
+    const cat = d.doc_category || d.category;
+    if(byCat[cat]) byCat[cat].push(d);
+  });
+
+  if(byCat.utility_bill.length){
+    const first = byCat.utility_bill[0];
+    state.bill.fileName = first.original_filename || 'Uploaded bill';
+    state.bill.documentId = first.id;
+    DocSets.utility_bill = {
+      id: null,                       // document-set id is not exposed on detail
+      files: byCat.utility_bill.map(function(d){
+        return {key: 'srv-' + d.id, documentId: d.id, persisted: true,
+                file: {name: d.original_filename || ('Document ' + d.id), size: null}};
+      })
+    };
+    renderDocSetList('utility_bill');
+  }
+
+  if(byCat.lmi_document.length){
+    const firstLmi = byCat.lmi_document[0];
+    state.lmi.fileName = firstLmi.original_filename || 'Uploaded document';
+    state.lmi.documentId = firstLmi.id;
+    DocSets.lmi_document = {
+      id: null,
+      files: byCat.lmi_document.map(function(d){
+        return {key: 'srv-' + d.id, documentId: d.id, persisted: true,
+                file: {name: d.original_filename || ('Document ' + d.id), size: null}};
+      })
+    };
+    renderDocSetList('lmi_document');
+  }
+  if(typeof checkBillReady === 'function') checkBillReady();
 }

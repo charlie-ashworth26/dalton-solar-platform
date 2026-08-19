@@ -128,8 +128,8 @@ def main():
     resolved, reason = adapter.resolve_customer_type(details, requested=stored)
     check("  ...resolves to Perch customer_type 'Residential'", resolved == "Residential")
     check("  ...as an explicit selection", "explicit_selection" in reason)
-    check("  ...4-step flow skips Eligibility",
-          "if(needsLmi === false) return [1,2,3,5];" in JS)
+    check("  ...Residential flow skips Eligibility (PASS 1: [1,2,5])",
+          "if(needsLmi === false) return [1,2,5];" in JS)
 
     section("LMI branch — persisted and resolvable")
     lmi_eid = start_dual(c, rep, "lmibranch")
@@ -144,7 +144,8 @@ def main():
     resolved_l, reason_l = adapter.resolve_customer_type(details_l, requested=stored_l)
     check("  ...resolves to Perch customer_type 'LMI'", resolved_l == "LMI")
     check("  ...as an explicit selection", "explicit_selection" in reason_l)
-    check("  ...5-step flow includes Eligibility", "return [1,2,3,4,5];" in JS)
+    check("  ...LMI flow includes Eligibility (PASS 1: [1,2,4,5])",
+          "return [1,2,4,5];" in JS)
 
     check("the two enrollments resolve to DIFFERENT Perch programs",
           resolved != resolved_l)

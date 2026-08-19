@@ -18,8 +18,7 @@ console.log('='.repeat(72));
 
 // ── Inventory captured BEFORE the restyle ──
 const CONTROLS=['a-city','a-state','a-street','a-unit','a-zip','admin-modal-save','b-city',
- 'b-state','b-street','b-unit','b-zip','bill-amount','bill-file','billing-same','btn-bill-next',
- 'btn-contact-next','btn-lmi-next','c-acct','c-email','c-first','c-last','c-pass','c-pass-confirm',
+ 'b-state','b-street','b-unit','b-zip','bill-file','billing-same','btn-bill-next','btn-lmi-next','c-acct','c-email','c-first','c-last','c-pass','c-pass-confirm',
  'c-pass-confirm-eye','c-pass-eye','c-phone','c-pod','complete-cta','cust-login-btn',
  'cust-login-email','cust-login-pass','cust-login-pass-eye','lmi-doctype','lmi-file','lmi-format',
  'lmi-household-size','lmi-name-on-doc','lmi-relationship','login-email','login-pass',
@@ -28,8 +27,11 @@ const CONTROLS=['a-city','a-state','a-street','a-unit','a-zip','admin-modal-save
 const HANDLERS=['adminModalBackdrop','agrBackdrop','backFromCustomer','closeAdminModal',
  'closeAgreements','completeReturnToDashboard','createRep','doCustomerLogin','doLogin',
  'exitWizard','goStep','openCustomerContracts','resetAll','setIncomeAnswer','setLmiMode',
- 'showScreen','showView','startWizardFresh','submitAdminModal','submitBill','submitContact',
+ 'showScreen','showView','startWizardFresh','submitAdminModal','submitBill',
  'submitLmi','togglePasswordVisibility','checkBillReady','checkLmiReady','handleBillUpload',
+ // submitContact was REMOVED with the Customer & Bill merge (zero callers, and it
+ // kept a dead 'Contact page' shape alive). Its work lives in submitContactDetails.
+ 'submitContactDetails',
  'handleLmiUpload','renderCustomers','syncBillingFromService','toggleBillingAddress',
  'updateAmiThreshold'];
 
@@ -96,7 +98,17 @@ check('inputs 16px on mobile (no iOS zoom)',
 check('wizard actions stack on mobile',
   /@media \(max-width:820px\)[\s\S]{0,900}\.wizard-actions\{flex-direction:column-reverse/.test(css));
 check('address grid stays usable on mobile', /\.row3\.address-grid\{grid-template-columns/.test(css));
-check('  ...and the markup uses it', (html.match(/row3 address-grid/g)||[]).length===2);
+// The Customer & Bill rebuild replaced .row3.address-grid with .fgrid-addr.
+// The billing block still uses row3 elsewhere; assert the ADDRESS GRID exists in
+// whichever form, and that it collapses responsively.
+// Explicit CSS Grid replaced the fgrid helpers.
+check('  ...and the markup uses the mockup address grid',
+  /class="address"/.test(html) && (html.match(/class="address"/g)||[]).length>=2);
+check('  ...declared 2fr 1fr 110px with a full-width street',
+  /\.address\{display:grid;grid-template-columns:2fr 1fr 110px/.test(css)
+  && /\.address \.street\{grid-column:1\/-1/.test(css));
+check('  ...collapsing at the mockup breakpoint',
+  /@media\(max-width:900px\)[\s\S]*?\.address\{grid-template-columns:1fr 120px/.test(css));
 check('modals become bottom sheets on mobile',
   /@media \(max-width:820px\)[\s\S]{0,600}\.cee-modal-overlay\{padding:0;align-items:flex-end/.test(css));
 check('long values wrap rather than overflow', /overflow-wrap:anywhere/.test(css));

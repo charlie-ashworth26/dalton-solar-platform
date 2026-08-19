@@ -15,7 +15,8 @@ import time
 from datetime import datetime
 from urllib.parse import urlparse
 
-from flask import Blueprint, request, jsonify, g, redirect
+from flask import Blueprint, request, jsonify, g, redirect, make_response
+from markupsafe import escape
 
 from db import query_one, execute
 from auth import require_auth, require_role, require_staff_or_customer
@@ -679,6 +680,69 @@ def open_contract_review(token):
     parsed = urlparse(url or "")
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return jsonify({"error": "Perch did not return a review URL for that contract."}), 502
+    # PRE-FLIGHT: confirm the object actually exists before handing the browser
+    # to S3.
+    #
+    # A National Grid enrollment produced a valid presigned URL for
+    # .../perch-credit-check-consent-1-0.pdf whose OBJECT was missing, so the rep
+    # was redirected into raw S3 XML ("NoSuchKey. The specified key does not
+    # exist."). The URL is Perch's, unmodified - the object is simply absent on
+    # their side - but a raw XML error page is a poor way to learn that.
+    #
+    # A ranged GET of one byte is used rather than HEAD: presigned signatures
+    # cover the HTTP method, so HEAD against a GET-signed URL fails signature
+    # validation and would produce a false negative. Nothing is downloaded,
+    # stored or cached - this only asks whether the key resolves.
+    #
+    # The check NEVER blocks on its own failure: any error reaching S3 falls
+    # through to the redirect, so Dalton cannot make a working link unusable.
+    missing_detail = None
+    try:
+        import requests as _rq
+        probe = _rq.get(url, headers={"Range": "bytes=0-0"}, timeout=6, stream=True)
+        try:
+            if probe.status_code in (403, 404):
+                body = (probe.text or "")[:400]
+                if "NoSuchKey" in body or probe.status_code == 404:
+                    missing_detail = "NoSuchKey"
+        finally:
+            probe.close()
+    except Exception:
+        missing_detail = None      # unreachable probe -> proceed as before
+
+    if missing_detail:
+        audit.log(
+            "perch_contract_document_missing", enrollment_id=ctx["enrollment_id"],
+            user_id=ctx["user_id"],
+            details={"contract_index": index, "contract_name": item.get("contract_name"),
+                     "reason": missing_detail},
+            ip_address=request.remote_addr,
+        )
+        _contract_review_tokens.pop(token, None)
+        # This endpoint is loaded INSIDE the review iframe, so the reply must be
+        # readable as a page. Returning JSON here would be nearly as opaque to
+        # the rep as the raw S3 XML this replaces.
+        name = escape(item.get("contract_name") or "This document")
+        page = (
+            "<!doctype html><meta charset='utf-8'>"
+            "<title>Document unavailable</title>"
+            "<style>body{margin:0;padding:28px;font:15px/1.5 Inter,system-ui,sans-serif;"
+            "color:#14223a;background:#fff}h1{font-size:17px;margin:0 0 10px}"
+            "p{margin:0 0 10px;color:#5f6f85}code{font:12.5px ui-monospace,monospace;"
+            "background:#f1f4f8;padding:2px 5px;border-radius:4px}</style>"
+            f"<h1>{name} isn't available right now</h1>"
+            "<p>Perch issued a valid link, but the document is missing on their "
+            "storage. This is on Perch's side &mdash; nothing is wrong with this "
+            "enrollment.</p>"
+            "<p>The other agreements open normally and the enrollment can still be "
+            "completed. Please report this document name to Perch:</p>"
+            f"<p><code>{name}</code></p>"
+        )
+        resp = make_response(page, 502)
+        resp.headers["Content-Type"] = "text/html; charset=utf-8"
+        resp.headers["Cache-Control"] = "no-store, private"
+        return resp
+
     audit.log(
         "perch_contract_review_opened", enrollment_id=ctx["enrollment_id"],
         user_id=ctx["user_id"], details={"contract_index": index, "contract_name": item.get("contract_name")},

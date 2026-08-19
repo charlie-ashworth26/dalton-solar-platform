@@ -149,9 +149,11 @@ def main():
     check("  ...while an UNCHOSEN dual location still demands a choice", not unchosen_ok)
 
     section("H. LMI RESUME INCLUDES ELIGIBILITY")
+    # PASS 1 merged step 3 into step 2: Residential [1,2,5], LMI [1,2,4,5].
     check("LMI branch keeps the eligibility step",
-          "if(needsLmi === false) return [1,2,3,5];" in JS)
-    check("  ...so LMI runs the full 5-step sequence", "return [1,2,3,4,5];" in JS)
+          "if(needsLmi === false) return [1,2,5];" in JS)
+    check("  ...so LMI runs the 4-step sequence including Eligibility",
+          "return [1,2,4,5];" in JS)
 
     # ═══════════════════════════════════════════════════════
     section("F/G. RESIDENTIAL selection behaves identically")
@@ -169,8 +171,8 @@ def main():
         d2 = (latest_capacity_check(eid) or {}).get("project_details") or {}
     check("  ...and resolves without a prompt",
           resolve_customer_type(d2, requested="Residential")[0] == "Residential")
-    check("G. Residential SKIPS eligibility (4 steps)",
-          "if(needsLmi === false) return [1,2,3,5];" in JS)
+    check("G. Residential SKIPS eligibility (PASS 1: 3 steps, [1,2,5])",
+          "if(needsLmi === false) return [1,2,5];" in JS)
 
     section("Clearing returns to 'not chosen' — never a silent default")
     r = c.post(f"/api/perch/enrollments/{eid}/program", headers=rep,

@@ -353,8 +353,18 @@ def main():
     check("no hardcoded utility select in markup", 'id="perch-utility"' not in html)
     check("no hardcoded product container in markup", 'perch-products-wrap' not in html)
     check("existing utility-bill dropzone is preserved", 'id="bill-dropzone"' in html and 'id="bill-file"' in html)
-    check("existing Contact/password screen is preserved", 'id="step-contact"' in html and 'id="c-pass"' in html and 'id="c-pass-confirm"' in html)
-    check("Contact email is displayed but not requested a second time", 'id="c-email"' in html and 'id="c-email" placeholder="name@email.com" readonly' in html)
+    # PASS 1 merged the Contact & Login screen into Customer & Bill. The
+    # CONTROLS are what matter and all survived; the separate page did not.
+    check("contact/password controls preserved (now on Customer & Bill)",
+          'id="c-pass"' in html and 'id="c-pass-confirm"' in html and 'id="c-phone"' in html)
+    check("  ...and the dedicated Contact screen is gone",
+          'id="step-contact"' not in html)
+    # The context strip was replaced by the mockup's utility chip, so
+    # c-email-display is gone. The RULE that matters is unchanged: the email is
+    # never re-asked as a visible field.
+    check("Contact email is not requested a second time",
+          'id="c-email"' in html and 'readonly hidden' in html
+          and 'id="c-email" placeholder' not in html)
     check("existing LMI upload screen is preserved", 'id="lmi-dropzone"' in html and 'id="lmi-file"' in html)
     # INTENTIONALLY UPDATED: "Acceptance not enabled" was removed when contract
     # acceptance was implemented. The screen must still be the SAME existing

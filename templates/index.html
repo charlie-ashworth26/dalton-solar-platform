@@ -120,7 +120,7 @@
       <div class="stat-grid" id="dash-stats"></div>
       <div class="section-title">Recent customers <a onclick="showView('customers')">View all →</a></div>
       <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Customer</th><th>Enrollment</th><th>Status</th><th>Last modified</th><th></th></tr></thead>
+        <thead><tr><th>Customer</th><th>Enrollment</th><th>Status</th><th>Utility</th><th>Added</th><th>Last modified</th></tr></thead>
         <tbody id="dash-recent-body"></tbody>
       </table></div>
     </div>
@@ -194,7 +194,7 @@
         <input class="search-input" placeholder="Search customers…" oninput="renderCustomers(this.value)">
       </div>
       <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Customer</th><th>Enrollment</th><th>Status</th><th>Added</th><th>Last modified</th><th></th></tr></thead>
+        <thead><tr><th>Customer</th><th>Enrollment</th><th>Status</th><th>Utility</th><th>Added</th><th>Last modified</th></tr></thead>
         <tbody id="customers-body"></tbody>
       </table></div>
     </div>
@@ -203,14 +203,11 @@
       <div class="wizard-wrap">
         <div class="wizard-inner">
           <div class="exit-wizard" onclick="exitWizard()">← Back to dashboard</div>
-          <div class="arc-panel">
-            <svg viewBox="0 0 400 78" width="100%" height="60" id="arc-svg">
-              <path d="M 20 66 Q 200 4 380 66" fill="none" stroke="#DFE7E2" stroke-width="2"/>
-              <path id="arc-progress" d="M 20 66 Q 200 4 380 66" fill="none" stroke="#1F6E52" stroke-width="2.5" stroke-dasharray="1" stroke-dashoffset="1" pathLength="1"/>
-              <circle id="arc-sun" cx="20" cy="66" r="6.5" fill="#D8A31A"/>
-            </svg>
-            <div class="step-labels" id="step-labels"></div>
-          </div>
+          <!-- Branch-aware stepper. Nodes are rendered by renderStepper() from
+               activeSteps(), so a Residential enrollment contains no Eligibility
+               node at all - absent from the sequence, not hidden. Replaces the
+               previous decorative SVG arc. -->
+          <nav class="stepper" id="stepper" aria-label="Enrollment progress"></nav>
 
           <div class="screen wizard-step" id="step-project">
             <!-- MILESTONE 2: workflow renderer mount point.
@@ -222,81 +219,108 @@
             <div id="workflow-root"></div>
           </div>
 
-          <div class="screen wizard-step" id="step-bill">
-            <div class="card">
-              <p class="card-eyebrow">New enrollment</p>
-              <h2>Upload the utility bill</h2>
-              <p class="lead">Upload a PDF or photo of the bill — we'll pull the customer's name, address, account number, and bill amount automatically. Double-check everything below before continuing.</p>
-              <div class="dropzone" id="bill-dropzone" onclick="document.getElementById('bill-file').click()"
+          <!-- ══════════════════════════════════════════════════════════════
+               CUSTOMER & BILL — rebuilt composition.
+
+               The old markup was a single narrow .card containing a dropzone,
+               a flat run of .field inputs and the pasted-in contact form. That
+               structure IS the "old Dalton" look, so it is gone. This is a
+               full-width workbench: a page header, a main work column of
+               spacing-separated sections (no nested bordered cards), and a
+               contextual side rail.
+
+               Every id and inline handler the JS depends on is reattached
+               verbatim - only the presentation changed.
+               ══════════════════════════════════════════════════════════════ -->
+          <!-- CUSTOMER & BILL — built to the approved mockup.
+               Section order, grids and scale follow the template exactly.
+               ALL values are bound to live enrollment state; the mockup's
+               example text (National Grid NY, 5%, JOHN J CUSTOMER...) appears
+               nowhere. POD ID is preserved as a conditional utility field even
+               though the mockup does not show it. -->
+          <div class="screen wizard-step wb" id="step-bill">
+            <h1 class="wb-title">Customer &amp; bill</h1>
+            <p class="wb-sub">Choose the savings program, upload the utility bill, and confirm the customer details before continuing.</p>
+
+            <!-- 1 · PROGRAM (utility chip, right-aligned, from live state) -->
+            <section class="sec">
+              <div class="sec-head">
+                <div><h2>Choose a savings program</h2><p>Rates come directly from the current utility availability.</p></div>
+                <div class="util-chip" id="util-chip" hidden></div>
+              </div>
+              <div id="program-options" class="prog-wrap"></div>
+              <p class="hint" id="program-error" style="display:none;"></p>
+            </section>
+
+            <!-- 2 · CUSTOMER ACCESS -->
+            <section class="sec">
+              <div class="sec-head"><div><h2>Customer access</h2><p>Add the phone number and create the customer's login.</p></div></div>
+              <input type="email" id="c-email" readonly hidden>
+              <div class="access">
+                <div class="fd"><label class="lbl" for="c-phone">Phone number</label><input type="tel" id="c-phone" inputmode="tel" autocomplete="tel" placeholder="(555) 555-5555"></div>
+                <div class="fd"><label class="lbl" for="c-pass">Password</label><span class="pw-wrap"><input type="password" id="c-pass" autocomplete="new-password"><button type="button" class="pw-eye" id="c-pass-eye" aria-label="Show password" aria-pressed="false" onclick="togglePasswordVisibility('c-pass','c-pass-eye')">&#128065;</button></span></div>
+                <div class="fd"><label class="lbl" for="c-pass-confirm">Confirm password</label><span class="pw-wrap"><input type="password" id="c-pass-confirm" autocomplete="new-password"><button type="button" class="pw-eye" id="c-pass-confirm-eye" aria-label="Show password" aria-pressed="false" onclick="togglePasswordVisibility('c-pass-confirm','c-pass-confirm-eye')">&#128065;</button></span></div>
+              </div>
+              <p class="hint" id="contact-submit-error" style="display:none;"></p>
+            </section>
+
+            <!-- 3 · UTILITY BILL -->
+            <section class="sec">
+              <div class="sec-head"><div><h2>Utility bill</h2><p>Upload the bill and Dalton will read the account details.</p></div></div>
+              <div class="upload" id="bill-dropzone" onclick="document.getElementById('bill-file').click()"
                    ondragover="dzDragOver(event,'bill-dropzone')" ondragleave="dzDragLeave(event,'bill-dropzone')" ondrop="dzDrop(event,'bill-dropzone',handleBillUpload)">
-                <div class="dz-title">Drag a file here, or click to browse</div>
-                <div class="dz-sub">PDF works best · JPG/PNG also supported · up to 4MB</div>
+                <div>
+                  <svg class="up-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <strong>Drop the bill here, or browse</strong>
+                  <small>PDF, JPG or PNG &middot; up to 4MB<br>Multiple pages supported</small>
+                </div>
               </div>
               <input type="file" id="bill-file" multiple accept=".pdf,.jpg,.jpeg,.png,.heic" onchange="handleBillUpload(this.files)">
               <div id="bill-file-chip"></div>
-                  <div id="bill-fileset"></div>
-                  <p class="helper" id="bill-prefill-scope" style="display:none;margin-top:8px;"></p>
+              <div id="bill-fileset"></div>
               <div id="ocr-container"></div>
+              <p class="helper" id="bill-prefill-scope"></p>
+            </section>
 
-              <div class="row2" style="margin-top:22px;">
-                <div class="field"><label>First name</label><input type="text" id="c-first" oninput="checkBillReady()"></div>
-                <div class="field"><label>Last name</label><input type="text" id="c-last" oninput="checkBillReady()"></div>
+            <!-- 4 · REVIEW ACCOUNT DETAILS -->
+            <section class="sec">
+              <div class="sec-head"><div><h2>Review account details</h2><p>Dalton read these from the bill. Correct anything that looks wrong.</p></div></div>
+              <div class="fields">
+                <div class="fd"><label class="lbl" for="c-first">First name</label><input type="text" id="c-first" autocomplete="given-name" oninput="checkBillReady()"></div>
+                <div class="fd"><label class="lbl" for="c-last">Last name</label><input type="text" id="c-last" autocomplete="family-name" oninput="checkBillReady()"></div>
+                <div class="fd full"><label class="lbl" for="c-acct">Utility account number</label><input type="text" id="c-acct" class="mono-field" inputmode="numeric" oninput="checkBillReady()"><span class="fld-h" id="acct-rule-help"></span></div>
+                <!-- POD ID: utility-specific. Shown ONLY when the backend rule
+                     sets requires_pod_id (configureBillUtilityRules). Not in the
+                     mockup, deliberately preserved. -->
+                <div class="fd full" id="pod-id-field" style="display:none;"><label class="lbl" for="c-pod">POD ID</label><input type="text" id="c-pod" class="mono-field" oninput="checkBillReady()"><span class="fld-h" id="pod-rule-help"></span></div>
               </div>
-              <div class="field"><label>Utility account number</label><input type="text" class="mono-field" id="c-acct" inputmode="numeric" maxlength="20" placeholder="1234567890" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,20); checkBillReady();"><p class="helper" id="acct-rule-help"></p></div>
-              <div class="field" id="pod-id-field" style="display:none;"><label>Secondary account identifier / POD ID</label><input type="text" class="mono-field" id="c-pod" maxlength="20" oninput="checkBillReady()"><p class="helper" id="pod-rule-help"></p></div>
-              <div class="field"><label>Street address</label><input type="text" id="a-street" placeholder="123 Maple Ave" oninput="syncBillingFromService(); checkBillReady()"></div>
-              <div class="field"><label>Unit / Apt <span style="font-weight:400;color:var(--ink-faint);">(optional)</span></label><input type="text" id="a-unit" oninput="syncBillingFromService()"></div>
-              <div class="row3 address-grid">
-                <div class="field"><label>City</label><input type="text" id="a-city" oninput="syncBillingFromService(); checkBillReady()"></div>
-                <div class="field"><label for="a-state">State</label><select id="a-state" onchange="syncBillingFromService(); checkBillReady()"><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY" selected>NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select></div>
-                <div class="field"><label>ZIP</label><input type="text" id="a-zip" class="mono-field" maxlength="5" oninput="syncBillingFromService(); checkBillReady()"></div>
+              <div class="address">
+                <div class="fd street"><label class="lbl" for="a-street">Street address</label><input type="text" id="a-street" autocomplete="address-line1" oninput="syncBillingFromService(); checkBillReady()"></div>
+                <div class="fd"><label class="lbl" for="a-city">City</label><input type="text" id="a-city" autocomplete="address-level2" oninput="syncBillingFromService(); checkBillReady()"></div>
+                <div class="fd"><label class="lbl" for="a-state">State</label><select id="a-state" onchange="syncBillingFromService(); checkBillReady()"><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY" selected>NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select></div>
+                <div class="fd"><label class="lbl" for="a-zip">ZIP</label><input type="text" id="a-zip" class="mono-field" inputmode="numeric" maxlength="5" oninput="syncBillingFromService(); checkBillReady()"></div>
+                <div class="fd" id="a-unit-wrap"><label class="lbl" for="a-unit">Unit / Apt <em>optional</em></label><input type="text" id="a-unit" oninput="syncBillingFromService()"></div>
               </div>
-              <div class="field" style="margin-top:4px;">
-                <label style="display:flex;gap:9px;align-items:center;font-weight:600;cursor:pointer;"><input type="checkbox" id="billing-same" checked onchange="toggleBillingAddress()" style="width:auto;"> Billing / mailing address is the same as the service address</label>
-              </div>
+              <label class="same"><input type="checkbox" id="billing-same" checked onchange="toggleBillingAddress()"> Billing address is the same as the service address</label>
               <div id="billing-address-fields" style="display:none;">
-                <div class="field"><label>Billing street address</label><input type="text" id="b-street" placeholder="123 Maple Ave" oninput="checkBillReady()"></div>
-                <div class="field"><label>Billing unit / Apt <span style="font-weight:400;color:var(--ink-faint);">(optional)</span></label><input type="text" id="b-unit"></div>
-                <div class="row3 address-grid">
-                  <div class="field"><label>Billing city</label><input type="text" id="b-city" oninput="checkBillReady()"></div>
-                  <div class="field"><label for="b-state">State</label><select id="b-state"><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY" selected>NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select></div>
-                  <div class="field"><label>Billing ZIP</label><input type="text" id="b-zip" class="mono-field" maxlength="5" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,5); checkBillReady();"></div>
+                <div class="address">
+                  <div class="fd street"><label class="lbl" for="b-street">Billing street address</label><input type="text" id="b-street"></div>
+                  <div class="fd"><label class="lbl" for="b-city">City</label><input type="text" id="b-city"></div>
+                  <div class="fd"><label class="lbl" for="b-state">State</label><select id="b-state"><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY" selected>NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select></div>
+                  <div class="fd"><label class="lbl" for="b-zip">ZIP</label><input type="text" id="b-zip" class="mono-field" inputmode="numeric" maxlength="5"></div>
+                  <div class="fd"><label class="lbl" for="b-unit">Unit / Apt <em>optional</em></label><input type="text" id="b-unit"></div>
                 </div>
               </div>
-              <div class="helper" id="bill-requirements" style="display:none;margin-bottom:10px;"></div>
-                <p class="helper" id="bill-submit-error" style="display:none;color:var(--danger);margin-bottom:12px;"></p>
+            </section>
 
-              <div class="field">
-                <label>Average monthly bill amount</label>
-                <select id="bill-amount" onchange="checkBillReady()">
-                  <option value="">Select a range</option>
-                  <option value="Less than $75">Less than $75</option>
-                  <option value="$75 – $149">$75 – $149</option>
-                  <option value="$150 – $249">$150 – $249</option>
-                  <option value="$250+">$250+</option>
-                </select>
-              </div>
-              <div class="wizard-actions"><button class="btn btn-ghost" onclick="backFromCustomer()">Back</button><button class="btn btn-primary" id="btn-bill-next" onclick="submitBill()" disabled>Continue</button></div>
+            <div id="bill-requirements" class="req" style="display:none;"></div>
+            <p class="hint" id="bill-submit-error" style="display:none;"></p>
+            <div class="actions">
+              <button class="btn btn-ghost" onclick="backFromCustomer()">Back</button>
+              <button class="btn btn-primary" id="btn-bill-next" onclick="submitBill()" disabled>Continue &rarr;</button>
             </div>
           </div>
-
-          <div class="screen wizard-step" id="step-contact">
-            <div class="card">
-              <p class="card-eyebrow">New enrollment</p>
-              <h2>Contact &amp; login</h2>
-              <p class="lead">These aren't on the bill — enter the customer's contact info and set the credentials they'll use to sign in later.</p>
-              <div class="field"><label>Email</label><input type="email" id="c-email" placeholder="name@email.com" readonly style="background:#FBFCFB;color:var(--ink-muted);"><p class="helper">This is the email Perch opened the enrollment session with. To change it, go back to the availability step and re-check &mdash; that re-opens the session with the new address.</p></div>
-              <div class="field"><label>Phone number</label><input type="tel" id="c-phone" placeholder="(555) 555-5555"></div>
-              <p class="helper" style="margin:-6px 0 14px;">Set login credentials for the customer — they'll use these to sign in and review their agreement.</p>
-              <div class="row2">
-                <div class="field"><label>Password</label><span class="pw-wrap"><input type="password" id="c-pass" placeholder="••••••••"><button type="button" class="pw-eye" id="c-pass-eye" aria-label="Show password" aria-pressed="false" title="Show password" onclick="togglePasswordVisibility('c-pass','c-pass-eye')">👁</button></span></div>
-                <div class="field"><label>Confirm password</label><span class="pw-wrap"><input type="password" id="c-pass-confirm" placeholder="••••••••"><button type="button" class="pw-eye" id="c-pass-confirm-eye" aria-label="Show password" aria-pressed="false" title="Show password" onclick="togglePasswordVisibility('c-pass-confirm','c-pass-confirm-eye')">👁</button></span></div>
-              </div>
-              <p class="helper" id="contact-submit-error" style="display:none;color:var(--danger);margin-top:6px;"></p><div class="wizard-actions"><button class="btn btn-ghost" onclick="goStep(2)">Back</button><button class="btn btn-primary" id="btn-contact-next" onclick="submitContact()">Continue</button></div>
-            </div>
-          </div>
-
-          <div class="screen wizard-step" id="step-lmi">
+<div class="screen wizard-step" id="step-lmi">
             <div class="card">
               <p class="card-eyebrow">New enrollment</p>
               <h2 id="lmi-title">LMI documentation</h2>
@@ -310,20 +334,20 @@
 
               <div id="lmi-doc-panel">
                 <div class="field">
-                  <label>Document type</label>
-                  <select id="lmi-doctype" onchange="checkLmiReady()">
-                    <option value="">Select a document type</option>
-                    <option value="Electric bill showing HEAP/LIHEAP/EAP assistance">Electric bill showing HEAP/LIHEAP/EAP assistance</option>
-                    <option value="SNAP award letter">SNAP award letter</option>
-                    <option value="Free/reduced school lunch letter">Free/reduced school lunch letter</option>
-                    <option value="SNAP card">SNAP card</option>
-                    <option value="Housing authority certification / Section 8">Housing authority certification / Section 8</option>
-                    <option value="Disability benefits letter">Disability benefits letter</option>
-                    <option value="SSI">SSI</option>
-                    <option value="Medicaid award letter">Medicaid award letter</option>
-                    <option value="Lifeline qualification">Lifeline qualification</option>
-                    <option value="SLIP">SLIP</option>
-                    <option value="Other qualifying document">Other qualifying document</option>
+                  <label for="lmi-doctype">Qualifying program</label>
+                  <!-- Qualifying PROGRAM. The option VALUE is the authoritative Perch
+                       source_type from perch_proof_doc_types; only the visible text is a
+                       cleaner business label. Document FORMAT is a separate dimension
+                       below, exactly as Perch models it. No program is invented here. -->
+                  <select id="lmi-doctype" onchange="onLmiProgramChange()">
+                    <option value="">Select a qualifying program</option>
+                    <option value="proof_doc_snap">SNAP</option>
+                    <option value="proof_doc_medicaid">Medicaid</option>
+                    <option value="proof_doc_liheap">HEAP / EAP / LIHEAP</option>
+                    <option value="proof_doc_section_8">Section 8 / Housing</option>
+                    <option value="proof_doc_ssi">Supplemental Security Income (SSI)</option>
+                    <option value="proof_doc_lifeline_usac">Lifeline</option>
+                    <option value="proof_doc_free_reduced_school_lunch_letter">Free / reduced school lunch</option>
                   </select>
                 </div>
                 <div class="row2">
@@ -365,35 +389,77 @@
                   <div class="toggle-btn" id="ami-above" onclick="setIncomeAnswer(false)">Income is above this level</div>
                 </div>
               </div>
-              <p class="helper" id="lmi-submit-error" style="display:none;color:var(--danger);margin-top:8px;"></p><div class="wizard-actions"><button class="btn btn-ghost" onclick="goStep(3)">Back</button><button class="btn btn-primary" id="btn-lmi-next" onclick="submitLmi()" disabled>Continue</button></div>
+              <p class="helper" id="lmi-submit-error" style="display:none;color:var(--danger);margin-top:8px;"></p><div class="wizard-actions"><button class="btn btn-ghost" onclick="backFromLmi()">Back</button><button class="btn btn-primary" id="btn-lmi-next" onclick="submitLmi()" disabled>Continue</button></div>
             </div>
           </div>
 
-          <div class="screen wizard-step" id="step-agreement">
-            <div class="card">
-              <p class="card-eyebrow">New enrollment</p>
-              <h2>Review contracts</h2>
-              <p class="lead">Review the agreements for this enrollment before completing it.</p>
-              <div class="review-block">
-                <div class="review-head">Customer</div>
-                <div class="review-line"><span class="rl-label">Name</span><span class="rl-val" id="rv-name"></span></div>
-                <div class="review-line"><span class="rl-label">Email</span><span class="rl-val" id="rv-email"></span></div>
-                <div class="review-line"><span class="rl-label">Phone</span><span class="rl-val" id="rv-phone"></span></div>
-                <div class="review-line"><span class="rl-label">Account #</span><span class="rl-val mono" id="rv-acct"></span></div>
+          <!-- AGREEMENTS / REVIEW & FINISH — built to the approved mockup.
+               The legal acknowledgement itself is rendered into #agr-host-rep by
+               the PROTECTED component in app.js and is not touched here; the
+               mockup only governs the layout around it. Every value is bound to
+               live Dalton state. -->
+          <div class="screen wizard-step agr-page" id="step-agreement">
+            <header class="page-head">
+              <div>
+                <div class="eyebrow">Final step</div>
+                <h1>Review &amp; finish</h1>
+                <p class="subtitle">Confirm the enrollment details, then review and accept the agreements.</p>
               </div>
-              <div class="review-block">
-                <div class="review-head">Project</div>
-                <div class="review-line"><span class="rl-label">Utility</span><span class="rl-val" id="rv-utility"></span></div>
-                <div class="review-line"><span class="rl-label">Service address</span><span class="rl-val" id="rv-address"></span></div>
-                <div class="review-line"><span class="rl-label">LMI</span><span class="rl-val" id="rv-lmi"></span></div>
+              <div class="complete-pill" id="agr-ready-pill" hidden>&#10003; Ready to complete</div>
+            </header>
+
+            <section class="agr-card">
+              <div class="summary">
+                <div class="summary-top">
+                  <div class="summary-title">Enrollment summary</div>
+                  <div class="enr" id="rv-code"></div>
+                </div>
+                <div class="summary-grid">
+                  <section class="group">
+                    <div class="group-label">Customer</div>
+                    <div class="primary" id="rv-name"></div>
+                    <div class="value-row"><div class="k">Email</div><div class="v" id="rv-email"></div></div>
+                    <div class="value-row"><div class="k">Phone</div><div class="v" id="rv-phone"></div></div>
+                  </section>
+                  <section class="group">
+                    <div class="group-label">Service</div>
+                    <div class="primary" id="rv-utility"></div>
+                    <div class="value-row"><div class="k">Service address</div><div class="v" id="rv-address"></div></div>
+                    <div class="value-row"><div class="k">Utility account</div><div class="v mono" id="rv-acct"></div></div>
+                  </section>
+                  <section class="group">
+                    <div class="group-label">Program</div>
+                    <div class="primary" id="rv-program"></div>
+                    <div class="savings" id="rv-savings"></div>
+                    <!-- LMI proof: "<Program> · <Format>". Never the filename. -->
+                    <div class="proof" id="rv-lmi-row" style="display:none;"><strong id="rv-lmi"></strong></div>
+                  </section>
+                </div>
               </div>
-              <div id="pre-send">
+
+              <div class="divider"></div>
+
+              <div class="agreement-wrap">
+                <div class="agreement-heading">
+                  <div>
+                    <h2>Agreements</h2>
+                    <p>Review each document, then confirm to complete the enrollment.</p>
+                  </div>
+                  <div class="final-label">Final step</div>
+                </div>
+                <!-- PROTECTED: the acknowledgement, its links, the single
+                     checkbox and Agree &amp; finish are rendered here verbatim
+                     by mountRepAgreements(). Do not inline any legal copy. -->
+                <div id="pre-send">
                   <div id="agr-host-rep"></div>
                 </div>
-              
+              </div>
+            </section>
+
+            <div class="agr-foot">
+              <button class="btn btn-ghost" onclick="backFromAgreement()">Back</button>
             </div>
           </div>
-
         </div>
       </div>
     </div>
@@ -405,11 +471,14 @@
 <div class="screen" id="screen-complete">
   <div class="customer-wrap">
     <div class="card">
-      <div class="complete-wrap">
-        <div class="complete-check"></div>
-        <h2 style="margin-bottom:6px;">Enrollment submitted</h2>
-        <p class="lead" style="max-width:340px;" id="complete-copy">Signed and sent to QA. The rep dashboard will show this as <strong>Customer - Verified</strong> once it clears review.</p>
-        <button class="btn btn-primary btn-lg" id="complete-cta" onclick="completeReturnToDashboard()">Return to dashboard</button>
+      <div class="complete-wrap done-wrap">
+        <div class="done-mark complete-check">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <h2 class="done-title">Enrollment complete</h2>
+        <p class="done-sub" id="complete-copy">The agreements are signed and the enrollment has been submitted.</p>
+        <div class="summary summary-done" id="complete-summary"></div>
+        <button class="btn btn-primary btn-lg" id="complete-cta" onclick="completeReturnToDashboard()">Back to dashboard</button>
       </div>
     </div>
   </div>

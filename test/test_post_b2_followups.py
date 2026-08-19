@@ -319,8 +319,14 @@ def main():
               query_one("SELECT perch_token_email FROM enrollments WHERE id=?",
                         (eid,))["perch_token_email"] == "changed@example.com")
     check("  ...without creating another enrollment", count_enrollments() == 1)
-    check("the helper text explains the supported path",
-          "availability step" in HTML and "re-check" in HTML)
+    # PASS 1 replaced the long readonly-email helper paragraph with a quiet
+    # context line. The RULE is unchanged and still enforced server-side; the
+    # assertion now targets that enforcement rather than removed prose.
+    check("the email is still read-only and never re-asked",
+          'readonly hidden' in HTML and 'id="c-email" placeholder' not in HTML)
+    check("  ...and the Perch-session rule is still enforced by the backend",
+          "must match the email used to open this Perch enrollment session"
+          in adapter_src)
 
     # ═══════════════════════════════════════════════════════
     section("7. B1 / B2 / PHASE A PRESERVED")

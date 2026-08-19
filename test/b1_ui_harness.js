@@ -71,9 +71,10 @@ console.log('='.repeat(72));
   await vm.runInContext('loadProgramOptions();',e.ctx); await tick(); await tick();
   check('calls GET /programs', e.calls.some(c=>c.url.includes('/programs')&&c.method==='GET'));
   let hostHtml=e.cache.get('program-options').innerHTML;
-  check('single option rendered', (hostHtml.match(/prog-option/g)||[]).length===1);
+  check('single option rendered', (hostHtml.match(/class="pg(?:\"| )/g)||[]).length===1);
   check('  ...shows Residential', hostHtml.includes('Residential'));
-  check('  ...shows the REAL savings from the response', hostHtml.includes('8% savings'));
+  check('  ...shows the REAL savings from the response',
+    hostHtml.includes('>8<') && hostHtml.includes('% savings'));
   check('  ...auto-selected (unambiguous)',
     vm.runInContext("selectedProgram && selectedProgram.customer_type",e.ctx)==='Residential');
   check('  ...no fake LMI option', !hostHtml.includes('Residential LMI'));
@@ -83,12 +84,12 @@ console.log('='.repeat(72));
                              selection_required:true}}]]);
   await vm.runInContext('loadProgramOptions();',e.ctx); await tick(); await tick();
   hostHtml=e.cache.get('program-options').innerHTML;
-  check('both options rendered', (hostHtml.match(/prog-option/g)||[]).length===2);
+  check('both options rendered', (hostHtml.match(/class="pg(?:\"| )/g)||[]).length===2);
   check('  ...each with its OWN savings',
-    hostHtml.includes('8% savings')&&hostHtml.includes('20% savings'));
+    hostHtml.includes('>8<')&&hostHtml.includes('>20<'));
   check('  ...NOT auto-selected',
     vm.runInContext("selectedProgram === null",e.ctx)===true);
-  check('  ...rep is prompted to choose', /Choose the program/.test(hostHtml));
+  check('  ...rep is prompted to choose', /Choose one/i.test(hostHtml));
   check('  ...Continue is blocked until chosen',
     e.cache.get('wf-primary') ? e.cache.get('wf-primary').disabled===true : true);
   vm.runInContext("selectProgram('LMI');",e.ctx);
@@ -108,7 +109,7 @@ console.log('='.repeat(72));
                              selection_required:false}}]]);
   await vm.runInContext('loadProgramOptions();',e.ctx); await tick(); await tick();
   hostHtml=e.cache.get('program-options').innerHTML;
-  check('no program options rendered', !hostHtml.includes('prog-option'));
+  check('no program options rendered', !/class="pg(?:\"| )/.test(hostHtml));
   check('  ...clean no-availability state', /No community solar capacity/.test(hostHtml));
   check('  ...no invented savings', !/%\s*savings/.test(hostHtml));
   check('no business logic duplicated in JS',
@@ -117,28 +118,28 @@ console.log('='.repeat(72));
   console.log('\n--- 3. BRANCH-AWARE NAVIGATION ---');
   e=env([]);
   vm.runInContext("selectedProgram=null;",e.ctx);
-  check('unknown program keeps the full sequence',
-    vm.runInContext("activeSteps().join(',')",e.ctx)==='1,2,3,4,5');
+  check('unknown program keeps the full sequence (Eligibility retained)',
+    vm.runInContext("activeSteps().join(',')",e.ctx)==='1,2,4,5');
   vm.runInContext("selectedProgram={customer_type:'Residential',lmi_required:false};",e.ctx);
   check('Residential DROPS the LMI step',
-    vm.runInContext("activeSteps().join(',')",e.ctx)==='1,2,3,5');
-  check('  ...next after Customer skips to Agreements',
-    vm.runInContext("nextStepAfter(3)",e.ctx)===5);
-  check('  ...back from Agreements returns to Customer',
-    vm.runInContext("prevStepBefore(5)",e.ctx)===3);
-  check('  ...progress has 4 positions',
-    vm.runInContext("activeSteps().length",e.ctx)===4);
+    vm.runInContext("activeSteps().join(',')",e.ctx)==='1,2,5');
+  check('  ...next after Customer & Bill skips to Agreements',
+    vm.runInContext("nextStepAfter(2)",e.ctx)===5);
+  check('  ...back from Agreements returns to Customer & Bill',
+    vm.runInContext("prevStepBefore(5)",e.ctx)===2);
+  check('  ...progress has 3 positions',
+    vm.runInContext("activeSteps().length",e.ctx)===3);
   vm.runInContext("selectedProgram={customer_type:'LMI',lmi_required:true};",e.ctx);
   check('LMI KEEPS the eligibility step',
-    vm.runInContext("activeSteps().join(',')",e.ctx)==='1,2,3,4,5');
-  check('  ...next after Customer is Eligibility',
-    vm.runInContext("nextStepAfter(3)",e.ctx)===4);
+    vm.runInContext("activeSteps().join(',')",e.ctx)==='1,2,4,5');
+  check('  ...next after Customer & Bill is Eligibility',
+    vm.runInContext("nextStepAfter(2)",e.ctx)===4);
   check('  ...back from Agreements returns to Eligibility',
     vm.runInContext("prevStepBefore(5)",e.ctx)===4);
   check('step labels render from the ACTIVE sequence',
     /renderStepLabels/.test(src));
-  check('progress uses the active sequence, not a fixed 5',
-    /stepPosition\(n\)\/\(seq\.length-1\)/.test(src));
+  check('the stepper renders from the active sequence, not a fixed 5',
+    /function renderStepper\(/.test(src) && /activeSteps\(\)/.test(src));
   check('backend still decides the branch (proof_docs -> step 4)',
     /nextStepKey === 'proof_docs'/.test(src));
 

@@ -139,6 +139,14 @@ def main():
 
     section("BUG 1 - contracts_review resume is UNCHANGED")
     eid2 = c.post("/api/perch/drafts", headers=rep).get_json()["enrollment_id"]
+    # Credentials are created during Customer & Bill, BEFORE /enroll - so they
+    # must be written before the workflow is advanced past the commit boundary.
+    # The later PATCH in this fixture used to run after set_state, which is not
+    # an order the real flow produces and is now correctly refused (409).
+    c.patch(f"/api/enrollments/{eid2}", headers=rep, json={"customer": {
+        "first_name": "Johnnie", "last_name": "Testcustomer",
+        "email": "Charlie+Dalton1@Example.com", "phone": "5185550001",
+        "password": "CustPass1!"}})
     with app.app_context():
         workflow.set_state(eid2, "contracts_review",
                            last_response={"contracts": [], "contract_count": 0})
@@ -168,11 +176,6 @@ def main():
           "Opportunity - Review" not in login_body)
     check("customer token is stored separately from the rep token",
           "dalton_customer_token" in JS)
-
-    c.patch(f"/api/enrollments/{eid2}", headers=rep, json={"customer": {
-        "first_name": "Johnnie", "last_name": "Testcustomer",
-        "email": "Charlie+Dalton1@Example.com", "phone": "5185550001",
-        "password": "CustPass1!"}})
 
     r = c.post("/api/auth/customer-login",
                json={"email": "charlie+dalton1@example.com", "password": "CustPass1!"})

@@ -1107,6 +1107,19 @@ def select_enrollment_program(enrollment_id):
     if err:
         return err
 
+    # COMMIT BOUNDARY. Perch confirmed customer_type cannot change once an
+    # enrollment is in progress, so this is refused server-side - frontend
+    # locking alone would not be enough. The message is rep-facing and says
+    # nothing about API internals.
+    if workflow.perch_committed(enrollment_id):
+        audit.log("program_change_rejected_committed", enrollment_id=enrollment_id,
+                  user_id=g.current_user["id"], ip_address=request.remote_addr)
+        return jsonify({
+            "error": "This enrollment has already been submitted and the savings "
+                     "program can no longer be changed.",
+            "committed": True,
+        }), 409
+
     data = request.get_json(force=True, silent=True) or {}
     requested = data.get("customer_type")
 

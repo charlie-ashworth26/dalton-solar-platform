@@ -178,3 +178,97 @@ def _customer_program_savings(enrollment_id):
     and customer-facing savings figures can never diverge."""
     from routes.enrollment_routes import _program_savings
     return _program_savings(enrollment_id)
+
+
+# Destination per staff role. Server-authoritative: the client is TOLD where to
+# go, it never asks. Unknown roles fall back to the dashboard, which every staff
+# role can already reach.
+STAFF_DESTINATIONS = {
+    "sales_rep": "dashboard",
+    "admin": "dashboard",
+    "qa_reviewer": "dashboard",
+    "developer": "dashboard",
+}
+
+
+@bp.route("/signin", methods=["POST"])
+def unified_signin():
+    """ONE login for staff and customers.
+
+    Reps and customers previously had separate screens, and a customer had to
+    notice a small "sign into your agreement" link to reach theirs. This
+    authenticates either account type from one form.
+
+    THIS IS A UNIFIED LOGIN, NOT UNIFIED PERMISSIONS. It issues exactly the same
+    tokens the two original endpoints issue, through the same functions:
+      staff    -> issue_token()          scope "staff"
+      customer -> issue_customer_token() scope "customer" + enrollment_id
+    require_auth still rejects customer scope and require_customer_auth still
+    rejects staff scope, so no route becomes reachable that was not before.
+
+    PRECEDENCE: staff is checked first. The same address can legitimately exist
+    in both tables (a rep enrolling their own household), and a fixed order is
+    the only way the outcome stays deterministic. It is documented in the
+    response as `account_type` so the client never has to guess.
+
+    ENUMERATION: every failure returns the SAME message and status, whether the
+    email is unknown, belongs to a customer with no password, or belongs to a
+    customer with no enrollment. The response never reveals which table an
+    address lives in.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    email = normalize_email(data.get("email"))
+    password = data.get("password") or ""
+
+    GENERIC = "Invalid email or password."
+
+    if not email or not password:
+        return jsonify({"error": "Enter your email and password to continue."}), 400
+
+    # ---- 1. staff -------------------------------------------------------
+    user = query_one("SELECT * FROM users WHERE lower(trim(email)) = ? AND is_active = 1",
+                     (email,))
+    if user and verify_password(password, user["password_hash"]):
+        token = issue_token(user)
+        audit.log("login", user_id=user["id"], ip_address=request.remote_addr,
+                  details={"via": "unified"})
+        return jsonify({
+            "account_type": "staff",
+            "token": token,
+            "destination": STAFF_DESTINATIONS.get(user["role"], "dashboard"),
+            "user": {"id": user["id"], "email": user["email"], "role": user["role"],
+                     "full_name": user["full_name"]},
+        })
+
+    # ---- 2. customer ----------------------------------------------------
+    customer = query_one(
+        "SELECT * FROM customers WHERE lower(trim(email)) = ? ORDER BY id DESC LIMIT 1",
+        (email,))
+    if customer and customer["password_hash"] and verify_password(password, customer["password_hash"]):
+        enrollment = query_one(
+            "SELECT * FROM enrollments WHERE customer_id = ? ORDER BY id DESC LIMIT 1",
+            (customer["id"],))
+        if not enrollment:
+            # Correct credentials but nothing to show. Kept GENERIC so a valid
+            # password cannot confirm an account that has no enrollment.
+            audit.log("customer_login_failed", details={"reason": "no_enrollment",
+                                                        "customer_id": customer["id"]},
+                      ip_address=request.remote_addr)
+            return jsonify({"error": GENERIC}), 401
+        token = issue_customer_token(customer, enrollment["id"])
+        audit.log("customer_login", enrollment_id=enrollment["id"],
+                  details={"customer_id": customer["id"], "via": "unified"},
+                  ip_address=request.remote_addr)
+        return jsonify({
+            "account_type": "customer",
+            "token": token,
+            "destination": "customer_portal",
+            "customer": {"id": customer["id"], "first_name": customer["first_name"],
+                         "last_name": customer["last_name"], "email": customer["email"]},
+            "enrollment_id": enrollment["id"],
+            "enrollment_code": enrollment["enrollment_code"],
+        })
+
+    # ---- 3. neither -----------------------------------------------------
+    audit.log("login_failed", details={"via": "unified"}, ip_address=request.remote_addr)
+    return jsonify({"error": GENERIC}), 401

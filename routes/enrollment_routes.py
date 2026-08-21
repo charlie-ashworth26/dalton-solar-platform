@@ -71,6 +71,9 @@ def _serialize_enrollment(row, requester_role):
         # "—" honestly rather than inventing one. Never inferred from ZIP or
         # project.
         "utility_name": _utility_display(d.get("utility_name")),
+        # True once Perch has accepted /enroll. Persisted-state derived, so it
+        # survives reload/resume/reopen - the frontend flag it replaces did not.
+        "perch_committed": perch_workflow.perch_committed(row["id"]),
         "workflow_step_key": step_key,
         "workflow_step_label": perch_workflow.step_label(step_key) if step_key else None,
         "workflow_is_terminal": perch_workflow.is_terminal(step_key),
@@ -275,25 +278,89 @@ def update_enrollment(enrollment_id):
     row = enrollment
     data = request.get_json(force=True, silent=True) or {}
 
+    # COMMIT BOUNDARY. Everything below was part of the /enroll multipart, and
+    # Perch confirmed it cannot be updated through the API afterwards. Accepting
+    # a local edit here would silently diverge Dalton from Perch - the contracts
+    # would still carry the submitted values - so the write is refused rather
+    # than quietly saved.
+    #
+    # The values are NOT wiped or hidden; they stay readable. Only mutation is
+    # blocked, and only for sections that Perch actually received.
+    if perch_workflow.perch_committed(enrollment_id):
+        # FIELD-LEVEL, not section-level. Only what Perch actually RECEIVED in
+        # the /enroll multipart is committed:
+        #     customer         email_address, first_name, last_name, phone_number
+        #     service address, billing address, utility account (+ POD ID)
+        # The customer PASSWORD is NOT part of that payload - it is a
+        # Dalton-local credential Perch never sees - so a password-only update
+        # stays allowed. Blocking it would prevent legitimate credential work on
+        # a committed enrollment while protecting nothing.
+        PERCH_CUSTOMER_FIELDS = {"first_name", "last_name", "email", "phone"}
+        committed_sections = []
+        cust = data.get("customer") or {}
+        if any(k in cust for k in PERCH_CUSTOMER_FIELDS):
+            committed_sections.append("customer")
+        for k in ("service_address", "utility_account", "billing_address"):
+            if data.get(k):
+                committed_sections.append(k)
+        if committed_sections:
+            audit.log("enrollment_edit_rejected_committed", enrollment_id=enrollment_id,
+                      user_id=g.current_user["id"],
+                      details={"sections": committed_sections},
+                      ip_address=request.remote_addr)
+            return jsonify({
+                "error": "This enrollment has already been submitted. The customer "
+                         "and account details on it can no longer be changed.",
+                "committed": True,
+                "committed_sections": committed_sections,
+            }), 409
+
     # Customer
     if "customer" in data:
-        c = data["customer"]
+        c = data["customer"] or {}
+
+        # Write ONLY the identity columns the caller actually supplied.
+        #
+        # This previously wrote all four unconditionally with c.get(...), so a
+        # password-only payload set first_name/last_name/email/phone to NULL and
+        # died on "NOT NULL constraint failed: customers.first_name" - before
+        # the password statement below ever ran. Absent is now distinct from
+        # empty: a key that is not in the payload is left alone.
+        IDENTITY_FIELDS = ("first_name", "last_name", "email", "phone")
+        provided = [k for k in IDENTITY_FIELDS if k in c]
+
         if row["customer_id"]:
-            execute(
-                "UPDATE customers SET first_name=?, last_name=?, email=?, phone=?, updated_at=datetime('now') WHERE id=?",
-                (c.get("first_name"), c.get("last_name"), c.get("email"), c.get("phone"), row["customer_id"]),
-            )
             customer_id = row["customer_id"]
+            if provided:
+                # Column names come from the fixed whitelist above, never from
+                # caller input, so this interpolation cannot inject.
+                assignments = ", ".join(f"{k}=?" for k in provided)
+                execute(
+                    f"UPDATE customers SET {assignments}, updated_at=datetime('now') WHERE id=?",
+                    tuple(c.get(k) for k in provided) + (row["customer_id"],),
+                )
         else:
+            if not provided:
+                # A customer cannot be created from a credential alone - there
+                # is no identity to attach it to.
+                return jsonify({"error": "Customer details are required before "
+                                         "setting a password."}), 400
+            columns = ", ".join(provided)
+            placeholders = ", ".join("?" for _ in provided)
             cur = execute(
-                "INSERT INTO customers (first_name, last_name, email, phone) VALUES (?, ?, ?, ?)",
-                (c.get("first_name"), c.get("last_name"), c.get("email"), c.get("phone")),
+                f"INSERT INTO customers ({columns}) VALUES ({placeholders})",
+                tuple(c.get(k) for k in provided),
             )
             customer_id = cur.lastrowid
             execute("UPDATE enrollments SET customer_id=? WHERE id=?", (customer_id, enrollment_id))
+
         if c.get("password"):
+            # Hashed, never stored in plaintext. This is a Dalton-local
+            # credential - Perch never receives it - which is why the commit
+            # boundary above deliberately allows a password-only update.
             from auth import hash_password
-            execute("UPDATE customers SET password_hash=? WHERE id=?", (hash_password(c["password"]), customer_id))
+            execute("UPDATE customers SET password_hash=?, updated_at=datetime('now') WHERE id=?",
+                    (hash_password(c["password"]), customer_id))
 
     # Address
     if "service_address" in data:

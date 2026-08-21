@@ -75,6 +75,8 @@ const stepIds = {1:'step-project',2:'step-bill',4:'step-lmi',5:'step-agreement'}
 // from step 3 goes to 5, Back from 5 goes to 3, and the progress indicator has
 // four dots instead of five.
 let selectedProgram = null;   // { customer_type, savings_percent, lmi_required }
+// True once Perch has accepted /enroll: the program becomes a settled fact.
+let programCommitted = false;
 
 function programRequiresLmi(){
   // Absent information is treated as "not yet known", NOT as "no LMI".
@@ -149,13 +151,16 @@ async function doLogin(){
 
   btn.disabled = true;
   btn.textContent = 'Signing in…';
+
+  // ONE endpoint for reps, admins and customers. The BACKEND decides which
+  // account type this is and where to send them - the browser never chooses a
+  // role, and no "are you a customer?" link is needed for password sign-in.
+  let data;
   try {
-    const data = await apiFetch('/api/auth/login', {
+    data = await apiFetch('/api/auth/signin', {
       method: 'POST',
       body: JSON.stringify({ email, password: pass }),
     });
-    AuthStore.setToken(data.token);
-    currentUser = data.user;
   } catch(err){
     errEl.textContent = err.message;
     errEl.style.display = 'block';
@@ -165,11 +170,33 @@ async function doLogin(){
   }
   btn.disabled = false;
   btn.textContent = 'Sign in';
+
+  if(data.account_type === 'customer'){
+    // Customer tokens live in their OWN store so the two sessions can never be
+    // confused. Clear any stale staff token first.
+    AuthStore.clear();
+    currentUser = null;
+    CustomerAuth.setToken(data.token);
+    activateScreen('screen-customer-portal');
+    const hello = document.getElementById('portal-hello');
+    if(hello){
+      hello.textContent = 'Hi ' + ((data.customer && data.customer.first_name) || '') + ' — welcome back';
+    }
+    await loadCustomerAgreement();
+    return;
+  }
+
+  // Staff. Clear any stale customer token for the same reason.
+  CustomerAuth.clear();
+  AuthStore.setToken(data.token);
+  currentUser = data.user;
   applyCurrentUserToUI();
   await loadProjects();
   activateScreen('app-shell');
   syncAdminNav();
-  showView('dashboard');
+  // destination is server-authoritative; every current staff role lands on the
+  // dashboard, and an unknown role falls back to it rather than guessing.
+  showView(data.destination === 'dashboard' ? 'dashboard' : 'dashboard');
 }
 
 function applyCurrentUserToUI(){
@@ -1035,6 +1062,12 @@ async function openEnrollment(enrollmentId){
   perchContext.nextStepKey = e.workflow_step_key || null;
 
   currentEnrollmentDetail = e;   // persisted workflow_last_response for resume
+
+  // COMMIT BOUNDARY from the BACKEND. perchContext.enrollmentSubmitted is
+  // in-memory and is lost on reload, which is how a reopened enrollment still
+  // offered a program switch. e.perch_committed is derived from persisted
+  // workflow state and survives reload, resume and reopen.
+  if(e.perch_committed === true) perchContext.enrollmentSubmitted = true;
 
   // RESTORE THE PERSISTED BILL. The document record survives on the server, but
   // nothing rehydrated state.bill, so a resumed enrollment looked as though the
@@ -3183,6 +3216,10 @@ async function loadProgramOptions(){
   // HYDRATE FROM THE BACKEND. The persisted choice is authoritative, so the
   // selection survives leaving the screen, navigating back, and reloading -
   // none of which a JS variable can do.
+  // Committed enrollments cannot change program - render the choice as a
+  // settled fact rather than an interactive control.
+  programCommitted = (currentEnrollmentDetail || {}).perch_committed === true
+                     || perchContext.enrollmentSubmitted === true;
   const persisted = body.selected_customer_type || null;
   if(persisted){
     selectedProgram = availablePrograms.filter(function(p){
@@ -3245,8 +3282,10 @@ function renderProgramOptions(body){
 
   const multiple = availablePrograms.length > 1;
   let html = '<div class="prog-head">' +
-    (multiple ? 'Two programs are available at this address. Choose one.'
-              : 'Available program') + '</div>';
+    (programCommitted
+      ? 'This enrollment has already been submitted. The savings program can no longer be changed.'
+      : (multiple ? 'Two programs are available at this address. Choose one.'
+                  : 'Available program')) + '</div>';
 
   html += '<div class="prog-grid">' + availablePrograms.map(function(p){
     const selected = selectedProgram && selectedProgram.customer_type === p.customer_type;
@@ -3254,9 +3293,12 @@ function renderProgramOptions(body){
     const savings = (typeof p.savings_percent === 'number' && p.savings_percent > 0)
       ? '<span class="pg-save">' + esc(String(p.savings_percent)) + '<span class="pg-pct">% savings</span></span>'
       : '<span class="pg-save pg-save-none">Savings not published</span>';
+    // Committed: still shown, still legible - just no longer a control.
     return '<button type="button" class="pg' + (selected ? ' selected' : '') +
-      '" role="radio" aria-checked="' + (selected ? 'true' : 'false') +
-      '" onclick="selectProgram(\'' + esc(p.customer_type) + '\')">' +
+      (programCommitted ? ' committed' : '') +
+      '" role="radio" aria-checked="' + (selected ? 'true' : 'false') + '"' +
+      (programCommitted ? ' disabled aria-disabled="true"' : '') +
+      ' onclick="selectProgram(\'' + esc(p.customer_type) + '\')">' +
       '<span class="pg-check" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>' +
       '<span class="pg-name">' + esc(programLabel(p)) + '</span>' +
       savings +
@@ -3272,6 +3314,17 @@ function renderProgramOptions(body){
 }
 
 async function selectProgram(customerType){
+  if(programCommitted){
+    // Backend refuses this too (409); this only avoids a pointless round trip
+    // and states the reason where the rep is looking.
+    const err = document.getElementById('program-error');
+    if(err){
+      err.textContent = 'This enrollment has already been submitted and the '
+                      + 'savings program can no longer be changed.';
+      err.style.display = 'block';
+    }
+    return;
+  }
   const match = availablePrograms.filter(function(p){
     return p.customer_type === customerType; })[0];
   if(!match) return;             // never select something not offered

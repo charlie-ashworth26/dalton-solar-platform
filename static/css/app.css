@@ -1292,3 +1292,9 @@ img,svg,table{max-width:100%;}
   .agreement-wrap{padding:24px 20px;}
   .savings strong{font-size:26px;}
 }
+
+/* Program committed at Perch: readable, but no longer a control. */
+.pg.committed{cursor:default;opacity:1;}
+.pg.committed:hover{transform:none;border-color:var(--border);box-shadow:none;}
+.pg.committed.selected:hover{border-color:var(--brand);}
+.pg.committed:not(.selected){opacity:.55;}

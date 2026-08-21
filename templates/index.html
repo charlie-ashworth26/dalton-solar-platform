@@ -21,14 +21,17 @@
     </div>
     <div class="login-form-wrap">
       <div class="login-card">
-        <h2>Rep sign in</h2>
-        <p class="lead">Use your Dalton Solar rep credentials.</p>
-        <div class="field"><label>Email</label><input type="email" id="login-email" placeholder="charlie@daltonsolar.com"></div>
-        <div class="field"><label>Password</label><input type="password" id="login-pass" placeholder="••••••••"></div>
+        <h2>Sign in</h2>
+        <p class="lead">Enter your email and password. We'll take you to the right place.</p>
+        <div class="field"><label>Email</label><input type="email" id="login-email" placeholder="you@example.com" autocomplete="username"></div>
+        <div class="field"><label>Password</label><input type="password" id="login-pass" placeholder="••••••••" autocomplete="current-password"></div>
         <button class="btn btn-primary btn-full btn-lg" id="login-submit-btn" onclick="doLogin()">Sign in</button>
         <p class="helper" id="login-error" style="display:none;color:var(--danger);text-align:center;margin-top:14px;"></p>
-        <p class="helper" style="text-align:center;margin-top:16px;">Forgot your password? Ask your manager to reset it.</p>
-        <div class="switch-role">Enrolling as a customer? <a onclick="showScreen('screen-customer-login')">Sign in to your agreement</a></div>
+        <p class="helper" style="text-align:center;margin-top:16px;">Forgot your password? Reps: ask your manager. Customers: ask your Dalton rep.</p>
+        <!-- The "Sign in to your agreement" link is gone: customers now use the SAME
+             form above and the backend routes them. #screen-customer-login is retained
+             and reachable for existing direct/internal entry, and
+             /api/auth/customer-login still works - nothing was removed. -->
       </div>
     </div>
   </div>

@@ -439,3 +439,44 @@ def _progress_hint(current_key):
         for item in out:
             item["state"] = "current" if item["key"] == "service_area" else "upcoming"
     return out
+
+
+# ── PERCH COMMIT BOUNDARY ────────────────────────────────────────────────
+# Steps that can ONLY be reached after POST /enroll has been accepted.
+#
+# Perch confirmed (2026-08) that customer information cannot be updated through
+# the API after the customer/utility-account step, and that customer_type cannot
+# change once an enrollment is in progress. So once the workflow has advanced
+# past `enroll`, everything Perch accepted is committed and Dalton must not let
+# the rep create divergence.
+#
+# `enroll` itself is NOT in this set: it means "ready to enroll", i.e. still
+# editable. `enroll_outcome_uncertain` IS, because the enrollment MAY exist at
+# Perch and the safe assumption is that it does.
+POST_ENROLL_STEP_KEYS = frozenset({
+    "proof_docs",
+    "self_attestation",
+    "self_attestation_accept",
+    "contracts",
+    "contracts_review",
+    "contracts_accept",
+    "contracts_accepted",
+    "contracts_accept_uncertain",
+    "status",
+    "completed",
+    "enroll_outcome_uncertain",
+    "unknown_next_step",
+})
+
+
+def perch_committed(enrollment_id):
+    """True once Perch has accepted this enrollment's /enroll step.
+
+    Derived from PERSISTED workflow state, so the boundary survives a reload,
+    a resume and a reopen from the dashboard - unlike the in-memory frontend
+    flag it replaces.
+    """
+    state = get_state(enrollment_id)
+    if not state:
+        return False
+    return (state["current_step_key"] or "") in POST_ENROLL_STEP_KEYS

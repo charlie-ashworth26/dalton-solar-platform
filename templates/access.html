@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Utility Bill Savings</title>
+<style>
+  :root{--ink:#15372b;--muted:#7d8d85;--line:#dfe8e3;--accent:#1f7a55;}
+  *{box-sizing:border-box;}
+  body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
+    font:15px/1.5 'Inter',system-ui,-apple-system,sans-serif;color:var(--ink);
+    background:#f6f9f7;}
+  .card{width:min(420px,100%);background:#fff;border:1px solid var(--line);
+    border-radius:20px;padding:36px 32px;text-align:center;
+    box-shadow:0 20px 50px rgba(23,71,51,.08);}
+  .mark{width:46px;height:46px;margin:0 auto 18px;border-radius:14px;
+    display:grid;place-items:center;background:var(--accent);color:#fff;
+    font-weight:800;font-size:13px;letter-spacing:-.03em;}
+  h1{font-size:20px;margin:0 0 8px;letter-spacing:-.02em;}
+  p{margin:0 0 6px;color:var(--muted);font-size:14px;}
+  .spin{width:26px;height:26px;margin:18px auto 0;border-radius:50%;
+    border:2.5px solid var(--line);border-top-color:var(--accent);
+    animation:sp .8s linear infinite;}
+  @keyframes sp{to{transform:rotate(360deg);}}
+  @media (prefers-reduced-motion:reduce){.spin{animation-duration:2s;}}
+  .btn{display:inline-block;margin-top:20px;height:48px;line-height:48px;
+    padding:0 22px;border-radius:12px;background:var(--accent);color:#fff;
+    font-weight:700;text-decoration:none;font-size:15px;}
+  .hide{display:none;}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="mark">UBS</div>
+
+    <div id="working">
+      <h1>Opening your enrollment</h1>
+      <p>One moment…</p>
+      <div class="spin"></div>
+    </div>
+
+    <div id="failed" class="hide">
+      <h1>This link isn't valid</h1>
+      <!-- Deliberately generic: it must not reveal whether a particular
+           enrollment or customer exists. -->
+      <p id="failed-msg">This link is no longer valid. Ask your representative for
+        a new one, or sign in with your email and password.</p>
+      <a class="btn" href="/">Go to sign in</a>
+    </div>
+  </div>
+
+<script>
+(function(){
+  'use strict';
+
+  // ── 1. Read the token from the FRAGMENT ────────────────────────────────
+  // The fragment is never sent to the server, so the raw token has not
+  // appeared in this request, in access logs, or in any proxy in front of us.
+  var raw = (window.location.hash || '').replace(/^#/, '').trim();
+
+  // ── 2. Strip it from the visible URL and history IMMEDIATELY ───────────
+  // Done BEFORE any network call, so the secret is not left sitting in the
+  // address bar or in the back/forward history while redemption runs.
+  try {
+    window.history.replaceState(null, '', window.location.pathname);
+  } catch (e) {
+    window.location.hash = '';
+  }
+
+  function fail(){
+    document.getElementById('working').className = 'hide';
+    document.getElementById('failed').className = '';
+  }
+
+  if(!raw){ fail(); return; }
+
+  // ── 3. POST the raw token in the JSON BODY ─────────────────────────────
+  // Never a query string, never a path segment.
+  fetch('/api/customer-access/redeem', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({token: raw})
+  }).then(function(res){
+    return res.json().then(function(body){ return {ok: res.ok, body: body}; });
+  }).then(function(r){
+    if(!r.ok || !r.body || !r.body.token){ fail(); return; }
+
+    // ── 4. Store the JWT through the EXISTING customer store ─────────────
+    // Same key the normal customer login uses. This is the SAME token
+    // issue_customer_token() produces - no second auth model.
+    try {
+      sessionStorage.setItem('dalton_customer_token', r.body.token);
+      // Clear any stale STAFF session, exactly as unified customer login does.
+      // The key must match AuthStore.KEY in app.js - 'dalton_auth_token'. It
+      // previously read 'dalton_token', so the clear silently did nothing and a
+      // rep's session could survive alongside the customer's.
+      sessionStorage.removeItem('dalton_auth_token');
+    } catch (e) { fail(); return; }
+
+    // ── 5. Enter the existing customer portal flow ───────────────────────
+    // A plain navigation with no secret in the URL. app.js finds the customer
+    // token in its normal store and resumes as it always does.
+    raw = null;
+    window.location.replace('/');
+  }).catch(function(){ fail(); });
+})();
+</script>
+</body>
+</html>

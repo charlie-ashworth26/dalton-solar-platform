@@ -106,8 +106,12 @@ console.log('\n--- PASSWORD TOGGLE (presentation only) ---');
 check('toggle present', LOGIN.includes('id="login-pass-toggle"'));
 check('  ...swaps the input type', /input\.type = isText \? 'password' : 'text'/.test(JS));
 check('  ...and the label', /button\.textContent = isText \? 'Show' : 'Hide'/.test(JS));
+// Scope to the FUNCTION BODY. The old slice ran to end-of-file, so any code
+// appended later (e.g. the magic-link handoff, which legitimately uses
+// CustomerAuth) tripped it falsely.
+const toggleBody = JS.slice(JS.indexOf('function toggleLoginPassword')).split('\n}')[0];
 check('  ...touching no auth logic',
-  !/signin|AuthStore|CustomerAuth/.test(JS.slice(JS.indexOf('function toggleLoginPassword'))));
+  !/signin|AuthStore|CustomerAuth/.test(toggleBody));
 
 console.log('\n--- ACCOUNTS / IDENTIFIERS UNCHANGED ---');
 check('rep emails untouched in seed',

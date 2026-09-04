@@ -1467,3 +1467,6 @@ img,svg,table{max-width:100%;}
 .manual-copy input{width:100%;height:38px;padding:0 10px;font-size:12.5px;
   font-family:'IBM Plex Mono',monospace;border:1px solid var(--border-strong);
   border-radius:8px;background:var(--surface);}
+
+/* Copy customer link slot — sits above the wizard in the live flow. */
+.customer-link-slot{display:flex;justify-content:flex-end;margin-bottom:12px;}

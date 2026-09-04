@@ -14,6 +14,7 @@ from flask import Flask, jsonify, send_from_directory, render_template, request
 from db import close_db, init_db, DB_PATH
 from routes import auth_routes, enrollment_routes, document_routes, agreement_routes, admin_routes
 from routes import signing_routes, qa_routes, developer_routes, submission_routes
+from routes import access_routes
 from routes import report_routes, project_routes, perch_routes
 
 
@@ -35,6 +36,7 @@ def create_app():
     app.register_blueprint(document_routes.bp)
     app.register_blueprint(agreement_routes.bp)
     app.register_blueprint(signing_routes.bp)
+    app.register_blueprint(access_routes.bp)
     app.register_blueprint(qa_routes.bp)
     app.register_blueprint(developer_routes.bp)
     app.register_blueprint(submission_routes.bp)
@@ -63,6 +65,22 @@ def create_app():
     @app.route("/api/health", methods=["GET"])
     def health():
         return jsonify({"ok": True})
+
+    @app.route("/access", methods=["GET"])
+    def customer_access_page():
+        """Magic-link landing page.
+
+        NOTE THE URL SHAPE: the token travels in the FRAGMENT (/access#<token>),
+        which browsers never transmit. This handler therefore receives NO secret
+        - not in the path, not in a query string - so the token cannot appear in
+        this server's logs or in any reverse proxy in front of it.
+
+        The page reads the fragment, strips it from history immediately, and
+        POSTs it to /api/customer-access/redeem.
+        """
+        return send_from_directory(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates"),
+            "access.html")
 
     @app.route("/sign/<token>", methods=["GET"])
     def signing_page(token):

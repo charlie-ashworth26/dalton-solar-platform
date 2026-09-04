@@ -178,10 +178,7 @@ async function doLogin(){
     currentUser = null;
     CustomerAuth.setToken(data.token);
     activateScreen('screen-customer-portal');
-    const hello = document.getElementById('portal-hello');
-    if(hello){
-      hello.textContent = 'Hi ' + ((data.customer && data.customer.first_name) || '') + ' — welcome back';
-    }
+    renderPortalGreeting(data.customer);
     await loadCustomerAgreement();
     return;
   }
@@ -225,7 +222,23 @@ async function tryRestoreSession(){
   activateScreen('app-shell');
   showView('dashboard');
 }
-document.addEventListener('DOMContentLoaded', tryRestoreSession);
+/* Boot: try the STAFF session first, then the CUSTOMER session.
+
+   tryRestoreSession() above is unchanged - it handles staff only and returns
+   immediately when there is no staff token. That early return is why a
+   magic-link customer landed on the login screen: nothing ever consulted
+   dalton_customer_token after /access redirected to /.
+
+   Order matters. Staff is attempted first so an active rep session always wins;
+   the customer attempt only runs when no staff session was restored. */
+async function bootRestoreSession(){
+  await tryRestoreSession();
+  // A restored staff session activates #app-shell; if that happened, stop.
+  const shell = document.getElementById('app-shell');
+  if(shell && shell.classList.contains('active')) return;
+  await tryRestoreCustomerSession();
+}
+document.addEventListener('DOMContentLoaded', bootRestoreSession);
 
 /* doCustomerLogin() was REMOVED with the duplicate customer sign-in screen.
    Customers authenticate through the one unified login; the backend routes
@@ -1291,8 +1304,14 @@ function renderResumeBanner(e, key, terminal, blocked){
   }
   const badge = terminal ? '<span class="badge badge-green">Complete</span>'
               : (blocked ? '<span class="badge badge-gold">Needs review</span>' : '');
+  // "Copy customer link" - shown only when the AUTHORITATIVE workflow key says
+  // the customer has something to do. Nothing is sent automatically.
+  const linkBtn = customerLinkAvailable(e)
+    ? '<button type="button" class="btn btn-ghost btn-sm" id="copy-customer-link" ' +
+      'onclick="copyCustomerLink(' + e.id + ', this)">Copy customer link</button>'
+    : '';
   el.innerHTML = '<span>Enrollment <strong>'+esc(e.enrollment_code)+'</strong> — '+
-                 esc(e.workflow_step_label || 'In progress')+'</span>'+badge;
+                 esc(e.workflow_step_label || 'In progress')+'</span>'+badge+linkBtn;
   el.style.display = 'flex';
 }
 
@@ -1391,6 +1410,10 @@ function goStep(n){
   }
   // One call renders nodes, connectors and states from the ACTIVE sequence.
   renderStepper(n);
+  // Mount/refresh "Copy customer link" on EVERY wizard navigation, so it also
+  // appears in the live straight-through flow - renderResumeBanner() was the
+  // sole mount point and runs only on open/resume.
+  refreshCustomerLinkControl();
   hydrateStep(n);
   if(n===5){
     // Populate the persisted detail FIRST so a live enrollment reads the same
@@ -3907,4 +3930,201 @@ function toggleLoginPassword(){
   input.type = isText ? 'password' : 'text';
   button.textContent = isText ? 'Show' : 'Hide';
   button.setAttribute('aria-pressed', isText ? 'false' : 'true');
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   MAGIC LINK — customer session restore + rep-side copy control.
+   Appended at end of file so no existing code moves.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Restore a customer session from the EXISTING CustomerAuth store.
+
+   This is the missing half of the /access -> / handoff: access.html stores the
+   JWT that issue_customer_token() minted, redirects here, and this validates it
+   and opens the customer portal. No password, no second auth model, no new
+   token type.
+
+   An invalid or expired token falls back to the ONE unified login screen - never
+   to any retired customer-login screen. */
+async function tryRestoreCustomerSession(){
+  const token = CustomerAuth.getToken();
+  if(!token) return false;
+
+  let me;
+  try{
+    const res = await fetch('/api/auth/customer-me', {
+      headers: {Authorization: 'Bearer ' + token}
+    });
+    if(!res.ok) throw new Error('invalid customer session');
+    me = await res.json();
+  }catch(err){
+    // Expired/revoked/invalid: drop the dead token and leave the unified login
+    // showing. #screen-login is already active from the markup, so there is
+    // nothing to activate - and nothing else is disturbed.
+    CustomerAuth.clear();
+    return false;
+  }
+
+  // A customer session must never leave a stale staff session behind - the same
+  // separation unified login already enforces.
+  AuthStore.clear();
+  currentUser = null;
+
+  customerEnrollmentId = me.enrollment_id || null;
+  renderPortalGreeting(me.customer);
+  activateScreen('screen-customer-portal');
+  await loadCustomerAgreement();
+  return true;
+}
+
+/* Availability is decided by the AUTHORITATIVE workflow key, never the
+   human-readable label, and never once the enrollment is complete. */
+function customerLinkAvailable(e){
+  if(!e) return false;
+  if(e.workflow_is_terminal === true) return false;
+  if(!e.customer || !e.customer.email) return false;
+  return ['proof_docs','self_attestation','self_attestation_accept',
+          'contracts','contracts_review','contracts_accept']
+         .indexOf(e.workflow_step_key || '') !== -1;
+}
+
+/* Rep creates a link and copies it. Nothing is sent automatically. */
+async function copyCustomerLink(enrollmentId, btn){
+  const button = btn || document.getElementById('copy-customer-link');
+  if(button && button.disabled) return;
+  const original = button ? button.textContent : 'Copy customer link';
+  if(button){ button.disabled = true; button.textContent = 'Creating…'; }
+  try{
+    const body = await apiFetch('/api/enrollments/' + enrollmentId + '/customer-link',
+                                {method: 'POST'});
+    const copied = await copyTextToClipboard(body.url);
+    if(button){
+      button.textContent = copied ? 'Copied' : 'Copy manually below';
+      setTimeout(function(){
+        button.textContent = original;
+        button.disabled = false;
+      }, 2000);
+    }
+  }catch(err){
+    if(button){ button.textContent = original; button.disabled = false; }
+    const el = document.getElementById('resume-banner');
+    if(el){
+      let e2 = document.getElementById('customer-link-error');
+      if(!e2){
+        e2 = document.createElement('p');
+        e2.id = 'customer-link-error';
+        e2.className = 'helper';
+        e2.style.color = 'var(--danger)';
+        el.appendChild(e2);
+      }
+      e2.textContent = err.message || 'The customer link could not be created.';
+    }
+  }
+}
+
+/* Clipboard with a real fallback - never a silent no-op, and never prompt(),
+   which this UI deliberately removed. */
+async function copyTextToClipboard(text){
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  }catch(e){ /* fall through */ }
+  try{
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if(ok) return true;
+  }catch(e){ /* fall through */ }
+  showManualCopyField(text);
+  return false;
+}
+
+/* Last resort: the link in a pre-selected read-only field. */
+function showManualCopyField(text){
+  const host = document.getElementById('resume-banner') || document.body;
+  let box = document.getElementById('manual-copy-box');
+  if(!box){
+    box = document.createElement('div');
+    box.id = 'manual-copy-box';
+    box.className = 'manual-copy';
+    host.appendChild(box);
+  }
+  box.innerHTML = '<label for="manual-copy-input">Copy this link manually</label>' +
+                  '<input id="manual-copy-input" type="text" readonly>';
+  const input = document.getElementById('manual-copy-input');
+  input.value = text;
+  input.focus();
+  input.select();
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   PORTAL GREETING + LIVE "COPY CUSTOMER LINK" MOUNT
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* One greeting rule for BOTH customer entry paths - unified login and magic
+   link. Previously only doLogin() wrote it, producing "Hi  - welcome back" when
+   the first name was blank, and the magic-link path never wrote it at all, so
+   those customers kept the static "Hi there". Layout and styling untouched. */
+function renderPortalGreeting(customer){
+  const hello = document.getElementById('portal-hello');
+  if(!hello) return;
+  const first = ((customer && customer.first_name) || '').trim();
+  hello.textContent = first ? ('Hi, ' + first) : 'Welcome back';
+}
+
+/* Workflow keys at which the customer has something to do. AUTHORITATIVE keys
+   only - never a human-readable label. Shared by both availability checks so
+   they cannot drift apart. */
+const CUSTOMER_ACTION_STEP_KEYS = ['proof_docs','self_attestation',
+  'self_attestation_accept','contracts','contracts_review','contracts_accept'];
+
+/* Live-flow availability: the same rule as customerLinkAvailable(), evaluated
+   against the in-flight enrollment instead of a fetched detail row. */
+function customerLinkAvailableLive(){
+  if(!currentDraft || !currentDraft.enrollment_id) return false;
+  // A completed enrollment never offers a new link.
+  const detail = currentEnrollmentDetail;
+  if(detail && detail.workflow_is_terminal === true) return false;
+  if(perchContext.nextStepKey === 'contracts_accepted') return false;
+  const email = (state.customer.email || perchContext.email || '').trim();
+  if(!email) return false;
+  return CUSTOMER_ACTION_STEP_KEYS.indexOf(perchContext.nextStepKey || '') !== -1;
+}
+
+/* Mounts, updates or removes the control in a dedicated slot inside the wizard.
+
+   A dedicated slot rather than the resume banner: that banner is created only by
+   renderResumeBanner() on open/resume, so a live straight-through enrollment had
+   no host for the button at all. */
+function refreshCustomerLinkControl(){
+  const host = document.getElementById('view-wizard');
+  if(!host) return;
+  let slot = document.getElementById('customer-link-slot');
+  if(!customerLinkAvailableLive()){
+    if(slot && slot.parentNode) slot.parentNode.removeChild(slot);
+    return;
+  }
+  if(!slot){
+    slot = document.createElement('div');
+    slot.id = 'customer-link-slot';
+    slot.className = 'customer-link-slot';
+    host.insertBefore(slot, host.firstChild);
+  }
+  // Rebuild only when the button is absent, so an in-progress "Copied" state is
+  // not wiped by an unrelated navigation.
+  if(!document.getElementById('copy-customer-link')){
+    slot.innerHTML = '<button type="button" class="btn btn-ghost btn-sm" ' +
+      'id="copy-customer-link" onclick="copyCustomerLink(' +
+      currentDraft.enrollment_id + ', this)">Copy customer link</button>';
+  }
 }

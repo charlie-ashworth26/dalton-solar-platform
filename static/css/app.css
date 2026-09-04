@@ -1298,3 +1298,19 @@ img,svg,table{max-width:100%;}
 .pg.committed:hover{transform:none;border-color:var(--border);box-shadow:none;}
 .pg.committed.selected:hover{border-color:var(--brand);}
 .pg.committed:not(.selected){opacity:.55;}
+
+/* LMI self-attestation — mirrors the official Perch form's structure. */
+.sa-threshold{display:flex;flex-direction:column;gap:4px;padding:16px 18px;margin:8px 0 18px;
+  background:var(--surface-sunk);border-radius:var(--radius);}
+.sa-cap{font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--ink-faint);}
+.sa-amt{font-size:30px;font-weight:800;letter-spacing:-.03em;color:var(--ink);line-height:1.05;}
+.sa-for{font-size:13px;color:var(--ink-muted);}
+.sa-choices{display:grid;gap:10px;margin-bottom:18px;}
+.sa-opt{text-align:left;padding:14px 16px;font:inherit;font-size:14px;cursor:pointer;
+  background:var(--surface);border:1.5px solid var(--border-strong);border-radius:10px;
+  transition:border-color var(--t-quick) var(--ease),background var(--t-quick) var(--ease);}
+.sa-opt:hover{border-color:var(--ink-faint);}
+.sa-opt.selected{border-color:var(--brand);background:var(--brand-tint);}
+.sa-opt:focus-visible{outline:none;box-shadow:0 0 0 3px var(--brand-ring);}
+@media (max-width:768px){ .sa-amt{font-size:26px;} }

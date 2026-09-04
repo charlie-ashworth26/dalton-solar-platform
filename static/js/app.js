@@ -567,12 +567,79 @@ function resetWizardState(){
   skipProjectStep = false;
   entryMode = null;
   currentWorkflow = null;
+
+  // RC-7: PROGRAM + BRANCH state. These survived every previous reset, so a
+  // completed enrollment leaked into the next one:
+  //
+  //   * programCommitted stayed true, so the new enrollment's program cards
+  //     rendered .committed - non-selected options at opacity .55 and disabled.
+  //     That is the Residential option "greyed out as if there were no capacity"
+  //     on a second Central Hudson enrollment. Capacity was fine; the CONTROL
+  //     was locked by the previous enrollment.
+  //
+  //   * selectedProgram / availablePrograms held the previous enrollment's
+  //     programs until the new /programs call resolved, so activeSteps() and
+  //     the stepper briefly followed the OLD branch.
+  //
+  //   * selfAttestation held the previous household answers.
+  //
+  //   * currentEnrollmentDetail made resolveProgramView() read the PREVIOUS
+  //     enrollment's persisted program and savings.
+  //
+  // None of this is server state - which is why restarting app.py "fixed" it:
+  // the restart forced a browser reload, re-evaluating app.js and resetting
+  // these module globals and the DOM to their initial markup.
+  // The enrollment identity itself. This was previously cleared only by the
+  // CALLERS (startWizardFresh, backToDashboard), so any future caller that
+  // forgot would carry enrollment A's id into B. openEnrollment sets it AFTER
+  // this call, so resuming is unaffected.
+  currentDraft = null;
+  selectedProgram = null;
+  availablePrograms = [];
+  programCommitted = false;
+  selfAttestation = {reference: null, occupancy: null, county: '', choice: null};
+  currentEnrollmentDetail = null;
+
   // RC-4: undo any read-only lock left by a completed/blocked enrollment.
   unlockEnrollmentControls();
   const rb = document.getElementById('resume-banner');
   if(rb){ rb.style.display = 'none'; rb.innerHTML = ''; }
   const reqEl = document.getElementById('bill-requirements');
   if(reqEl){ reqEl.style.display = 'none'; reqEl.innerHTML = ''; }
+
+  // RC-7 (DOM): the Eligibility step has TWO mutually exclusive panels. A
+  // self-attestation enrollment leaves #sa-panel visible and #lmi-proof-panel
+  // hidden, and nothing restored them - so the next enrollment showed the
+  // self-attestation UI, and when it turned out to need proof docs the rep saw
+  // the proof-doc TEXT with NO uploader, because the uploader lives inside the
+  // still-hidden panel. Restore both to their markup defaults; the branch
+  // handlers re-show whichever one Perch's next_step selects.
+  const saPanel = document.getElementById('sa-panel');
+  if(saPanel) saPanel.style.display = 'none';
+  const saForm = document.getElementById('sa-form');
+  if(saForm) saForm.style.display = '';
+  const saSent = document.getElementById('sa-sent');
+  if(saSent) saSent.style.display = 'none';
+  const saErr = document.getElementById('sa-error');
+  if(saErr){ saErr.style.display = 'none'; saErr.textContent = ''; }
+  const proofPanel = document.getElementById('lmi-proof-panel');
+  if(proofPanel) proofPanel.style.display = '';
+  // Rebuilt from the next enrollment's own reference data.
+  ['sa-occupancy', 'sa-county'].forEach(function(id){
+    const el = document.getElementById(id);
+    if(el){ el.innerHTML = ''; el.value = ''; }
+  });
+  const thr = document.getElementById('sa-threshold-wrap');
+  if(thr) thr.style.display = 'none';
+  document.querySelectorAll('.sa-opt').forEach(function(b){ b.classList.remove('selected'); });
+  const saBtn = document.getElementById('sa-submit');
+  if(saBtn){ saBtn.disabled = true; saBtn.textContent = 'Prepare self-attestation'; }
+
+  // The program area is rebuilt by the next enrollment's /programs response.
+  const progHost = document.getElementById('program-options');
+  if(progHost) progHost.innerHTML = '';
+  const progErr = document.getElementById('program-error');
+  if(progErr){ progErr.style.display = 'none'; progErr.textContent = ''; }
   // The old #contract-accept-status element was removed with the legacy
   // contract UI. The shared Agreements component owns its own status region
   // and clears it on every mount, so there is nothing to reset here.
@@ -1693,8 +1760,15 @@ async function continueFromPerchNextStep(origin){
     // Bill, so a non-LMI enrollment must return there.
     await generateContractsAndOpenAgreement(origin === 'lmi' ? 4 : 2); return;
   }
-  if(perchContext.nextStepKey === 'self_attestation' || perchContext.nextStepKey === 'self_attestation_accept'){
-    throw new Error('Perch requires its self-attestation branch for this enrollment. That branch is intentionally not wired into this milestone, so Dalton will not guess or skip it.');
+  if(perchContext.nextStepKey === 'self_attestation'
+     || perchContext.nextStepKey === 'self_attestation_accept'){
+    // CONDITIONAL branch - entered only because PERCH returned it. Rendered
+    // inside the existing Eligibility step. The customer accepts the
+    // Perch-generated document in the portal, after which Perch returns
+    // /contracts and the EXISTING contracts flow runs unchanged.
+    goStep(4);
+    await prepareSelfAttestation();
+    return;
   }
   throw new Error('Perch returned a next step Dalton does not recognize. The enrollment was not advanced.');
 }
@@ -3717,3 +3791,131 @@ function rehydrateDocumentsFromDetail(detail){
   }
   if(typeof checkBillReady === 'function') checkBillReady();
 }
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   LMI SELF-ATTESTATION (rep side)
+   Mirrors the official Perch form: household size -> the threshold for that
+   size -> above/below. Exact income is never collected, and no attestation
+   language is invented here - the legal document is generated by Perch.
+   ══════════════════════════════════════════════════════════════════════ */
+let selfAttestation = {reference: null, occupancy: null, county: '', choice: null};
+
+async function prepareSelfAttestation(){
+  const proof = document.getElementById('lmi-proof-panel');
+  if(proof) proof.style.display = 'none';
+  const host = document.getElementById('sa-panel');
+  if(host) host.style.display = '';
+  const err = document.getElementById('sa-error');
+  if(err) err.style.display = 'none';
+  try{
+    selfAttestation.reference = await apiFetch('/api/perch/enrollments/'
+      + currentDraft.enrollment_id + '/lmi/self-attestation/reference');
+  }catch(e){
+    if(err){ err.textContent = e.message; err.style.display = 'block'; }
+    return;
+  }
+  if(selfAttestation.reference.already_generated) renderSelfAttestationSent();
+  renderSelfAttestation();
+}
+
+function renderSelfAttestation(){
+  const ref = selfAttestation.reference;
+  if(!ref) return;
+  const occSel = document.getElementById('sa-occupancy');
+  if(occSel && !occSel.options.length){
+    occSel.innerHTML = '<option value="">Select…</option>' + ref.thresholds.map(function(t){
+      return '<option value="' + t.occupancy + '">' + t.occupancy
+           + (t.occupancy === 1 ? ' person' : ' people') + '</option>'; }).join('');
+  }
+  const ctySel = document.getElementById('sa-county');
+  if(ctySel && !ctySel.options.length){
+    // CONTROLLED list from the backend - never free text, which Perch would 422.
+    ctySel.innerHTML = '<option value="">Select a county…</option>' + ref.counties.map(
+      function(n){ return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('');
+  }
+  const cap = document.getElementById('sa-caption');
+  if(cap) cap.textContent = ref.table_caption;
+  const row = (ref.thresholds || []).filter(function(t){
+    return String(t.occupancy) === String(selfAttestation.occupancy); })[0];
+  const wrap = document.getElementById('sa-threshold-wrap');
+  if(row){
+    document.getElementById('sa-threshold').textContent = formatUsd(row.income_level_cents);
+    if(wrap) wrap.style.display = '';
+  } else if(wrap){ wrap.style.display = 'none'; }
+  updateSelfAttestationReady();
+}
+
+function formatUsd(cents){
+  return '$' + String(Math.round((cents || 0) / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+function onSelfAttestationOccupancy(){
+  selfAttestation.occupancy = document.getElementById('sa-occupancy').value || null;
+  selfAttestation.choice = null;
+  document.querySelectorAll('.sa-opt').forEach(function(b){ b.classList.remove('selected'); });
+  renderSelfAttestation();
+}
+
+function onSelfAttestationCounty(){
+  selfAttestation.county = document.getElementById('sa-county').value || '';
+  updateSelfAttestationReady();
+}
+
+/* below -> accepted, above -> rejected, per the documented status field. */
+function selectSelfAttestationChoice(choice){
+  selfAttestation.choice = choice;
+  document.querySelectorAll('.sa-opt').forEach(function(b){
+    b.classList.toggle('selected', b.getAttribute('data-choice') === choice); });
+  updateSelfAttestationReady();
+}
+
+function updateSelfAttestationReady(){
+  const btn = document.getElementById('sa-submit');
+  if(!btn) return;
+  btn.disabled = !(selfAttestation.occupancy && selfAttestation.county && selfAttestation.choice);
+}
+
+async function submitSelfAttestation(){
+  const btn = document.getElementById('sa-submit');
+  const err = document.getElementById('sa-error');
+  if(!btn || btn.disabled) return;
+  if(err) err.style.display = 'none';
+  btn.disabled = true; btn.textContent = 'Preparing eligibility…';
+  try{
+    const body = await apiFetch('/api/perch/enrollments/' + currentDraft.enrollment_id
+      + '/lmi/self-attestation', {method:'POST', body: JSON.stringify({
+        occupancy: Number(selfAttestation.occupancy),
+        county: selfAttestation.county,
+        status: selfAttestation.choice === 'below' ? 'accepted' : 'rejected',
+      })});
+    perchContext.nextStepKey = body.next_step_key;
+    perchContext.selfAttestationGenerated = true;
+    // The backend now generates AND accepts in one call, so Perch has already
+    // advanced to /contracts. Continue into the EXISTING contracts flow exactly
+    // as the proof-doc branch does - the customer signs in ONCE and sees only
+    // the normal agreement package.
+    if(body.next_step_key === 'contracts'){
+      await generateContractsAndOpenAgreement(4);
+      return;
+    }
+    renderSelfAttestationSent();
+  }catch(e){
+    if(err){ err.textContent = e.message; err.style.display = 'block'; }
+    btn.disabled = false; btn.textContent = 'Prepare self-attestation';
+  }
+}
+
+function renderSelfAttestationSent(){
+  const form = document.getElementById('sa-form');
+  const done = document.getElementById('sa-sent');
+  if(form) form.style.display = 'none';
+  if(done) done.style.display = '';
+}
+
+/* NOTE: there is deliberately NO customer-side self-attestation screen.
+   Self-attestation is a REP-SIDE eligibility step - the rep attests on the
+   customer's behalf, which Perch supports - and the generate call now accepts
+   in the same request. The customer signs in once and sees only the normal
+   agreement package. */
+

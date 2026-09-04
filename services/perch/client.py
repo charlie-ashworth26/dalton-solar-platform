@@ -222,6 +222,50 @@ def build_proof_docs_multipart(utility_account_number: str, documents: list):
         raise
 
 
+def normalize_self_attestation_response(data: dict) -> dict:
+    """Normalize POST /lmi/self_attestation.
+
+    Perch returns:
+        {"self_attestation": {"utility_account_number": ..., "url": "<presigned>"},
+         "next_step": ".../lmi/self_attestation/accept"}
+
+    Like contracts, the presigned `url` is SHORT-LIVED (1 hour). The normalized
+    view therefore carries `document_available` - a boolean - and NOT the link.
+    The raw payload is kept only for the request/response lifetime so the route
+    can hand the URL straight to the browser; nothing persists it.
+    """
+    sa = (data or {}).get("self_attestation") or {}
+    if isinstance(sa, str):          # defensive: accept string form
+        sa = {}
+    return {
+        "utility_account_number": sa.get("utility_account_number"),
+        "document_available": bool(sa.get("url")),
+        "next_step_url": (data or {}).get("next_step"),
+        "raw": data or {},
+    }
+
+
+def normalize_self_attestation_accept_response(data: dict) -> dict:
+    """Normalize POST /lmi/self_attestation/accept (202).
+
+    Perch returns {"self_attestation": "<message>", "next_step": ".../contracts"}.
+    """
+    return {
+        "message": (data or {}).get("self_attestation"),
+        "next_step_url": (data or {}).get("next_step"),
+        "raw": data or {},
+    }
+
+
+def self_attestation_safe(normalized: dict) -> dict:
+    """Redacted view safe to persist or log - never contains the presigned URL."""
+    n = normalized or {}
+    return {
+        "utility_account_number": n.get("utility_account_number"),
+        "document_available": bool(n.get("document_available")),
+    }
+
+
 def normalize_contracts_response(data: dict) -> dict:
     """Normalize the POST /contracts response while preserving the raw body.
 
@@ -724,6 +768,8 @@ PATH_REFRESH_TOKEN = "/refresh_token"
 PATH_CAPACITY = "/capacity"
 PATH_ENROLL = "/enroll"          # Milestone 3
 PATH_LMI_PROOF_DOCS = "/lmi/proof_docs"
+PATH_LMI_SELF_ATTESTATION = "/lmi/self_attestation"
+PATH_LMI_SELF_ATTESTATION_ACCEPT = "/lmi/self_attestation/accept"
 PATH_CONTRACTS = "/contracts"
 PATH_STATUS = "/status"          # Milestone 6
 PATH_CONTRACTS_ACCEPT = "/contracts/accept"
@@ -796,6 +842,89 @@ class PerchClient(ABC):
     def submit_proof_docs(self, enrollment_token: str, files: dict) -> dict:
         """POST /lmi/proof_docs - submit LMI proof documents for this session."""
         raise PerchNotImplementedError("Not implemented by this client.")
+
+    def submit_self_attestation(self, enrollment_token: str, entry: dict) -> dict:
+        """POST /lmi/self_attestation - generate the official attestation document.
+
+        Spec: JSON body {"self_attestation": {utility_account_number, occupancy,
+        county, lmi_source_selection, status}}. Returns a PRESIGNED document URL
+        (1 hour) plus next_step -> /lmi/self_attestation/accept.
+        """
+        raise PerchNotImplementedError("Not implemented by this client.")
+
+    def accept_self_attestation(self, enrollment_token: str, metadata: dict) -> dict:
+        """POST /lmi/self_attestation/accept - record the customer's acceptance.
+
+        Spec: JSON body {"self_attestation": {timestamp, ip_address, user_agent}}.
+        NO utility_account_number - the token already scopes it. Returns 202 and
+        next_step -> /contracts.
+        """
+        raise PerchNotImplementedError("Not implemented by this client.")
+
+    def submit_self_attestation(self, enrollment_token: str, entry: dict) -> dict:
+        """POST /lmi/self_attestation - JSON, exactly the documented fields."""
+        requests = self._requests()
+        url = f"{self.enrollment_base_url}{PATH_LMI_SELF_ATTESTATION}"
+        headers = {ENROLLMENT_TOKEN_HEADER: enrollment_token,
+                   "Content-Type": "application/json"}
+        # The wrapper key is required by SubmitSelfAttestationRequest. `entry` is
+        # built by the adapter from documented fields only - nothing extra is
+        # added here.
+        payload = {"self_attestation": entry}
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout)
+        except Exception as e:
+            raise PerchUnavailableError(f"Could not reach Perch at {url}: {e}") from e
+
+        if resp.status_code == 403:
+            raise attach_response_diagnostics(PerchTokenExpiredError(
+                "Perch returned 403 on /lmi/self_attestation - the enrollment token is "
+                "expired or invalid."), resp)
+        if resp.status_code == 422:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the self-attestation (422): {_msg(resp)}"), resp)
+        if resp.status_code >= 500:
+            raise attach_response_diagnostics(PerchUnavailableError(
+                f"Perch {PATH_LMI_SELF_ATTESTATION} returned {resp.status_code}."), resp)
+        if resp.status_code >= 400:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the self-attestation: {_msg(resp)}"), resp)
+        return normalize_self_attestation_response(
+            parse_json_response(resp, PATH_LMI_SELF_ATTESTATION))
+
+    def accept_self_attestation(self, enrollment_token: str, metadata: dict) -> dict:
+        """POST /lmi/self_attestation/accept - documented metadata only.
+
+        Returns 202 (not 200) on success.
+        """
+        requests = self._requests()
+        url = f"{self.enrollment_base_url}{PATH_LMI_SELF_ATTESTATION_ACCEPT}"
+        headers = {ENROLLMENT_TOKEN_HEADER: enrollment_token,
+                   "Content-Type": "application/json"}
+        payload = {"self_attestation": metadata}
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout)
+        except Exception as e:
+            raise PerchUnavailableError(f"Could not reach Perch at {url}: {e}") from e
+
+        if resp.status_code == 403:
+            raise attach_response_diagnostics(PerchTokenExpiredError(
+                "Perch returned 403 on /lmi/self_attestation/accept - the enrollment "
+                "token is expired or invalid."), resp)
+        if resp.status_code == 422:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the self-attestation acceptance (422): {_msg(resp)}"), resp)
+        if resp.status_code >= 500:
+            raise attach_response_diagnostics(PerchUnavailableError(
+                f"Perch {PATH_LMI_SELF_ATTESTATION_ACCEPT} returned {resp.status_code}."), resp)
+        if resp.status_code >= 400:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the self-attestation acceptance: {_msg(resp)}"), resp)
+        # State-changing and non-idempotent, like /enroll: an unreadable sub-400
+        # means acceptance MAY have landed. Never retried blindly.
+        return normalize_self_attestation_accept_response(
+            parse_json_response(resp, PATH_LMI_SELF_ATTESTATION_ACCEPT,
+                                ambiguous_on_failure=True))
 
     def generate_contracts(self, enrollment_token: str) -> dict:
         """POST /contracts - generate personalised contract documents.

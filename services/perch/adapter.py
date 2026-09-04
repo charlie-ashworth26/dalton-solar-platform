@@ -20,6 +20,8 @@ from services.perch import token_manager, utilities
 from services.perch.client import (
     PATH_CONTRACTS_ACCEPT, PATH_STATUS,
     PATH_CAPACITY, PATH_ENROLL, PATH_LMI_PROOF_DOCS, PATH_CONTRACTS,
+    PATH_LMI_SELF_ATTESTATION, PATH_LMI_SELF_ATTESTATION_ACCEPT,
+    self_attestation_safe,
     build_enrollment_multipart, build_proof_docs_multipart,
     contracts_safe, redact_contract_urls,
 )
@@ -526,6 +528,113 @@ def submit_proof_docs(enrollment_id, utility_account_number, documents, user_id=
         raise
     finally:
         _close_files(files)
+
+
+# Perch documents this as the ONLY acceptable value for NY. Whether the
+# household qualifies is carried separately by `status`, not by a different
+# source-selection value. (The older ingestion sheet says to include it only for
+# "below"; the CURRENT API requires it always - the API wins.)
+SELF_ATTESTATION_SOURCE = "self_attestation_qualifying_income"
+SELF_ATTESTATION_STATUSES = ("accepted", "rejected")
+
+
+def submit_self_attestation(enrollment_id, utility_account_number, occupancy,
+                            county, status, user_id=None):
+    """POST /lmi/self_attestation.
+
+    Sends EXACTLY the five documented fields and nothing else. The returned
+    presigned URL is handed back to the immediate caller only - the audit record
+    stores the URL-free view.
+    """
+    if status not in SELF_ATTESTATION_STATUSES:
+        raise PerchValidationError(
+            "Self-attestation status must be 'accepted' or 'rejected'.")
+    entry = {
+        "utility_account_number": str(utility_account_number),
+        "occupancy": int(occupancy),
+        "county": county,
+        "lmi_source_selection": [SELF_ATTESTATION_SOURCE],
+        "status": status,
+    }
+    safe_meta = {
+        "utility_account_last4": str(utility_account_number)[-4:],
+        "occupancy": entry["occupancy"],
+        "county": county,
+        "status": status,
+        "lmi_source_selection": entry["lmi_source_selection"],
+    }
+    try:
+        result, refreshed, duration_ms = _call_with_refresh(
+            enrollment_id, user_id, "submit_self_attestation",
+            PATH_LMI_SELF_ATTESTATION, "POST", safe_meta,
+            lambda client, token: client.submit_self_attestation(token, entry),
+        )
+        record_api_call(
+            enrollment_id=enrollment_id, operation="submit_self_attestation",
+            endpoint=PATH_LMI_SELF_ATTESTATION, http_method="POST",
+            request_json=safe_meta,
+            # URL-free by construction.
+            response_json={"next_step": result.get("next_step_url"),
+                           **self_attestation_safe(result)},
+            status_code=200, duration_ms=duration_ms, error_message=None,
+            initiated_by_user_id=user_id,
+        )
+        return {
+            "next_step_url": result.get("next_step_url"),
+            "document_available": result.get("document_available"),
+            # Raw is for the immediate response only; callers must not persist it.
+            "raw": result.get("raw"),
+            "token_was_refreshed": refreshed,
+        }
+    except PerchError as e:
+        record_api_call(
+            enrollment_id=enrollment_id, operation="submit_self_attestation",
+            endpoint=PATH_LMI_SELF_ATTESTATION, http_method="POST",
+            request_json=safe_meta, response_json=None,
+            status_code=getattr(e, "http_status", None), duration_ms=0,
+            error_message=str(e), initiated_by_user_id=user_id,
+        )
+        raise
+
+
+def accept_self_attestation(enrollment_id, metadata, user_id=None):
+    """POST /lmi/self_attestation/accept with the documented metadata only."""
+    entry = {
+        "timestamp": metadata.get("timestamp"),
+        "ip_address": metadata.get("ip_address"),
+        "user_agent": metadata.get("user_agent"),
+    }
+    safe_meta = {"timestamp": entry["timestamp"], "ip_address": entry["ip_address"],
+                 "user_agent": (entry["user_agent"] or "")[:120]}
+    try:
+        result, refreshed, duration_ms = _call_with_refresh(
+            enrollment_id, user_id, "accept_self_attestation",
+            PATH_LMI_SELF_ATTESTATION_ACCEPT, "POST", safe_meta,
+            lambda client, token: client.accept_self_attestation(token, entry),
+        )
+        record_api_call(
+            enrollment_id=enrollment_id, operation="accept_self_attestation",
+            endpoint=PATH_LMI_SELF_ATTESTATION_ACCEPT, http_method="POST",
+            request_json=safe_meta,
+            response_json={"next_step": result.get("next_step_url"),
+                           "message": result.get("message")},
+            status_code=202, duration_ms=duration_ms, error_message=None,
+            initiated_by_user_id=user_id,
+        )
+        return {
+            "next_step_url": result.get("next_step_url"),
+            "message": result.get("message"),
+            "token_was_refreshed": refreshed,
+        }
+    except PerchError as e:
+        record_api_call(
+            enrollment_id=enrollment_id, operation="accept_self_attestation",
+            endpoint=PATH_LMI_SELF_ATTESTATION_ACCEPT, http_method="POST",
+            request_json=safe_meta, response_json=None,
+            status_code=getattr(e, "http_status", None), duration_ms=0,
+            error_message=str(e), initiated_by_user_id=user_id,
+        )
+        raise
 
 
 def generate_contracts(enrollment_id, user_id=None):

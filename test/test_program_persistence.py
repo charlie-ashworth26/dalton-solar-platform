@@ -246,7 +246,7 @@ def main():
         migs = [x["filename"] for x in
                 query_one.__globals__["query"]("SELECT filename FROM schema_migrations")]
     check("008 migration applied", any("008_program_selection" in m for m in migs))
-    check("  ...and it is the only new one", len(migs) == 8)
+    check("  ...plus 009 for self-attestation reference data", len(migs) == 9)
     check("column is nullable with no backfill",
           "ALTER TABLE enrollments ADD COLUMN selected_customer_type TEXT" in
           open(os.path.join(ROOT, "db", "migrations", "008_program_selection.sql"),

@@ -311,7 +311,7 @@ def main():
         migrations = query("SELECT filename FROM schema_migrations")
     # 008_program_selection added later for dual-program persistence; this
     # milestone itself still added none.
-    check("this milestone added no migration of its own", len(migrations) == 8)
+    check("this milestone added no migration of its own", len(migrations) == 9)
 
     print(f"\n{'='*72}\nPROGRAM SELECTION - ALL CHECKS PASSED\n{'='*72}")
 

@@ -328,6 +328,39 @@
               <p class="card-eyebrow">New enrollment</p>
               <h2 id="lmi-title">LMI documentation</h2>
               <p class="lead" id="lmi-lead">Qualify the customer for the low-income adder — by document, by income self-attestation, or mark it N/A.</p>
+              <!-- SELF-ATTESTATION. Shown only when Perch returns /lmi/self_attestation.
+                   Mirrors the official NY_self_attestation_form.pdf: household size, the
+                   threshold for that size, and above/below. Exact income is never asked,
+                   and no attestation wording is authored here - Perch generates the legal
+                   document and the customer accepts it in the portal. -->
+              <div id="sa-panel" style="display:none;">
+                <div id="sa-form">
+                  <p class="lead">Perch requires an income self-attestation for this enrollment. Enter the household details below; Perch will generate the official form for the customer to review and sign.</p>
+                  <div class="row2">
+                    <div class="field"><label for="sa-occupancy">People living in the home</label>
+                      <select id="sa-occupancy" onchange="onSelfAttestationOccupancy()"></select></div>
+                    <div class="field"><label for="sa-county">County</label>
+                      <select id="sa-county" onchange="onSelfAttestationCounty()"></select></div>
+                  </div>
+                  <div id="sa-threshold-wrap" class="sa-threshold" style="display:none;">
+                    <span class="sa-cap" id="sa-caption"></span>
+                    <span class="sa-amt" id="sa-threshold"></span>
+                    <span class="sa-for">household income level for this household size</span>
+                  </div>
+                  <div id="sa-choice" class="sa-choices">
+                    <button type="button" class="sa-opt" data-choice="below" onclick="selectSelfAttestationChoice('below')">Annual household income is <strong>at or below</strong> this level</button>
+                    <button type="button" class="sa-opt" data-choice="above" onclick="selectSelfAttestationChoice('above')">Annual household income is <strong>above</strong> this level</button>
+                  </div>
+                  <p class="helper" id="sa-error" style="display:none;color:var(--danger);"></p>
+                  <div class="wizard-actions"><button class="btn btn-ghost" onclick="backFromLmi()">Back</button>
+                    <button class="btn btn-primary" id="sa-submit" onclick="submitSelfAttestation()" disabled>Prepare self-attestation</button></div>
+                </div>
+                <div id="sa-sent" style="display:none;">
+                  <p class="lead">Eligibility recorded. Continuing to the agreements.</p>
+                  <div class="wizard-actions"><button class="btn btn-ghost" onclick="backToDashboard()">Back to dashboard</button></div>
+                </div>
+              </div>
+              <div id="lmi-proof-panel">
 
               <div class="toggle-row" style="margin-bottom:18px;">
                 <div class="toggle-btn" id="lmi-mode-doc" onclick="setLmiMode('doc')">Upload documentation</div>
@@ -392,6 +425,7 @@
                   <div class="toggle-btn" id="ami-above" onclick="setIncomeAnswer(false)">Income is above this level</div>
                 </div>
               </div>
+              </div><!-- /lmi-proof-panel -->
               <p class="helper" id="lmi-submit-error" style="display:none;color:var(--danger);margin-top:8px;"></p><div class="wizard-actions"><button class="btn btn-ghost" onclick="backFromLmi()">Back</button><button class="btn btn-primary" id="btn-lmi-next" onclick="submitLmi()" disabled>Continue</button></div>
             </div>
           </div>

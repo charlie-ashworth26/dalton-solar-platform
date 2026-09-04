@@ -18,8 +18,9 @@ from urllib.parse import urlparse
 from flask import Blueprint, request, jsonify, g, redirect, make_response
 from markupsafe import escape
 
-from db import query_one, execute
-from auth import require_auth, require_role, require_staff_or_customer
+from db import query_one, query, execute
+from auth import (require_auth, require_role, require_staff_or_customer,
+                  require_customer_auth)
 from helpers import next_enrollment_code, resolve_stored_path
 from services import audit, status_machine
 from services.perch import adapter, workflow, utilities
@@ -1148,3 +1149,306 @@ def select_enrollment_program(enrollment_id):
               user_id=g.current_user["id"], details={"customer_type": canonical},
               ip_address=request.remote_addr)
     return jsonify({"enrollment_id": enrollment_id, "selected_customer_type": canonical})
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# LMI SELF-ATTESTATION
+#
+# Conditional branch. Dalton NEVER decides it applies - it is entered only when
+# Perch returns /lmi/self_attestation as next_step after /enroll. Perch performs
+# the geo/project eligibility determination on their side.
+#
+# Two Perch calls, in order:
+#   POST /lmi/self_attestation         -> official document (presigned, 1h)
+#   POST /lmi/self_attestation/accept  -> 202, next_step -> /contracts
+#
+# perch_self_attestation_submissions is the idempotence ledger and exists for
+# nothing else. Presigned URLs are never written to it.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _self_attestation_row(enrollment_id):
+    return query_one("SELECT * FROM perch_self_attestation_submissions "
+                     "WHERE enrollment_id = ?", (enrollment_id,))
+
+
+@bp.route("/enrollments/<int:enrollment_id>/lmi/self-attestation/reference", methods=["GET"])
+@require_auth
+@require_role("sales_rep", "admin")
+def self_attestation_reference(enrollment_id):
+    """Threshold table + controlled county list for the attestation form.
+
+    Served from the DB so the values are versioned and updatable by migration -
+    never hardcoded in the frontend. Side-effect free.
+    """
+    _enrollment, err = _visible(enrollment_id)
+    if err:
+        return err
+    version = query_one("SELECT * FROM perch_lmi_threshold_versions "
+                        "WHERE is_active = 1 ORDER BY created_at DESC LIMIT 1")
+    if not version:
+        return jsonify({"error": "No active income-threshold table is configured."}), 500
+    rows = query("SELECT occupancy, income_level_cents FROM perch_lmi_income_thresholds "
+                 "WHERE version_label = ? AND is_active = 1 ORDER BY occupancy",
+                 (version["version_label"],))
+    counties = [r["name"] for r in
+                query("SELECT name FROM ny_counties WHERE is_active = 1 ORDER BY name")]
+    existing = _self_attestation_row(enrollment_id)
+    return jsonify({
+        "version_label": version["version_label"],
+        "source_document": version["source_document"],
+        "table_caption": version["table_caption"],
+        "thresholds": [{"occupancy": r["occupancy"],
+                        "income_level_cents": r["income_level_cents"]} for r in rows],
+        "counties": counties,
+        "already_generated": bool(existing and existing["generated_at"]),
+        "already_accepted": bool(existing and existing["accepted_at"]),
+    })
+
+
+@bp.route("/enrollments/<int:enrollment_id>/lmi/self-attestation", methods=["POST"])
+@require_auth
+@require_role("sales_rep", "admin")
+def generate_self_attestation(enrollment_id):
+    """Rep submits household size, county and the above/below selection."""
+    enrollment, err = _visible(enrollment_id)
+    if err:
+        return err
+
+    existing = _self_attestation_row(enrollment_id)
+    if existing and existing["accepted_at"]:
+        return jsonify({"error": "This self-attestation has already been accepted.",
+                        "already_accepted": True}), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    occupancy = data.get("occupancy")
+    county = (data.get("county") or "").strip()
+    status = (data.get("status") or "").strip()
+
+    # ---- validate against the CONTROLLED sources, before touching Perch ----
+    try:
+        occupancy = int(occupancy)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Select the number of people living in the home."}), 400
+    if not query_one("SELECT 1 FROM perch_lmi_income_thresholds "
+                     "WHERE occupancy = ? AND is_active = 1", (occupancy,)):
+        # The published table covers 1-8, matching the documented range.
+        return jsonify({"error": "Household size must be between 1 and 8."}), 400
+    if not county or not query_one("SELECT 1 FROM ny_counties WHERE name = ? AND is_active = 1",
+                                   (county,)):
+        # Controlled list only - Perch validates county and would 422 on free text.
+        return jsonify({"error": "Select a New York county from the list."}), 400
+    if status not in ("accepted", "rejected"):
+        return jsonify({"error": "Select whether the household income is at or below, "
+                                 "or above, the level shown."}), 400
+
+    account = query_one("SELECT ua.account_number FROM utility_accounts ua "
+                        "JOIN enrollments e ON e.utility_account_id = ua.id WHERE e.id = ?",
+                        (enrollment_id,))
+    if not account or not account["account_number"]:
+        return jsonify({"error": "The utility account number is missing for this "
+                                 "enrollment."}), 400
+
+    version = query_one("SELECT version_label FROM perch_lmi_threshold_versions "
+                        "WHERE is_active = 1 ORDER BY created_at DESC LIMIT 1")
+    try:
+        result = adapter.submit_self_attestation(
+            enrollment_id, account["account_number"], occupancy, county, status,
+            user_id=g.current_user["id"])
+    except PerchError as e:
+        audit.log("perch_self_attestation_failed", enrollment_id=enrollment_id,
+                  user_id=g.current_user["id"], details={"error": str(e)[:400]},
+                  ip_address=request.remote_addr)
+        return jsonify({"error": str(e), "perch_error": type(e).__name__}), getattr(
+            e, "http_status", 502)
+
+    step_key, recognized = _next_key(result.get("next_step_url"))
+    workflow.set_state(enrollment_id, step_key or "unknown_next_step",
+                       next_step_url=result.get("next_step_url"), recognized=recognized)
+
+    # LEDGER. document_url_returned is a BOOLEAN - the presigned URL is not stored.
+    if existing:
+        execute("""UPDATE perch_self_attestation_submissions
+                   SET occupancy=?, county=?, status=?, version_label=?,
+                       document_url_returned=?, generated_at=datetime('now'),
+                       generated_by_user_id=?, updated_at=datetime('now')
+                   WHERE enrollment_id=?""",
+                (occupancy, county, status, version["version_label"] if version else None,
+                 1 if result.get("document_available") else 0,
+                 g.current_user["id"], enrollment_id))
+    else:
+        execute("""INSERT INTO perch_self_attestation_submissions
+                   (enrollment_id, occupancy, county, status, version_label,
+                    document_url_returned, generated_at, generated_by_user_id)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)""",
+                (enrollment_id, occupancy, county, status,
+                 version["version_label"] if version else None,
+                 1 if result.get("document_available") else 0, g.current_user["id"]))
+
+    audit.log("perch_self_attestation_generated", enrollment_id=enrollment_id,
+              user_id=g.current_user["id"],
+              details={"occupancy": occupancy, "county": county, "status": status},
+              ip_address=request.remote_addr)
+
+    # ── CHAIN STRAIGHT INTO ACCEPTANCE ────────────────────────────────────
+    # Self-attestation is a REP-SIDE ELIGIBILITY step, not a customer-facing
+    # acceptance. Perch confirmed the rep may attest on the customer's behalf.
+    #
+    # Leaving the enrollment parked at self_attestation_accept is what broke
+    # live staging: the customer signed in, the portal went straight for
+    # /contracts, and Perch correctly refused with "Previous stages must be
+    # completed first."
+    #
+    # Accepting here means one rep action completes generate -> accept ->
+    # contracts, and the customer only ever sees the NORMAL agreement package.
+    # The customer-facing contract acceptance is unchanged and still theirs.
+    if step_key == "self_attestation_accept" and not (existing and existing["accepted_at"]):
+        metadata = {
+            # Same clock the contract-acceptance path uses.
+            "timestamp": acceptance_timestamp(),
+            "ip_address": _client_ip(),
+            "user_agent": (request.headers.get("User-Agent") or "")[:2048],
+        }
+        try:
+            accept_result = adapter.accept_self_attestation(
+                enrollment_id, metadata, user_id=g.current_user["id"])
+        except PerchAmbiguousOutcomeError as e:
+            # MAY have landed. Never retried - reconcile via /status, the same
+            # conservative pattern /enroll and /contracts/accept use.
+            workflow.set_state(enrollment_id, "self_attestation_accept",
+                               last_response={"uncertain": True, "detail": str(e)})
+            audit.log("perch_self_attestation_accept_uncertain",
+                      enrollment_id=enrollment_id, user_id=g.current_user["id"],
+                      details={"detail": str(e)[:400]}, ip_address=request.remote_addr)
+            return jsonify({
+                "error": "The self-attestation was prepared, but its acceptance "
+                         "outcome is uncertain. Check the enrollment status before "
+                         "retrying.",
+                "uncertain": True,
+            }), 502
+        except PerchError as e:
+            # The document EXISTS at Perch - the ledger records that. Acceptance
+            # can be retried from the reference/resume path without regenerating.
+            audit.log("perch_self_attestation_accept_failed", enrollment_id=enrollment_id,
+                      user_id=g.current_user["id"], details={"error": str(e)[:400]},
+                      ip_address=request.remote_addr)
+            return jsonify({"error": str(e), "perch_error": type(e).__name__,
+                            "document_prepared": True}), getattr(e, "http_status", 502)
+
+        step_key, recognized = _next_key(accept_result.get("next_step_url"))
+        workflow.set_state(enrollment_id, step_key or "unknown_next_step",
+                           next_step_url=accept_result.get("next_step_url"),
+                           recognized=recognized)
+        execute("""UPDATE perch_self_attestation_submissions
+                   SET accepted_at=datetime('now'), accepted_next_step=?,
+                       updated_at=datetime('now')
+                   WHERE enrollment_id=?""", (step_key, enrollment_id))
+        audit.log("perch_self_attestation_accepted", enrollment_id=enrollment_id,
+                  user_id=g.current_user["id"], details={"next_step": step_key},
+                  ip_address=request.remote_addr)
+
+    return jsonify({
+        "next_step_key": step_key,
+        "next_step_recognized": recognized,
+        "document_available": bool(result.get("document_available")),
+    })
+
+
+@bp.route("/enrollments/<int:enrollment_id>/lmi/self-attestation/document", methods=["GET"])
+@require_customer_auth
+def customer_self_attestation_document(enrollment_id):
+    """Re-fetch the official attestation document for the customer to review.
+
+    The presigned URL is never stored, so it is obtained fresh from Perch on each
+    view - the same treatment contracts already receive. Re-calling generate with
+    the SAME persisted answers is safe and returns fresh links to the same
+    document; it does not create a second attestation.
+    """
+    # Use the SAME actor-aware helper every other dual-actor route uses: it
+    # checks the token's enrollment id AND ownership, rather than one ad-hoc
+    # comparison.
+    _enrollment, err = _visible_to_actor(enrollment_id)
+    if err:
+        return err
+    row = _self_attestation_row(enrollment_id)
+    if not row or not row["generated_at"]:
+        return jsonify({"error": "No self-attestation has been prepared for this "
+                                 "enrollment."}), 404
+
+    account = query_one("SELECT ua.account_number FROM utility_accounts ua "
+                        "JOIN enrollments e ON e.utility_account_id = ua.id WHERE e.id = ?",
+                        (enrollment_id,))
+    try:
+        result = adapter.submit_self_attestation(
+            enrollment_id, account["account_number"], row["occupancy"],
+            row["county"], row["status"], user_id=None)
+    except PerchError as e:
+        return jsonify({"error": str(e), "perch_error": type(e).__name__}), getattr(
+            e, "http_status", 502)
+
+    url = ((result.get("raw") or {}).get("self_attestation") or {}).get("url")
+    if not url:
+        return jsonify({"error": "Perch did not return the self-attestation document."}), 502
+    response = jsonify({
+        "document_url": url,          # handed to the browser, never persisted
+        "already_accepted": bool(row["accepted_at"]),
+    })
+    response.headers["Cache-Control"] = "no-store, private"
+    return response
+
+
+@bp.route("/enrollments/<int:enrollment_id>/lmi/self-attestation/accept", methods=["POST"])
+@require_customer_auth
+def accept_self_attestation(enrollment_id):
+    """Customer accepts the official self-attestation document.
+
+    Fired at the MOMENT of agreement so the metadata Perch requires (timestamp,
+    ip_address, user_agent) describes that moment. Customer-scoped: this is the
+    customer's act, not the rep's.
+    """
+    _enrollment, err = _visible_to_actor(enrollment_id)
+    if err:
+        return err
+
+    row = _self_attestation_row(enrollment_id)
+    if not row or not row["generated_at"]:
+        return jsonify({"error": "The self-attestation document has not been prepared "
+                                 "yet."}), 409
+    if row["accepted_at"]:
+        # IDEMPOTENCE: never accept twice. Resume into the persisted next step.
+        return jsonify({
+            "already_accepted": True,
+            "next_step_key": row["accepted_next_step"] or "contracts",
+        })
+
+    metadata = {
+        # Same clock the contract acceptance path uses, so both are consistent.
+        "timestamp": acceptance_timestamp(),
+        "ip_address": _client_ip(),
+        "user_agent": (request.headers.get("User-Agent") or "")[:2048],
+    }
+    try:
+        result = adapter.accept_self_attestation(enrollment_id, metadata, user_id=None)
+    except PerchAmbiguousOutcomeError as e:
+        # Acceptance MAY have landed. Do not retry - reconcile via /status, the
+        # same conservative pattern /enroll and /contracts/accept already use.
+        workflow.set_state(enrollment_id, "self_attestation_accept",
+                           last_response={"uncertain": True, "detail": str(e)})
+        audit.log("perch_self_attestation_accept_uncertain", enrollment_id=enrollment_id,
+                  details={"detail": str(e)[:400]}, ip_address=request.remote_addr)
+        return jsonify({"error": "Acceptance outcome is uncertain. Check status before "
+                                 "retrying.", "uncertain": True}), 502
+    except PerchError as e:
+        return jsonify({"error": str(e), "perch_error": type(e).__name__}), getattr(
+            e, "http_status", 502)
+
+    step_key, recognized = _next_key(result.get("next_step_url"))
+    workflow.set_state(enrollment_id, step_key or "unknown_next_step",
+                       next_step_url=result.get("next_step_url"), recognized=recognized)
+    execute("""UPDATE perch_self_attestation_submissions
+               SET accepted_at=datetime('now'), accepted_next_step=?,
+                   updated_at=datetime('now')
+               WHERE enrollment_id=?""", (step_key, enrollment_id))
+    audit.log("perch_self_attestation_accepted", enrollment_id=enrollment_id,
+              details={"next_step": step_key}, ip_address=request.remote_addr)
+
+    return jsonify({"next_step_key": step_key, "next_step_recognized": recognized})

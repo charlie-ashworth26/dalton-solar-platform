@@ -3,64 +3,55 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dalton Solar — Rep Portal</title>
+<title>Utility Bill Savings — Rep Portal</title>
 <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
   <div id="env-banner" role="status" style="display:none;"></div>
 
-<div class="screen active" id="screen-login">
-  <div class="login-split">
-    <div class="login-brand">
-      <div class="login-brand-top">
-        <div class="brand-mark on-dark"><span class="brand-badge">DS</span>Dalton Solar</div>
-        <div class="login-tagline">Enrollment Portal</div>
-        <div class="login-sub">v1.0 — Demo</div>
-      </div>
-      <div class="bg-orbit"></div><div class="bg-orbit b2"></div>
-    </div>
-    <div class="login-form-wrap">
-      <div class="login-card">
-        <h2>Sign in</h2>
-        <p class="lead">Enter your email and password. We'll take you to the right place.</p>
-        <div class="field"><label>Email</label><input type="email" id="login-email" placeholder="you@example.com" autocomplete="username"></div>
-        <div class="field"><label>Password</label><input type="password" id="login-pass" placeholder="••••••••" autocomplete="current-password"></div>
-        <button class="btn btn-primary btn-full btn-lg" id="login-submit-btn" onclick="doLogin()">Sign in</button>
-        <p class="helper" id="login-error" style="display:none;color:var(--danger);text-align:center;margin-top:14px;"></p>
-        <p class="helper" style="text-align:center;margin-top:16px;">Forgot your password? Reps: ask your manager. Customers: ask your Dalton rep.</p>
-        <!-- The "Sign in to your agreement" link is gone: customers now use the SAME
-             form above and the backend routes them. #screen-customer-login is retained
-             and reachable for existing direct/internal entry, and
-             /api/auth/customer-login still works - nothing was removed. -->
-      </div>
-    </div>
+  <!-- UBS SIGN IN. One login form for staff and customers - the backend
+       decides which. Every id and handler below is unchanged: #login-email,
+       #login-pass, #login-submit-btn, #login-error and doLogin(). Only the
+       presentation and the visible branding changed. -->
+  <div class="screen active" id="screen-login">
+    <main class="ubs-shell">
+      <section class="ubs-brand-side">
+        <div class="ubs-brand">
+          <div class="ubs-mark">UBS</div>
+          <div class="ubs-brand-name">Utility Bill Savings</div>
+        </div>
+      </section>
+      <section class="ubs-form-side">
+        <div class="ubs-form-wrap">
+          <div class="ubs-mobile-brand">
+            <div class="ubs-mobile-mark">UBS</div>
+            <div class="ubs-brand-name">Utility Bill Savings</div>
+          </div>
+          <h2>Sign in</h2>
+          <div class="ubs-field">
+            <label for="login-email">Email</label>
+            <input type="email" id="login-email" placeholder="you@example.com" autocomplete="email">
+          </div>
+          <div class="ubs-field">
+            <label for="login-pass">Password</label>
+            <div class="ubs-password">
+              <input type="password" id="login-pass" placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;" autocomplete="current-password">
+              <button class="ubs-toggle" type="button" id="login-pass-toggle" onclick="toggleLoginPassword()">Show</button>
+            </div>
+          </div>
+          <button class="ubs-submit" id="login-submit-btn" onclick="doLogin()">Continue</button>
+          <p class="ubs-error" id="login-error" style="display:none;"></p>
+          <div class="ubs-footer">Utility Bill Savings</div>
+        </div>
+      </section>
+    </main>
   </div>
-</div>
-
-<div class="screen" id="screen-customer-login">
-  <div class="login-split">
-    <div class="login-brand">
-      <div class="login-brand-top">
-        <div class="brand-mark on-dark"><span class="brand-badge">DS</span>Dalton Solar</div>
-        <div class="login-tagline">Enrollment Portal</div>
-        <div class="login-sub">v1.0 — Demo</div>
-      </div>
-      <div class="bg-orbit"></div><div class="bg-orbit b2"></div>
-    </div>
-    <div class="login-form-wrap">
-      <div class="login-card">
-        <h2>Customer sign in</h2>
-        <p class="lead">Enter the email your rep used for your enrollment.</p>
-        <div class="field"><label>Email</label><input type="email" id="cust-login-email" placeholder="you@email.com"></div>
-        <div class="field"><label>Password</label><span class="pw-wrap"><input type="password" id="cust-login-pass" placeholder="••••••••"><button type="button" class="pw-eye" id="cust-login-pass-eye" aria-label="Show password" aria-pressed="false" title="Show password" onclick="togglePasswordVisibility('cust-login-pass','cust-login-pass-eye')">👁</button></span></div>
-        <button class="btn btn-primary btn-full btn-lg" id="cust-login-btn" onclick="doCustomerLogin()">Sign in</button>
-        <p class="helper" id="cust-login-error" style="display:none;color:var(--danger);text-align:center;margin-top:14px;">We couldn't find a pending agreement for that email. Try the link your rep sent you, or check with them.</p>
-        <div class="switch-role">Are you the rep? <a onclick="showScreen('screen-login')">Sign in here</a></div>
-      </div>
-    </div>
-  </div>
-</div>
-
+  <!-- RETIRED: the separate customer sign-in screen has been removed.
+       There is ONE user-facing login (#screen-login). Customer session
+       expiry and enrollment completion both route there, and the backend
+       decides account_type on the next /api/auth/signin.
+       The /api/auth/customer-login ENDPOINT is untouched and still works
+       for any internal/direct caller - only the duplicate UI is gone. -->
 <div class="screen" id="screen-customer-contracts">
     <div class="wrap-narrow">
       <div id="agr-host-customer"></div>
@@ -69,7 +60,7 @@
 
 <div class="screen" id="screen-customer-portal">
   <div class="customer-wrap">
-    <div class="customer-top"><div class="brand-mark"><span class="brand-badge">DS</span>Dalton Solar</div></div>
+    <div class="customer-top"><div class="brand-mark"><span class="brand-badge">UBS</span>Utility Bill Savings</div></div>
     <div class="card">
       <p class="card-eyebrow">Welcome back</p>
       <h2 id="portal-hello">Hi there</h2>
@@ -86,7 +77,7 @@
 
 <div class="app-shell" id="app-shell">
   <div class="sidebar">
-    <div class="sidebar-brand"><div class="brand-mark"><span class="brand-badge">DS</span>Dalton Solar</div></div>
+    <div class="sidebar-brand"><div class="brand-mark"><span class="brand-badge">UBS</span>Utility Bill Savings</div></div>
     <div class="sidebar-profile">
       <div class="sidebar-avatar" id="rep-avatar">C</div>
       <div class="sidebar-name" id="rep-name-label">Charlie Mren</div>
@@ -269,7 +260,7 @@
 
             <!-- 3 · UTILITY BILL -->
             <section class="sec">
-              <div class="sec-head"><div><h2>Utility bill</h2><p>Upload the bill and Dalton will read the account details.</p></div></div>
+              <div class="sec-head"><div><h2>Utility bill</h2><p>Upload the bill and we'll read the account details.</p></div></div>
               <div class="upload" id="bill-dropzone" onclick="document.getElementById('bill-file').click()"
                    ondragover="dzDragOver(event,'bill-dropzone')" ondragleave="dzDragLeave(event,'bill-dropzone')" ondrop="dzDrop(event,'bill-dropzone',handleBillUpload)">
                 <div>
@@ -287,7 +278,7 @@
 
             <!-- 4 · REVIEW ACCOUNT DETAILS -->
             <section class="sec">
-              <div class="sec-head"><div><h2>Review account details</h2><p>Dalton read these from the bill. Correct anything that looks wrong.</p></div></div>
+              <div class="sec-head"><div><h2>Review account details</h2><p>We read these from the bill. Correct anything that looks wrong.</p></div></div>
               <div class="fields">
                 <div class="fd"><label class="lbl" for="c-first">First name</label><input type="text" id="c-first" autocomplete="given-name" oninput="checkBillReady()"></div>
                 <div class="fd"><label class="lbl" for="c-last">Last name</label><input type="text" id="c-last" autocomplete="family-name" oninput="checkBillReady()"></div>

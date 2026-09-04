@@ -165,17 +165,27 @@ def main():
 
     # ═══════════════════════════════════════════════════════
     section("BUG 2 - customer agreement authentication")
-    login_body = fn_body("doCustomerLogin")
+    # doCustomerLogin() was RETIRED with the duplicate customer sign-in screen.
+    # Customers now authenticate through the ONE unified form, so this section's
+    # intent - customer auth goes through the backend, never a client-side
+    # comparison - is asserted against doLogin() instead.
+    check("the separate customer login handler is gone",
+          "function doCustomerLogin(" not in JS)
+    login_body = fn_body("doLogin")
     check("customer login now calls the backend",
-          "/api/auth/customer-login" in login_body)
+          "/api/auth/signin" in login_body)
     check("it no longer searches the dead in-memory array",
           "customers.find" not in login_body)
     check("it no longer compares plaintext passwords",
           "match.password" not in login_body)
     check("it no longer filters on the pre-Perch status",
           "Opportunity - Review" not in login_body)
+    check("  ...and the BACKEND decides the account type",
+          "data.account_type === 'customer'" in login_body)
     check("customer token is stored separately from the rep token",
           "dalton_customer_token" in JS)
+    check("  ...and each sign-in clears the other store",
+          "AuthStore.clear();" in login_body and "CustomerAuth.clear();" in login_body)
 
     r = c.post("/api/auth/customer-login",
                json={"email": "charlie+dalton1@example.com", "password": "CustPass1!"})
@@ -266,10 +276,15 @@ def main():
 
     # ═══════════════════════════════════════════════════════
     section("PASSWORD VISIBILITY TOGGLE")
-    for field in ("c-pass", "c-pass-confirm", "cust-login-pass"):
+    # cust-login-pass was RETIRED with the duplicate customer sign-in screen.
+    # The two password fields the REP sets remain, and the unified login has its
+    # own Show/Hide control.
+    for field in ("c-pass", "c-pass-confirm"):
         check(f"{field} has an eye control", f'id="{field}-eye"' in HTML)
-    check("customer creation and login are both covered",
-          'id="c-pass-eye"' in HTML and 'id="cust-login-pass-eye"' in HTML)
+    check("customer creation and the unified login are both covered",
+          'id="c-pass-eye"' in HTML and 'id="login-pass-toggle"' in HTML)
+    check("  ...and the retired field's control is gone",
+          'id="cust-login-pass-eye"' not in HTML)
     toggle = fn_body("togglePasswordVisibility")
     check("it toggles ONLY the input type",
           "input.type" in toggle and "password" in toggle and "text" in toggle)

@@ -47,7 +47,7 @@ def main():
     check("routing is driven by Perch's next_step_key",
           "if(perchContext.nextStepKey === 'contracts')" in JS)
     check("  ...an unrecognised next step STOPS the flow",
-          "Perch returned a next step Dalton does not recognize" in JS)
+          "Perch returned a next step we do not recognize" in JS)
     check("  ...and proof_docs must report contracts before we continue",
           "Perch accepted the proof document but returned an unexpected next step" in JS)
 

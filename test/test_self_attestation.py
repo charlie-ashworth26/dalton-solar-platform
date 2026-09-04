@@ -98,7 +98,7 @@ def main():
           not any(p in JS.split("async function continueFromPerchNextStep")[1][:1500]
                   for p in ("utilitySlug", "capacityZip", "customer_type")))
     check("19. an unknown next_step FAILS SAFE",
-          "Perch returned a next step Dalton does not recognize" in JS)
+          "Perch returned a next step we do not recognize" in JS)
 
     section("4. EXACT DOCUMENTED PAYLOAD")
     eid, email = full_enrollment("sa1")

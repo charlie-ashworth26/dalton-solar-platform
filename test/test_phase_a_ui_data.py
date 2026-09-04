@@ -256,8 +256,19 @@ def main():
     check("customer Done clears ONLY the customer token", "CustomerAuth.clear()" in fin)
     check("  ...and never the rep session", "AuthStore" not in fin)
     check("  ...and never exposes the rep dashboard", "showView(" not in fin)
-    check("  ...returning to the customer sign-in screen",
-          "screen-customer-login" in fin)
+    # CHANGED INTENT: there is now ONE user-facing login. Done returns the
+    # customer to the unified sign-in screen instead of a separate customer
+    # form. The SECURITY BOUNDARY this assertion originally protected is
+    # unchanged and still asserted above and below: only the customer token is
+    # cleared, the rep session is never touched, and no rep view is shown.
+    check("  ...returning to the UNIFIED sign-in screen",
+          "activateScreen('screen-login')" in fin)
+    check("  ...and never to a separate customer login",
+          "screen-customer-login" not in fin)
+    check("  ...the rep dashboard is never exposed by Done",
+          "app-shell" not in fin and "showView(" not in fin)
+    check("  ...so re-entry requires authenticating again",
+          "CustomerAuth.clear()" in fin)
 
     section("AGREEMENT INTERACTION UNCHANGED (must not become cards/buttons)")
     check("exactly one acknowledgement checkbox", JS.count('id="agr-ack-check"') == 1)

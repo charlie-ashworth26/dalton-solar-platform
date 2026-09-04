@@ -172,8 +172,16 @@ def main():
           c.post("/api/auth/customer-login",
                  json={"email": "unified.cust@example.com",
                        "password": "CustPass1!"}).status_code == 200)
-    check("the customer login screen is retained for direct entry",
-          'id="screen-customer-login"' in HTML)
+    # The duplicate customer sign-in SCREEN was retired: one user-facing login.
+    # The ENDPOINT is untouched and still serves internal/direct callers.
+    check("the duplicate customer login screen is gone",
+          'id="screen-customer-login"' not in HTML)
+    check("  ...and its form controls with it",
+          "cust-login-email" not in HTML and "cust-login-pass" not in HTML)
+    check("  ...but /api/auth/customer-login still works",
+          c.post("/api/auth/customer-login",
+                 json={"email": "unified.cust@example.com",
+                       "password": "CustPass1!"}).status_code == 200)
     check("no role-choice link is needed on the main form",
           "Sign in to your agreement</a>" not in HTML)
     check("  ...and the form no longer says 'Rep sign in'", "Rep sign in" not in HTML)
@@ -194,6 +202,57 @@ def main():
                         ("unified.cust@example.com",))
     check("stored customer credential is a hash, not the password",
           row["password_hash"] != "CustPass1!" and len(row["password_hash"]) > 20)
+
+    section("ONE LOGIN UI — session end and completion both route here")
+    # There are TWO 401 handlers - the staff apiFetch and customerApi. Scope to
+    # the customer one, which is the path this change altered.
+    cust_api = JS[JS.index("async function customerApi("):]
+    cust_api = cust_api[:cust_api.index("\n}")]
+    check("session expiry clears the CUSTOMER token", "CustomerAuth.clear()" in cust_api)
+    check("  ...never the rep session", "AuthStore" not in cust_api)
+    check("  ...and routes to the UNIFIED login",
+          "activateScreen('screen-login')" in cust_api)
+    check("  ...not to a separate customer login",
+          "screen-customer-login" not in cust_api)
+    check("  ...requiring re-authentication", "session expired" in cust_api)
+
+    fin_js = JS[JS.index("function finishCustomerEnrollment("):]
+    fin_js = fin_js[:fin_js.index("\n}")]
+    check("completion clears the customer token", "CustomerAuth.clear()" in fin_js)
+    check("  ...and routes to the UNIFIED login",
+          "activateScreen('screen-login')" in fin_js)
+    check("  ...never exposing the rep dashboard",
+          "app-shell" not in fin_js and "showView(" not in fin_js)
+    check("  ...and never touching the rep session", "AuthStore" not in fin_js)
+
+    check("NOTHING routes to a separate customer login",
+          "screen-customer-login" not in JS)
+    # A comment records the removal; what matters is that no FUNCTION and no
+    # call site remain.
+    check("  ...and its form handler is gone",
+          "function doCustomerLogin(" not in JS and "doCustomerLogin()" not in HTML)
+    check("only ONE login form exists in the app",
+          HTML.count('id="login-email"') == 1 and "cust-login-email" not in HTML)
+    check("  ...with one password field", "cust-login-pass" not in HTML)
+    check("no role hint is ever sent",
+          "JSON.stringify({ email, password: pass })" in JS)
+    check("  ...and no role selector exists",
+          not any(t in HTML for t in ("Staff login", "Customer login",
+                                      "Are you a rep", 'name="role"')))
+
+    section("BOTH ACCOUNT TYPES STILL WORK THROUGH THE ONE FORM")
+    for email, pw, role in STAFF:
+        rr = c.post("/api/auth/signin", json={"email": email, "password": pw})
+        check(f"{role} still signs in", rr.status_code == 200
+              and rr.get_json()["user"]["role"] == role)
+    rr2 = c.post("/api/auth/signin", json={"email": "unified.cust@example.com",
+                                           "password": "CustPass1!"})
+    check("customer still signs in on the same form",
+          rr2.status_code == 200 and rr2.get_json()["account_type"] == "customer")
+    check("  ...and is still routed to the portal",
+          rr2.get_json()["destination"] == "customer_portal")
+    check("  ...scoped to their own enrollment",
+          rr2.get_json()["enrollment_id"] == eid)
 
     print(f"\n{'='*72}\nUNIFIED LOGIN - ALL CHECKS PASSED\n{'='*72}")
 

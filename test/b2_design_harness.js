@@ -19,13 +19,12 @@ console.log('='.repeat(72));
 // ── Inventory captured BEFORE the restyle ──
 const CONTROLS=['a-city','a-state','a-street','a-unit','a-zip','admin-modal-save','b-city',
  'b-state','b-street','b-unit','b-zip','bill-file','billing-same','btn-bill-next','btn-lmi-next','c-acct','c-email','c-first','c-last','c-pass','c-pass-confirm',
- 'c-pass-confirm-eye','c-pass-eye','c-phone','c-pod','complete-cta','cust-login-btn',
- 'cust-login-email','cust-login-pass','cust-login-pass-eye','lmi-doctype','lmi-file','lmi-format',
+ 'c-pass-confirm-eye','c-pass-eye','c-phone','c-pod','complete-cta','lmi-doctype','lmi-file','lmi-format',
  'lmi-household-size','lmi-name-on-doc','lmi-relationship','login-email','login-pass',
  'login-submit-btn','portal-open-btn','rep-create-btn','rep-new-code','rep-new-email',
  'rep-new-name','rep-new-pass','rep-new-pass-eye','rep-new-phone','rep-new-team'];
 const HANDLERS=['adminModalBackdrop','agrBackdrop','backFromCustomer','closeAdminModal',
- 'closeAgreements','completeReturnToDashboard','createRep','doCustomerLogin','doLogin',
+ 'closeAgreements','completeReturnToDashboard','createRep','doLogin',
  'exitWizard','goStep','openCustomerContracts','resetAll','setIncomeAnswer','setLmiMode',
  'showScreen','showView','startWizardFresh','submitAdminModal','submitBill',
  'submitLmi','togglePasswordVisibility','checkBillReady','checkLmiReady','handleBillUpload',

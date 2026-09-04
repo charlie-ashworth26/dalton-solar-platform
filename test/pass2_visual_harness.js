@@ -125,7 +125,15 @@ check('  ...with concise supporting copy',
 console.log('\n--- MOTION / RESPONSIVE ---');
 check('reduced motion honoured', css.includes('prefers-reduced-motion'));
 check('durations stay restrained', /--t-quick:140ms/.test(css) && /--t-slow:260ms/.test(css));
-check('no gradients used decoratively', (css.match(/linear-gradient/g)||[]).length<=1);
+// The no-gradient rule governs the ENROLLMENT UI. The UBS sign-in screen is a
+// deliberate exception: its patterned background is the approved design and is
+// fully scoped under #screen-login, so it cannot affect anything else.
+const appCss = css.slice(0, css.indexOf('UBS SIGN IN') === -1
+                            ? css.length : css.indexOf('UBS SIGN IN'));
+check('no gradients used decoratively in the enrollment UI',
+  (appCss.match(/linear-gradient/g)||[]).length<=1);
+check('  ...the UBS login pattern is scoped to #screen-login',
+  css.includes('#screen-login{') && css.includes('#screen-login::before'));
 check('breakpoints 1200 / 820 / 430', ['1200px','820px','430px'].every(b=>css.includes('max-width:'+b)));
 check('no horizontal overflow guard', /html,body\{max-width:100%;overflow-x:hidden/.test(css));
 

@@ -165,11 +165,11 @@ async function doLogin(){
     errEl.textContent = err.message;
     errEl.style.display = 'block';
     btn.disabled = false;
-    btn.textContent = 'Sign in';
+    btn.textContent = 'Continue';
     return;
   }
   btn.disabled = false;
-  btn.textContent = 'Sign in';
+  btn.textContent = 'Continue';
 
   if(data.account_type === 'customer'){
     // Customer tokens live in their OWN store so the two sessions can never be
@@ -227,40 +227,9 @@ async function tryRestoreSession(){
 }
 document.addEventListener('DOMContentLoaded', tryRestoreSession);
 
-async function doCustomerLogin(){
-  const email = document.getElementById('cust-login-email').value.trim();
-  const pass = document.getElementById('cust-login-pass').value;
-  const errEl = document.getElementById('cust-login-error');
-  const btn = document.getElementById('cust-login-btn');
-  errEl.style.display = 'none';
-  if(!email || !pass){
-    errEl.textContent = 'Enter your email and password to continue.';
-    errEl.style.display = 'block';
-    return;
-  }
-  // BUG 2 FIX: this used to search a legacy in-memory array (empty since the
-  // Perch refactor) and compare plaintext passwords, never calling the backend
-  // at all - so it could never succeed. Real authentication now happens
-  // server-side against customers.password_hash.
-  if(btn){ btn.disabled = true; btn.textContent = 'Signing in…'; }
-  let body;
-  try{
-    body = await apiFetch('/api/auth/customer-login', {
-      method:'POST', body: JSON.stringify({email: email, password: pass})
-    });
-  }catch(err){
-    errEl.textContent = err.message || 'Invalid email or password.';
-    errEl.style.display = 'block';
-    if(btn){ btn.disabled = false; btn.textContent = 'Sign in'; }
-    return;
-  }
-  if(btn){ btn.disabled = false; btn.textContent = 'Sign in'; }
-  CustomerAuth.setToken(body.token);
-  activateScreen('screen-customer-portal');
-  document.getElementById('portal-hello').textContent =
-    'Hi ' + (body.customer.first_name || '') + ' — welcome back';
-  await loadCustomerAgreement();
-}
+/* doCustomerLogin() was REMOVED with the duplicate customer sign-in screen.
+   Customers authenticate through the one unified login; the backend routes
+   them. /api/auth/customer-login still exists server-side. */
 
 // Customer tokens are stored separately from the rep token so the two sessions
 // can never be confused for one another.
@@ -1303,7 +1272,7 @@ async function rehydrateContractPacket(key, terminal, blocked){
         'acceptance. The documents cannot be reopened at this stage, but you can ' +
         'complete acceptance below.';
     }else{
-      note.textContent = 'The agreements could not be reloaded and Dalton has no ' +
+      note.textContent = 'The agreements could not be reloaded and we have no ' +
         'saved copy for this enrollment. Check its status with Perch before ' +
         'taking further action.';
     }
@@ -1770,7 +1739,7 @@ async function continueFromPerchNextStep(origin){
     await prepareSelfAttestation();
     return;
   }
-  throw new Error('Perch returned a next step Dalton does not recognize. The enrollment was not advanced.');
+  throw new Error('Perch returned a next step we do not recognize. The enrollment was not advanced.');
 }
 
 function dzDragOver(e, id){ e.preventDefault(); document.getElementById(id).classList.add('drag'); }
@@ -2032,7 +2001,7 @@ function prepareLmiForPerch(){
   const lmiTitle=document.getElementById('lmi-title');
   const lmiLead=document.getElementById('lmi-lead');
   if(lmiTitle) lmiTitle.textContent='LMI documentation';
-  if(lmiLead) lmiLead.textContent='Perch requires proof documentation for this enrollment. Use the existing Dalton upload below; you will not be asked to upload it again.';
+  if(lmiLead) lmiLead.textContent='Perch requires proof documentation for this enrollment. Use the existing upload below; you will not be asked to upload it again.';
   document.getElementById('lmi-mode-attest').style.display='none';
   document.getElementById('lmi-mode-na').style.display='none';
   document.getElementById('lmi-mode-doc').style.display='flex';
@@ -2152,7 +2121,7 @@ async function submitLmi(){
   }
   const type=lmiTypeForLabel(document.getElementById('lmi-doctype').value);
   if(!type || !type.sourceType){
-    errEl.textContent='That legacy Dalton document label does not map to a published Perch proof source type. Choose a supported proof document instead of guessing.';
+    errEl.textContent='That legacy document label does not map to a published Perch proof source type. Choose a supported proof document instead of guessing.';
     errEl.style.display='block'; return;
   }
   state.lmi.docType=document.getElementById('lmi-doctype').value;
@@ -2172,7 +2141,7 @@ async function submitLmi(){
     });
     perchContext.proofSubmitted=true;
     perchContext.nextStepKey=body.next_step_key;
-    if(perchContext.nextStepKey!=='contracts') throw new Error('Perch accepted the proof document but returned an unexpected next step. Dalton stopped rather than guessing.');
+    if(perchContext.nextStepKey!=='contracts') throw new Error('Perch accepted the proof document but returned an unexpected next step. We stopped rather than guessing.');
     await generateContractsAndOpenAgreement(4);
   }catch(err){
     errEl.textContent=err.message; errEl.style.display='block';
@@ -2393,12 +2362,9 @@ function resetAll(){
   currentUser = null;
   document.getElementById('app-shell').classList.remove('active');
   document.getElementById('screen-customer-portal').classList.remove('active');
-  document.getElementById('screen-customer-login').classList.remove('active');
   document.getElementById('login-email').value='';
   document.getElementById('login-pass').value='';
   document.getElementById('login-error').style.display='none';
-  document.getElementById('cust-login-email').value='';
-  document.getElementById('cust-login-pass').value='';
   resetWizardState();
   showScreen('screen-login');
 }
@@ -2439,8 +2405,13 @@ async function customerApi(path, opts){
   let data = null;
   try { data = await res.json(); } catch(e){}
   if(res.status === 401){
+    // Session rejected. Clear the CUSTOMER token only - the rep session is a
+    // separate store and is never touched here - then send them to the ONE
+    // unified sign-in screen. They must authenticate again; the backend decides
+    // account_type and destination on the next /api/auth/signin.
     CustomerAuth.clear();
-    activateScreen('screen-customer-login');
+    customerEnrollmentId = null;
+    activateScreen('screen-login');
     throw new Error('Your session expired — please sign in again.');
   }
   if(!res.ok) throw new Error((data && data.error) || ('Request failed (' + res.status + ')'));
@@ -2698,7 +2669,7 @@ function renderAgreementCard(){
       // they were deleted or never existed, and do NOT pretend Dalton can
       // fetch them.
       html += '<p class="helper agr-quiet">Perch issues time-limited links, so these ' +
-              'documents open from your Perch records rather than from Dalton.</p>';
+              'documents open from your Perch records rather than from us.</p>';
     }
     // Actor-aware final action. A customer must never be offered the rep
     // dashboard, and "Done" must not sign a rep out.
@@ -3178,13 +3149,17 @@ function backToDashboard(){
 }
 
 /* Customer: end their enrollment cleanly.
-   Clears ONLY the customer token, never the rep session, and returns them to
-   the customer sign-in screen rather than exposing any rep surface. */
+
+   Clears ONLY the customer token - never the rep session - and returns them to
+   the ONE unified sign-in screen. This is NOT "the rep login": there is a
+   single UBS login for everyone, and reaching it grants nothing. The rep
+   dashboard is never activated here, and signing in again goes through
+   /api/auth/signin, where the BACKEND decides the account type. */
 function finishCustomerEnrollment(){
   try { CustomerAuth.clear(); } catch(e){}
   customerEnrollmentId = null;
-  activateScreen('screen-customer-login');
-  const msg = document.getElementById('cust-login-error');
+  activateScreen('screen-login');
+  const msg = document.getElementById('login-error');
   if(msg){
     msg.textContent = 'Your enrollment is complete. You can close this window.';
     msg.style.color = '';
@@ -3919,3 +3894,17 @@ function renderSelfAttestationSent(){
    in the same request. The customer signs in once and sees only the normal
    agreement package. */
 
+
+
+/* UBS login password reveal. Presentation only - it toggles the input type and
+   the label, and touches no auth logic, no IDs the app depends on, and no
+   stored value. */
+function toggleLoginPassword(){
+  const input = document.getElementById('login-pass');
+  const button = document.getElementById('login-pass-toggle');
+  if(!input || !button) return;
+  const isText = input.type === 'text';
+  input.type = isText ? 'password' : 'text';
+  button.textContent = isText ? 'Show' : 'Hide';
+  button.setAttribute('aria-pressed', isText ? 'false' : 'true');
+}

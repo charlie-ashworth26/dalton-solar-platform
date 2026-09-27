@@ -586,6 +586,17 @@ def submit_perch_proof_docs(enrollment_id):
             user_id=g.current_user["id"],
         )
     except (PerchError, ValueError) as e:
+        # ALREADY COMPLETED: Perch has advanced this enrollment past
+        # /lmi/proof_docs, so the documents are on file and the local workflow
+        # is simply stale. Perch's own instruction is to ask /status - so we
+        # reconcile instead of reposting. The POST is NOT retried.
+        #
+        # Strictly limited to that one documented condition: every other 422
+        # stays an ordinary correctable validation failure, and
+        # PerchAmbiguousOutcomeError cannot reach this branch as a validation
+        # error at all.
+        if isinstance(e, PerchError) and perch_client.is_step_already_completed_error(e):
+            return _reconcile_completed_step(enrollment_id, "proof_docs", e)
         if isinstance(e, PerchError):
             return _perch_error_response(enrollment_id, "proof_docs", e)
         return jsonify({"error": str(e)}), 400
@@ -963,6 +974,57 @@ def accept_perch_contracts(enrollment_id):
     })
 
 
+def _reconcile_completed_step(enrollment_id, operation, exc):
+    """Perch says this step is already done: adopt its authoritative next step.
+
+    GET /status is side-effect free, so it is safe on a failure path. Nothing
+    is retried and nothing is guessed: if /status cannot tell us where the
+    enrollment actually is, the rep gets a controlled message and the
+    enrollment is left exactly as it was for review.
+    """
+    audit.log(
+        f"perch_{operation}_already_completed", enrollment_id=enrollment_id,
+        user_id=_actor_id(), details=_actor_details({"detail": str(exc)[:500]}),
+        ip_address=request.remote_addr,
+    )
+    try:
+        status_payload = adapter.get_status(enrollment_id, user_id=_actor_id())
+    except PerchError:
+        status_payload = None
+
+    safe_status = _safe_status(status_payload)
+    step_key = (safe_status or {}).get("next_step_key")
+    if not step_key:
+        # Reconciliation failed, or Perch returned a step we do not recognise.
+        # Never guess - the enrollment is preserved and the workflow row is
+        # left untouched so the current state is still auditable.
+        return jsonify({
+            "error": "This step was already completed at Perch, and we could not "
+                     "confirm the current status. The enrollment is unchanged - "
+                     "reopen it in a moment to continue.",
+            "reconciled": False,
+        }), 502
+
+    workflow.set_state(
+        enrollment_id, step_key,
+        next_step_url=(status_payload or {}).get("next_step"), recognized=True,
+        last_response={"reconciled_from": operation, "perch_status": safe_status},
+    )
+    audit.log(
+        f"perch_{operation}_reconciled", enrollment_id=enrollment_id,
+        user_id=_actor_id(), details=_actor_details({"next_step_key": step_key}),
+        ip_address=request.remote_addr,
+    )
+    # Success shape. The rep is routed to the real step and never sees Perch's
+    # raw endpoint message, which reconciliation has just made irrelevant.
+    return jsonify({
+        "reconciled": True,
+        "next_step_key": step_key,
+        "next_step_recognized": True,
+        "perch_status": safe_status,
+    })
+
+
 def _safe_status(status_payload):
     """URL-free projection of GET /status for JSON, workflow and audit."""
     if not status_payload:
@@ -1260,6 +1322,15 @@ def self_attestation_reference(enrollment_id):
         "counties": counties,
         "already_generated": bool(existing and existing["generated_at"]),
         "already_accepted": bool(existing and existing["accepted_at"]),
+        # The rep's own previous answers, so a RESUMED enrollment restores the
+        # self-attestation section instead of presenting it blank. Read-only,
+        # from columns that already exist on perch_self_attestation_submissions;
+        # no schema change. Null when nothing has been submitted yet.
+        "submitted": {
+            "occupancy": existing["occupancy"] if existing else None,
+            "county": existing["county"] if existing else None,
+            "status": existing["status"] if existing else None,
+        } if existing else None,
     })
 
 

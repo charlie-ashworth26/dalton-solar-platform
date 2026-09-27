@@ -49,6 +49,43 @@ def _is_enrollment_in_progress(resp):
         return False
 
 
+# Perch's documented wording when a state-changing step is replayed against an
+# enrollment it has already advanced past:
+#   422 {"error": "unprocessable_entity",
+#        "message": "This step has already been completed. Use the /status
+#                    endpoint to check the current status of the enrollment."}
+# Matched on the message text because the 422 code is shared with every
+# ordinary validation failure on the same endpoint.
+_STEP_COMPLETED_MARKER = "already been completed"
+
+
+def is_step_already_completed_error(exc) -> bool:
+    """True ONLY for the documented "this step has already been completed" 422.
+
+    Deliberately narrow, and narrow in three independent ways: the status must
+    be 422, the message must carry the documented phrase, and the error must be
+    a definite validation rejection. An ordinary correctable 422 - a bad source
+    type, a missing name - matches none of them and stays an ordinary error
+    the rep can fix.
+
+    PerchAmbiguousOutcomeError is NOT a PerchValidationError, so an outcome
+    that may or may not have reached Perch can never be read as "already done".
+    """
+    from services.perch.errors import PerchValidationError
+    if not isinstance(exc, PerchValidationError):
+        return False
+    if getattr(exc, "status_code", None) != 422:
+        return False
+    body = getattr(exc, "body_json", None)
+    if isinstance(body, dict):
+        message = str(body.get("message") or "")
+        if _STEP_COMPLETED_MARKER in message.lower():
+            return True
+    # Fallback for a transport that gave us no parsed body: the formatted
+    # message still contains Perch's text verbatim.
+    return _STEP_COMPLETED_MARKER in str(exc).lower()
+
+
 def is_duplicate_email_error(exc) -> bool:
     """True only for the CONFIRMED duplicate-email rejection.
 

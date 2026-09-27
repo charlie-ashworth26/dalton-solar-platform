@@ -669,9 +669,14 @@ function clearWizardForms(){
   document.getElementById('lmi-mode-doc').classList.remove('selected');
   document.getElementById('lmi-mode-attest').classList.remove('selected');
   document.getElementById('lmi-mode-na').classList.remove('selected');
-  document.getElementById('lmi-mode-doc').style.display='flex';
-  document.getElementById('lmi-mode-attest').style.display='flex';
-  document.getElementById('lmi-mode-na').style.display='flex';
+  // The legacy doc/attest/N.A. toggle row IS the mutually-exclusive mechanism.
+  // A reset used to turn all three back on ('flex'), leaving them visible until
+  // the next renderLmiSections() happened to run. Resetting them to hidden
+  // removes the last code path that can reveal them, so their visibility no
+  // longer depends on call ordering.
+  document.getElementById('lmi-mode-doc').style.display='none';
+  document.getElementById('lmi-mode-attest').style.display='none';
+  document.getElementById('lmi-mode-na').style.display='none';
   document.getElementById('lmi-doc-panel').style.display='block';
   document.getElementById('lmi-attest-panel').style.display='none';
   document.getElementById('btn-lmi-next').disabled=true;
@@ -1484,21 +1489,23 @@ function hydrateStep(n){
     checkBillReady();
   }
   if(n===4){
-    const mode = state.lmi.mode || 'doc';
-    setLmiMode(mode);
+    // ONE screen, sections decided by Perch's step. Both are hydrated - the
+    // proof-document fields always, the self-attestation section when Perch
+    // has asked for it - so neither is lost by visiting the other.
+    const sections = renderLmiSections();
     document.getElementById('lmi-name-on-doc').value = state.lmi.nameOnDocument || (state.customer.first+' '+state.customer.last).trim();
     document.getElementById('lmi-relationship').value = state.lmi.relationship || 'self';
     document.getElementById('lmi-format').value = state.lmi.documentFormat || '';
-    if(mode === 'doc' && state.lmi.fileName){
+    if(state.lmi.fileName){
       document.getElementById('lmi-doctype').value = state.lmi.docType;
       showLmiChip(state.lmi.fileName);
     }
-    if(mode === 'attest'){
-      document.getElementById('lmi-household-size').value = state.lmi.householdSize || '';
-      updateAmiThreshold();
-      if(state.lmi.incomeBelow === true || state.lmi.incomeBelow === false) setIncomeAnswer(state.lmi.incomeBelow);
-    }
     if(perchContext.nextStepKey === 'proof_docs') prepareLmiForPerch();
+    if(sections.attest){
+      // Read-only: loads the authoritative threshold table, the controlled
+      // county list, and any answers this enrollment already submitted.
+      Promise.resolve(prepareSelfAttestation()).catch(function(){});
+    }
     checkLmiReady();
   }
   if(n===5 && perchContracts.length){ mountRepAgreements(false, perchContext.acceptanceSubmitted === true); }
@@ -1785,8 +1792,9 @@ async function continueFromPerchNextStep(origin){
     // inside the existing Eligibility step. The customer accepts the
     // Perch-generated document in the portal, after which Perch returns
     // /contracts and the EXISTING contracts flow runs unchanged.
+    // goStep(4) renders the sections and hydrates the self-attestation part
+    // itself, so the reference load happens once, from one place.
     goStep(4);
-    await prepareSelfAttestation();
     return;
   }
   throw new Error('Perch returned a next step we do not recognize. The enrollment was not advanced.');
@@ -2030,20 +2038,83 @@ const amiTable = [
   {size:1, amount:61750},{size:2, amount:70550},{size:3, amount:79350},{size:4, amount:88150},
   {size:5, amount:95250},{size:6, amount:102300},{size:7, amount:109350},{size:8, amount:116400},
 ];
-function setLmiMode(mode){
-  if(perchContext.nextStepKey === 'proof_docs' && mode !== 'doc'){
-    const errEl=document.getElementById('lmi-submit-error');
-    errEl.textContent='Perch requires proof documentation for this enrollment, so self-attestation and N/A cannot replace this step.';
-    errEl.style.display='block';
-    mode='doc';
+/* WHAT THE ELIGIBILITY SCREEN SHOWS, AND WHAT IT MAY SUBMIT.
+   ──────────────────────────────────────────────────────────────────────
+   These are TWO different questions and the old code conflated them into
+   one mutually-exclusive `state.lmi.mode` radio:
+
+       show the doc section  ==  submit proof docs
+       show the attest panel ==  submit self-attestation
+
+   Proof documents and self-attestation are not competing rep choices. A NY
+   LMI enrollment can legitimately carry both - the uploaded LIHEAP/SNAP
+   document AND the NYSERDA household-income survey - so the two sections
+   coexist on one screen.
+
+   `submits` is separate and is PERCH'S decision, never ours: exactly one
+   API action is authorised at a time, named by Perch's next_step. The doc
+   section stays visible and uploadable while self-attestation is the
+   authorised action, because uploading stores the file LOCALLY
+   (POST /api/enrollments/<id>/documents) - no Perch call - so the document
+   is already attached when Perch later asks for it.
+
+   An unrecognised or absent step authorises nothing and shows nothing. A
+   step we do not understand must never be read as permission to act. */
+function lmiSectionsForCurrentStep(){
+  const key = perchContext.nextStepKey;
+  if(key === 'proof_docs'){
+    return {doc:true, attest:false, submits:'proof_docs',
+            docHint:null,
+            attestHint:null};
   }
-  state.lmi.mode = mode;
-  document.getElementById('lmi-mode-doc').classList.toggle('selected', mode==='doc');
-  document.getElementById('lmi-mode-attest').classList.toggle('selected', mode==='attest');
-  document.getElementById('lmi-mode-na').classList.toggle('selected', mode==='na');
-  document.getElementById('lmi-doc-panel').style.display = mode==='doc' ? 'block' : 'none';
-  document.getElementById('lmi-attest-panel').style.display = mode==='attest' ? 'block' : 'none';
+  if(key === 'self_attestation' || key === 'self_attestation_accept'){
+    return {doc:true, attest:true, submits:key,
+            // The section stays open so documents can be gathered now; only
+            // sending them to Perch waits for Perch to ask.
+            docHint:'Perch is asking for the income self-attestation on this '
+                  + 'enrollment. You can still upload proof documentation here '
+                  + 'and it stays attached - it will be submitted when Perch '
+                  + 'asks for it.',
+            attestHint:null};
+  }
+  return {doc:false, attest:false, submits:null, docHint:null, attestHint:null};
+}
+
+/* Applies that decision to the DOM. The legacy doc/attest/N.A. toggle row is
+   the mutually-exclusive mechanism itself, so it is never shown: the sections
+   are driven by Perch's step, not by a rep picking one. The markup is left in
+   place rather than deleted, which keeps this patch to one file. */
+function renderLmiSections(){
+  const s = lmiSectionsForCurrentStep();
+  ['lmi-mode-doc','lmi-mode-attest','lmi-mode-na'].forEach(function(id){
+    const el = document.getElementById(id);
+    if(el) el.style.display = 'none';
+  });
+  const legacyAttest = document.getElementById('lmi-attest-panel');
+  if(legacyAttest) legacyAttest.style.display = 'none';
+
+  const proofPanel = document.getElementById('lmi-proof-panel');
+  if(proofPanel) proofPanel.style.display = s.doc ? '' : 'none';
+  const docPanel = document.getElementById('lmi-doc-panel');
+  if(docPanel) docPanel.style.display = s.doc ? 'block' : 'none';
+  const saPanel = document.getElementById('sa-panel');
+  if(saPanel) saPanel.style.display = s.attest ? '' : 'none';
+
+  const hint = document.getElementById('lmi-doc-hint');
+  if(hint){
+    hint.textContent = s.docHint || '';
+    hint.style.display = s.docHint ? 'block' : 'none';
+  }
   checkLmiReady();
+  return s;
+}
+
+/* Retained for the existing handler surface. It no longer switches anything
+   exclusive - it records which summary wording to use and re-renders from
+   Perch's step. */
+function setLmiMode(mode){
+  state.lmi.mode = mode;
+  renderLmiSections();
 }
 function prepareLmiForPerch(){
   perchContext.nextStepKey='proof_docs';
@@ -2052,10 +2123,8 @@ function prepareLmiForPerch(){
   const lmiLead=document.getElementById('lmi-lead');
   if(lmiTitle) lmiTitle.textContent='LMI documentation';
   if(lmiLead) lmiLead.textContent='Perch requires proof documentation for this enrollment. Use the existing upload below; you will not be asked to upload it again.';
-  document.getElementById('lmi-mode-attest').style.display='none';
-  document.getElementById('lmi-mode-na').style.display='none';
-  document.getElementById('lmi-mode-doc').style.display='flex';
-  setLmiMode('doc');
+  state.lmi.mode='doc';
+  renderLmiSections();
   if(!state.lmi.nameOnDocument) state.lmi.nameOnDocument=(state.customer.first+' '+state.customer.last).trim();
   document.getElementById('lmi-name-on-doc').value=state.lmi.nameOnDocument;
   document.getElementById('lmi-relationship').value=state.lmi.relationship || 'self';
@@ -2078,7 +2147,9 @@ function setIncomeAnswer(isBelow){
 }
 async function handleLmiUpload(files){
   if(!files.length) return;
-  if(state.lmi.mode !== 'doc') setLmiMode('doc');
+  // Uploading no longer switches the screen into a "document mode" - the two
+  // sections coexist, so an upload while self-attestation is on screen simply
+  // attaches the file and leaves the attestation section exactly as it was.
   // MULTI-FILE: front/back or multi-page proofs form ONE document set.
   docSetAddFiles('lmi_document', files);
   const f = files[0];
@@ -2151,13 +2222,18 @@ function checkLmiReady(){
   state.lmi.nameOnDocument = document.getElementById('lmi-name-on-doc').value.trim();
   state.lmi.relationship = document.getElementById('lmi-relationship').value;
   state.lmi.documentFormat = document.getElementById('lmi-format').value;
+  // #btn-lmi-next submits PROOF DOCUMENTS and nothing else. It is armed only
+  // when Perch currently authorises that action - so while self-attestation is
+  // the authorised step the rep can still gather and upload documents (local
+  // storage, no Perch call) but cannot send the wrong thing. The
+  // self-attestation section has its own #sa-submit, gated separately by
+  // updateSelfAttestationReady().
+  const sections = lmiSectionsForCurrentStep();
   let ready = false;
-  if(perchContext.nextStepKey === 'proof_docs'){
+  if(sections.submits === 'proof_docs'){
     const type=lmiTypeForLabel(state.lmi.docType);
-    ready=!!(state.lmi.mode==='doc' && type && type.sourceType && state.lmi.fileName && state.lmi.nameOnDocument && state.lmi.relationship && state.lmi.documentFormat);
-  } else if(state.lmi.mode === 'na') ready = true;
-  else if(state.lmi.mode === 'attest') ready = !!(state.lmi.householdSize && (state.lmi.incomeBelow === true || state.lmi.incomeBelow === false));
-  else ready = !!(state.lmi.docType && state.lmi.fileName);
+    ready=!!(type && type.sourceType && state.lmi.fileName && state.lmi.nameOnDocument && state.lmi.relationship && state.lmi.documentFormat);
+  }
   document.getElementById('btn-lmi-next').disabled = !ready;
 }
 async function submitLmi(){
@@ -2167,6 +2243,21 @@ async function submitLmi(){
   if(btn.disabled) return;
   if(perchContext.proofSubmitted){
     await generateContractsAndOpenAgreement(4);
+    return;
+  }
+  // AUTHORIZATION GATE. Perch decides which LMI action may be sent right now.
+  // This used to be a mode check, which meant the DOCUMENT validation below ran
+  // while the rep was completing self-attestation and raised a document error
+  // against an empty #lmi-doctype. Nothing here forces an endpoint Perch has
+  // not asked for.
+  const sections=lmiSectionsForCurrentStep();
+  if(sections.submits !== 'proof_docs'){
+    errEl.textContent = sections.submits
+      ? 'Perch is asking for the income self-attestation on this enrollment. '
+        + 'Complete that section to continue - the documents you upload here stay attached.'
+      : 'This enrollment is not on an income-qualification step, so there is '
+        + 'nothing to submit here. Use Back to return to the current step.';
+    errEl.style.display='block';
     return;
   }
   const type=lmiTypeForLabel(document.getElementById('lmi-doctype').value);
@@ -2191,6 +2282,16 @@ async function submitLmi(){
     });
     perchContext.proofSubmitted=true;
     perchContext.nextStepKey=body.next_step_key;
+    // RECONCILE ON WHATEVER PERCH RETURNS. Previously anything other than
+    // 'contracts' threw. If Perch advances proof docs to a self-attestation
+    // step, that is a legitimate answer: route there, keep the uploaded
+    // documents attached, and reveal the self-attestation section. `reconciled`
+    // is set when the server reconciled an already-completed step via /status.
+    if(body.reconciled || (perchContext.nextStepKey
+        && perchContext.nextStepKey !== 'contracts')){
+      await continueFromPerchNextStep('lmi');
+      return;
+    }
     if(perchContext.nextStepKey!=='contracts') throw new Error('Perch accepted the proof document but returned an unexpected next step. We stopped rather than guessing.');
     await generateContractsAndOpenAgreement(4);
   }catch(err){
@@ -2387,16 +2488,25 @@ const docPacket = [
       '<p>Covers acceptable use, intellectual property, disclaimers of warranty, limitation of liability, and how your personal information is collected, used, and protected.</p>'
   }
 ];
+/* Reports what this enrollment ACTUALLY holds, not which tab was last open.
+   Both parts can appear together, because both kinds of state can coexist. */
 function buildLmiSummary(){
-  if(state.lmi.mode === 'attest'){
-    return '<p>You self-attested that your household of <strong>'+state.lmi.householdSize+'</strong> has income <strong>'+(state.lmi.incomeBelow ? 'below' : 'above')+'</strong> 80% of the State Median Income for that household size.</p>'+
+  const parts = [];
+  if(state.lmi.fileName || state.lmi.documentId){
+    parts.push('<p>You provided documentation (<strong>'+(state.lmi.docType || 'a qualifying document')+'</strong>) to support eligibility for the low-income program adder. Your rep will confirm this meets NY program requirements.</p>');
+  }
+  const occ = selfAttestation && selfAttestation.occupancy;
+  const choice = selfAttestation && selfAttestation.choice;
+  if(occ && choice){
+    parts.push('<p>You self-attested that your household of <strong>'+occ+'</strong> has income <strong>'+(choice === 'below' ? 'below' : 'above')+'</strong> 80% of the State Median Income for that household size.</p>'+
       '<p style="font-size:11.5px;">1: $61,750 &nbsp;2: $70,550 &nbsp;3: $79,350 &nbsp;4: $88,150 &nbsp;5: $95,250 &nbsp;6: $102,300 &nbsp;7: $109,350 &nbsp;8: $116,400</p>'+
-      '<p>This information is collected by Arcadia and shared with NYSERDA for program evaluation and incentive determination. It will not be shared or published at the individual customer level.</p>';
+      '<p>This information is collected by Arcadia and shared with NYSERDA for program evaluation and incentive determination. It will not be shared or published at the individual customer level.</p>');
+  } else if(state.lmi.mode === 'attest' && state.lmi.householdSize){
+    // Legacy local attestation, kept so an older enrollment still reads back.
+    parts.push('<p>You self-attested that your household of <strong>'+state.lmi.householdSize+'</strong> has income <strong>'+(state.lmi.incomeBelow ? 'below' : 'above')+'</strong> 80% of the State Median Income for that household size.</p>');
   }
-  if(state.lmi.mode === 'doc'){
-    return '<p>You provided documentation (<strong>'+(state.lmi.docType || 'a qualifying document')+'</strong>) to support eligibility for the low-income program adder. Your rep will confirm this meets NY program requirements.</p>';
-  }
-  return '<p>No low-income program documentation was submitted for this enrollment.</p>';
+  if(!parts.length) return '<p>No low-income program documentation was submitted for this enrollment.</p>';
+  return parts.join('');
 }
 function completeReturnToDashboard(){
   document.getElementById('screen-complete').classList.remove('active');
@@ -3816,18 +3926,38 @@ function rehydrateDocumentsFromDetail(detail){
 let selfAttestation = {reference: null, occupancy: null, county: '', choice: null};
 
 async function prepareSelfAttestation(){
-  const proof = document.getElementById('lmi-proof-panel');
-  if(proof) proof.style.display = 'none';
-  const host = document.getElementById('sa-panel');
-  if(host) host.style.display = '';
+  // The proof-document section is NO LONGER HIDDEN here. It used to be, which
+  // is what made the two look mutually exclusive: revealing self-attestation
+  // took the uploaded documents off the screen. They coexist now, and
+  // renderLmiSections() owns visibility for both.
+  renderLmiSections();
   const err = document.getElementById('sa-error');
-  if(err) err.style.display = 'none';
+  if(err){ err.textContent = ''; err.style.display = 'none'; }
   try{
     selfAttestation.reference = await apiFetch('/api/perch/enrollments/'
       + currentDraft.enrollment_id + '/lmi/self-attestation/reference');
   }catch(e){
     if(err){ err.textContent = e.message; err.style.display = 'block'; }
     return;
+  }
+  // RESUME: restore the rep's own previous answers before rendering, so a
+  // returning enrollment shows what was already entered rather than a blank
+  // form. Values come from the server's record, never from a local guess.
+  const prior = selfAttestation.reference.submitted;
+  if(prior){
+    if(prior.occupancy !== null && prior.occupancy !== undefined){
+      selfAttestation.occupancy = String(prior.occupancy);
+      const occSel = document.getElementById('sa-occupancy');
+      if(occSel) occSel.value = String(prior.occupancy);
+    }
+    if(prior.county){
+      selfAttestation.county = prior.county;
+      const ctySel = document.getElementById('sa-county');
+      if(ctySel) ctySel.value = prior.county;
+    }
+    if(prior.status === 'accepted' || prior.status === 'rejected'){
+      selfAttestation.choice = prior.status === 'accepted' ? 'below' : 'above';
+    }
   }
   if(selfAttestation.reference.already_generated) renderSelfAttestationSent();
   renderSelfAttestation();
@@ -3843,10 +3973,31 @@ function renderSelfAttestation(){
            + (t.occupancy === 1 ? ' person' : ' people') + '</option>'; }).join('');
   }
   const ctySel = document.getElementById('sa-county');
-  if(ctySel && !ctySel.options.length){
+  const counties = ref.counties || [];
+  if(ctySel && !ctySel.options.length && counties.length){
     // CONTROLLED list from the backend - never free text, which Perch would 422.
-    ctySel.innerHTML = '<option value="">Select a county…</option>' + ref.counties.map(
+    ctySel.innerHTML = '<option value="">Select a county…</option>' + counties.map(
       function(n){ return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('');
+  }
+  if(!counties.length){
+    // County is required and no list came back. Say so rather than rendering an
+    // empty required field the rep cannot satisfy. No county is ever invented.
+    const cErr = document.getElementById('sa-error');
+    if(cErr){
+      cErr.textContent = 'The county list is unavailable, so this attestation '
+        + 'cannot be completed right now. The enrollment is unchanged - retry, '
+        + 'or contact support if it persists.';
+      cErr.style.display = 'block';
+    }
+  }
+  // Re-apply any restored answers AFTER the options exist - setting .value on
+  // an empty <select> does not stick.
+  if(occSel && selfAttestation.occupancy) occSel.value = String(selfAttestation.occupancy);
+  if(ctySel && selfAttestation.county) ctySel.value = selfAttestation.county;
+  if(selfAttestation.choice){
+    document.querySelectorAll('.sa-opt').forEach(function(b){
+      b.classList.toggle('selected', b.getAttribute('data-choice') === selfAttestation.choice);
+    });
   }
   const cap = document.getElementById('sa-caption');
   if(cap) cap.textContent = ref.table_caption;
@@ -3911,6 +4062,14 @@ async function submitSelfAttestation(){
     // the normal agreement package.
     if(body.next_step_key === 'contracts'){
       await generateContractsAndOpenAgreement(4);
+      return;
+    }
+    // Perch advanced somewhere other than contracts - most usefully to
+    // /lmi/proof_docs. Route there rather than stopping. The documents already
+    // attached to this enrollment are reused; the rep is not asked to upload
+    // them again. No endpoint is forced: we follow Perch's own next step.
+    if(body.next_step_key === 'proof_docs'){
+      await continueFromPerchNextStep('lmi');
       return;
     }
     renderSelfAttestationSent();

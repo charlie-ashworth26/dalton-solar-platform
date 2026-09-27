@@ -23,7 +23,8 @@ def correction_reasons():
 @require_auth
 @require_role("qa_reviewer", "admin")
 def qa_queue():
-    rows = query("SELECT * FROM enrollments WHERE status = 'Internal Review' ORDER BY updated_at ASC")
+    rows = query("SELECT * FROM enrollments WHERE status = 'Internal Review' "
+                 "AND discarded_at IS NULL ORDER BY updated_at ASC")
     out = []
     for r in rows:
         customer = query_one("SELECT first_name, last_name FROM customers WHERE id = ?", (r["customer_id"],))

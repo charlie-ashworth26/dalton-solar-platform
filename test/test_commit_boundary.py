@@ -234,7 +234,15 @@ def main():
     section("DEFERRED — NOT IMPLEMENTED")
     check("inviteCode not implemented",
           "inviteCode" not in JS and "invite_code" not in routes_src)
-    check("magic links not implemented", "magic" not in JS.lower())
+    # SUPERSEDED: magic link V1 is a secure ENTRY PATH into the existing
+    # customer auth. It adds no scope and no permission model, so the commit
+    # boundary is unaffected - asserted here instead.
+    check("magic link adds no new auth scope",
+          "issue_customer_token" in open(os.path.join(ROOT, "routes", "access_routes.py"),
+                                         encoding="utf-8").read())
+    check("  ...and does not touch the commit boundary",
+          "perch_committed" not in open(os.path.join(ROOT, "routes", "access_routes.py"),
+                                        encoding="utf-8").read())
     check("no downstream lifecycle polling invented",
           "setInterval(" not in JS.split("function loadCustomerAgreement")[0][-3000:])
 

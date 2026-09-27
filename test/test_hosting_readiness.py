@@ -288,15 +288,17 @@ print("BANNER", app.test_client().get('/api/environment').get_json().get('banner
     html = open(os.path.join(ROOT, "templates", "index.html"), encoding="utf-8").read()
     js = open(os.path.join(ROOT, "static", "js", "app.js"), encoding="utf-8").read()
     css = open(os.path.join(ROOT, "static", "css", "app.css"), encoding="utf-8").read()
-    check("banner element exists in markup", 'id="env-banner"' in html)
-    check("banner is hidden until the backend supplies text",
-          'id="env-banner"' in html and "display:none" in
-          html.split('id="env-banner"')[1][:120])
-    check("banner is fetched by the frontend", "/api/environment" in js)
-    check("banner renders before login (no auth header used)",
-          "loadEnvironmentBanner" in js
-          and "Authorization" not in js.split("async function loadEnvironmentBanner(")[1][:600])
-    check("banner is styled to be prominent", "#env-banner" in css)
+    # SUPERSEDED: the visible staging banner was REMOVED for production
+    # readiness. Environment DETECTION and /api/environment are unchanged - the
+    # backend checks above still pass - only the UI is gone.
+    check("banner element removed from markup", 'id="env-banner"' not in html)
+    check("  ...its renderer removed", "loadEnvironmentBanner" not in js)
+    check("  ...and its styles removed", "#env-banner" not in css)
+    check("environment detection is UNCHANGED",
+          "def environment_banner(" in
+          open(os.path.join(ROOT, "app.py"), encoding="utf-8").read())
+    check("  ...and /api/environment still served",
+          '"/api/environment"' in open(os.path.join(ROOT, "app.py"), encoding="utf-8").read())
 
     # ═══════════════════════════════════════════════════════
     section("PROXY / IP HANDLING STAYS EXPLICIT")

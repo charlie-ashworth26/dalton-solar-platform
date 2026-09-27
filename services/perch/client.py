@@ -49,6 +49,32 @@ def _is_enrollment_in_progress(resp):
         return False
 
 
+def is_duplicate_email_error(exc) -> bool:
+    """True only for the CONFIRMED duplicate-email rejection.
+
+    /enroll has no dedicated duplicate-email error class - Perch returns 422 for
+    every validation failure and the client maps them all to
+    PerchValidationError. This is the one place that decides which of those 422s
+    is the duplicate-email case, reusing _IN_PROGRESS_MARKERS above so the
+    wording is defined once for both /token and /enroll.
+
+    Deliberately narrow. A marker alone is not enough: the message must also
+    name the email, so an unrelated "... already exists" rejection the rep could
+    fix (a duplicate utility account, say) is NOT treated as a duplicate email.
+
+    PerchEnrollmentInProgressError needs no text match - that class IS the
+    duplicate-email case by definition.
+    """
+    from services.perch.errors import (
+        PerchEnrollmentInProgressError, PerchValidationError)
+    if isinstance(exc, PerchEnrollmentInProgressError):
+        return True
+    if isinstance(exc, PerchValidationError):
+        text = str(exc).lower()
+        return "email" in text and any(m in text for m in _IN_PROGRESS_MARKERS)
+    return False
+
+
 def normalize_capacity_response(data: dict) -> dict:
     """Normalizes BOTH the documented and the observed staging capacity response.
 

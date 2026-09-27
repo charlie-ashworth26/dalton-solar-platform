@@ -43,7 +43,14 @@ async function apiFetch(path, opts){
   let data = null;
   try { data = await res.json(); } catch(e){ /* empty body, e.g. some 204s */ }
   if(!res.ok){
-    throw new Error((data && data.error) || ('Request failed (' + res.status + ')'));
+    // The message is unchanged - every existing caller reads err.message and is
+    // unaffected. The status and parsed body are ATTACHED so a caller that
+    // needs a server-confirmed fact (e.g. enrollment_discarded) can read it
+    // rather than inferring it from the failure alone.
+    const apiErr = new Error((data && data.error) || ('Request failed (' + res.status + ')'));
+    apiErr.status = res.status;
+    apiErr.body = data || {};
+    throw apiErr;
   }
   return data;
 }
@@ -989,6 +996,26 @@ async function submitCapacity(){
     restoreBtn();
     formErr.textContent = err.message;
     formErr.style.display = 'block';
+    // Reset ONLY when the server confirms it actually discarded the provisional
+    // row. enrollment_discarded is true only when this very request created the
+    // row AND enrollment_cleanup approved the discard.
+    //
+    // It is false for a RETRY against an enrollment_id we already held, and
+    // false when cleanup refused (real work exists on the row). In both cases
+    // the id we hold still refers to a live enrollment, so clearing it would
+    // strand a real row - exactly the bug this change set exists to fix.
+    // The rep's typed values stay on screen either way.
+    if(err && err.body && err.body.enrollment_discarded === true){
+      currentDraft = null;
+      perchContext.email = '';
+      perchContext.capacityZip = '';
+      perchContext.utilitySlug = '';
+      perchContext.utilityDisplay = '';
+      perchContext.nextStepKey = null;
+      selectedProgram = null;
+      availablePrograms = [];
+      currentEnrollmentDetail = null;
+    }
     return;
   }
   perchContext.email = values.email;

@@ -357,8 +357,8 @@ def main():
         # 008_program_selection was added for the dual-program persistence fix -
         # the rep's explicit choice had nowhere durable to live. Nothing else
         # since. See test_program_persistence.py.
-        check("migration count is 9 (009_self_attestation_reference added)", query_one(
-            "SELECT COUNT(*) n FROM schema_migrations")["n"] == 9)
+        check("migration count is 12 (012_enrollment_discard added)", query_one(
+            "SELECT COUNT(*) n FROM schema_migrations")["n"] == 12)
 
     # ═══════════════════════════════════════════════════════
     section("2d. REAL STAGING RESPONSES — savings pinned to the right field")

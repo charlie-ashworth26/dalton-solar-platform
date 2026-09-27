@@ -185,9 +185,13 @@ def main():
     check("no role-choice link is needed on the main form",
           "Sign in to your agreement</a>" not in HTML)
     check("  ...and the form no longer says 'Rep sign in'", "Rep sign in" not in HTML)
-    check("magic links were NOT implemented",
-          "magic" not in JS.lower() and "magic_link" not in open(
-              os.path.join(ROOT, "routes", "auth_routes.py"), encoding="utf-8").read().lower())
+    # SUPERSEDED: magic link exists, but as an ENTRY PATH - it calls the same
+    # issue_customer_token() and auth_routes.py is untouched by it.
+    check("magic link did NOT change auth_routes",
+          "customer_access" not in open(
+              os.path.join(ROOT, "routes", "auth_routes.py"), encoding="utf-8").read())
+    check("  ...and unified password login remains the fallback",
+          "'/api/auth/signin'" in JS)
 
     section("PASSWORD HANDLING UNCHANGED")
     auth_src = open(os.path.join(ROOT, "routes", "auth_routes.py"), encoding="utf-8").read()

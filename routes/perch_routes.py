@@ -22,8 +22,9 @@ from db import query_one, query, execute
 from auth import (require_auth, require_role, require_staff_or_customer,
                   require_customer_auth)
 from helpers import next_enrollment_code, resolve_stored_path
-from services import audit, status_machine
+from services import audit, status_machine, enrollment_cleanup
 from services.perch import adapter, workflow, utilities
+from services.perch import client as perch_client
 from services.perch.errors import (
     PerchError, PerchNoCapacityError, PerchValidationError, PerchAmbiguousOutcomeError,
 )
@@ -505,6 +506,25 @@ def create_perch_enrollment(enrollment_id):
             "perch_status": _safe_status(status_payload),
         }), 502
     except PerchError as e:
+        # NARROW: cleanup is attempted ONLY for the confirmed duplicate-email
+        # rejection - the failure this change set exists to fix, and the one the
+        # rep cannot correct by editing the form.
+        #
+        # Every other definite error (a bad ZIP, a rejected utility account, any
+        # other 422) leaves the enrollment ALONE, because the rep may well fix
+        # the input and resubmit against the same row. Discarding those would
+        # destroy recoverable work.
+        #
+        # PerchAmbiguousOutcomeError is handled ABOVE and never reaches here, so
+        # an enrollment that MAY exist at Perch can never be discarded. When the
+        # duplicate IS confirmed, enrollment_cleanup still has the final say and
+        # refuses anything past the commit boundary or with real local work.
+        if perch_client.is_duplicate_email_error(e):
+            try:
+                enrollment_cleanup.discard_provisional_enrollment(
+                    enrollment_id, "enroll_rejected")
+            except Exception:
+                pass
         return _perch_error_response(enrollment_id, "enroll", e)
     finally:
         if cleanup_path:
@@ -1046,6 +1066,9 @@ def create_enrollment_and_check_capacity():
     """
     data = request.get_json(force=True, silent=True) or {}
     existing_id = data.get("enrollment_id")
+    # Default False: a RETRY against a caller-supplied enrollment_id must never
+    # be eligible for cleanup, even when the retry fails.
+    created_here = False
 
     if existing_id:
         # Retry against an enrollment the caller already created.
@@ -1071,6 +1094,10 @@ def create_enrollment_and_check_capacity():
         if cerr:
             return cerr
         enrollment_id = created["enrollment_id"]
+        # Remember that WE created it. Only a row created by this very request
+        # may be discarded if the work below fails; a caller-supplied
+        # enrollment_id is never touched.
+        created_here = True
 
     # Delegate to the existing capacity handler so there is ONE capacity
     # implementation, not a near-copy that can drift. The enrollment identity is
@@ -1078,6 +1105,37 @@ def create_enrollment_and_check_capacity():
     # yet on a first submission.
     resp = check_capacity(enrollment_id)
     body, status = (resp if isinstance(resp, tuple) else (resp, 200))
+
+    # FAILED ATTEMPT: discard the provisional row we just created, so a
+    # duplicate-email rejection (Perch 422 -> refresh_token 404 when the email
+    # already has a completed account) does not leave a permanent
+    # "(no customer info yet)" row on the dashboard.
+    #
+    # Guarded by enrollment_cleanup, which refuses anything past the commit
+    # boundary. A cleanup failure never masks the real error: the original
+    # response is returned either way.
+    enrollment_discarded = False
+    if status != 200 and created_here:
+        try:
+            enrollment_discarded = bool(
+                enrollment_cleanup.discard_provisional_enrollment(
+                    enrollment_id, "capacity_failed"))
+        except Exception:
+            enrollment_discarded = False
+
+    if status != 200:
+        # Tell the browser whether the provisional row ACTUALLY went away, so it
+        # resets its wizard identity only when that is true. It is false on a
+        # retry against a caller-supplied enrollment_id, and false when cleanup
+        # refused - in both cases the caller's enrollment is still live and the
+        # browser must keep holding it.
+        try:
+            payload = body.get_json() or {}
+            payload["enrollment_discarded"] = enrollment_discarded
+            return jsonify(payload), status
+        except Exception:
+            return resp
+
     if status == 200:
         try:
             payload = body.get_json() or {}

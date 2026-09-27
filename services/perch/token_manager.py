@@ -160,10 +160,31 @@ def _resume_existing_enrollment(enrollment_id, user_id=None):
     enrollment for this email, so obtain a token for it via PATCH /refresh_token
     instead of trying to create a second one."""
     from services.perch.client import PATH_REFRESH_TOKEN
+    from services.perch.errors import (
+        PerchEnrollmentInProgressError, PerchNotFoundError)
     client = get_perch_client()
     started = _now()
     try:
         data = client.refresh_token(_email_for(enrollment_id))
+    except PerchNotFoundError as e:
+        # We only reach this function because POST /token already returned the
+        # documented 422: Perch HAS this email. A 404 from /refresh_token
+        # therefore does not mean "unknown email" - it means the email belongs
+        # to an account with no in-progress enrollment to resume, i.e. an
+        # existing customer. That is the duplicate-email case.
+        #
+        # Re-raised as the existing duplicate-email error (409) rather than
+        # left to surface as a bare technical 404, so the rep keeps a specific,
+        # actionable message. The original Perch text is still logged verbatim.
+        _log(enrollment_id, "refresh_token", PATH_REFRESH_TOKEN, "PATCH", started,
+             error=f"404 on refresh_token after 422 on token - email already "
+                   f"registered with no resumable enrollment ({e})",
+             user_id=user_id)
+        raise PerchEnrollmentInProgressError(
+            "That email address is already registered with Perch and has no "
+            "in-progress enrollment to resume. Use a different email address, "
+            "or check the customer's existing enrollment with Perch."
+        ) from e
     except Exception as e:
         _log(enrollment_id, "refresh_token", PATH_REFRESH_TOKEN, "PATCH", started,
              error=str(e), user_id=user_id)

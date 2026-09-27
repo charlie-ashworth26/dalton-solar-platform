@@ -77,7 +77,10 @@ check('entrance animation is subtle (<=8px travel)',
 check('success check animates once', /\.complete-check\{animation:ceeCheck[^}]*1 both/.test(css));
 check('OCR fill highlight exists', /@keyframes ocrFill/.test(css));
 check('  ...and is wired to prefilled fields', js.includes('markOcrFilled('));
-check('  ...without locking the field', !/readonly/.test(js.split('function markOcrFilled')[1]||''));
+// Scope to the FUNCTION BODY. The old slice ran to end-of-file, so any later
+// readonly field (e.g. the manual copy-link fallback) tripped it falsely.
+const markOcrBody=(js.split('function markOcrFilled')[1]||'').split('\n}')[0];
+check('  ...without locking the field', !/readonly/.test(markOcrBody));
 
 console.log('\n--- loading affordances ---');
 check('spinner defined', /\.cee-spinner\{/.test(css));

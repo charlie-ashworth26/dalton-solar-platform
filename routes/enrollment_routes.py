@@ -192,7 +192,10 @@ def create_enrollment():
 @require_auth
 def list_enrollments():
     role = g.current_user["role"]
-    sql = "SELECT * FROM enrollments WHERE 1=1"
+    # Discarded rows are filtered SERVER-SIDE, so a provisional enrollment
+    # abandoned by a failed attempt never reaches any dashboard or listing -
+    # this is not a row hidden by the frontend.
+    sql = "SELECT * FROM enrollments WHERE discarded_at IS NULL"
     params = []
 
     if role == "sales_rep":

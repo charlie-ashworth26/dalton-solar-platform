@@ -310,8 +310,8 @@ def main():
     with app.app_context():
         migrations = query("SELECT filename FROM schema_migrations")
     # 008_program_selection added later for dual-program persistence; this
-    # milestone itself still added none.
-    check("this milestone added no migration of its own", len(migrations) == 9)
+    # milestone itself still added none. 012 is the orphan-enrollment discard.
+    check("this milestone added no migration of its own", len(migrations) == 12)
 
     print(f"\n{'='*72}\nPROGRAM SELECTION - ALL CHECKS PASSED\n{'='*72}")
 

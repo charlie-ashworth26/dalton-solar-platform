@@ -10,7 +10,14 @@ bp = Blueprint("report_routes", __name__, url_prefix="/api/reports")
 @require_auth
 @require_role("admin", "qa_reviewer", "developer")
 def summary():
-    filters_sql = []
+    # Soft-discarded enrollments are failed attempts that were never real work
+    # (see services/enrollment_cleanup.py). They are excluded from every count
+    # here for the same reason they are excluded from the dashboard listing.
+    # Seeded as the first filter so it applies to the totals, the per-status
+    # counts, the LMI count and the signing-link join alike - the column is
+    # unique to `enrollments`, so it stays unambiguous in the join on line ~66.
+    # Nothing else about report meaning, grouping or filtering changes.
+    filters_sql = ["discarded_at IS NULL"]
     params = []
     if request.args.get("sales_rep_id"):
         filters_sql.append("sales_rep_id = ?")

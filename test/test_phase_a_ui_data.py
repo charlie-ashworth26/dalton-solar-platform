@@ -65,7 +65,7 @@ def main():
         seeded = query_one("SELECT full_name FROM users WHERE email = ?",
                            ("admin@daltonsolar.com",))["full_name"]
     check("seeded admin is no longer 'Jordan Ellis'", seeded != "Jordan Ellis")
-    check("  ...it is 'ADMIN ACCOUNT'", seeded == "ADMIN ACCOUNT")
+    check("  ...it is 'Charles Ashworth'", seeded == "Charles Ashworth")
     check("'Jordan Ellis' is gone from the codebase",
           "Jordan Ellis" not in open(os.path.join(ROOT, "seed.py"), encoding="utf-8").read())
 

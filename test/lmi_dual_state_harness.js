@@ -1,5 +1,5 @@
 /*
- * LMI Eligibility: proof documents and self-attestation COEXIST.
+ * LMI Eligibility: the screen mirrors Perch's next_step EXACTLY.
  *
  * WHAT WAS WRONG
  * --------------
@@ -9,8 +9,8 @@
  * (prepareSelfAttestation() hid #lmi-proof-panel), and pressing Continue on the
  * attest tab ran the DOCUMENT validation against an empty #lmi-doctype.
  *
- * The two are now separate: sections are shown per Perch's step and can both be
- * open, while exactly one API action is authorised at a time.
+ * The screen now shows ONE path - the one Perch named - and submits only that
+ * path's action. Nothing is collected for a path Perch did not ask for.
  *
  * None of this is provable by substring checks - the old code was present and
  * syntactically fine, it just ran the wrong branch. This harness EXECUTES the
@@ -167,18 +167,22 @@ function proofDocIntact() {
 
 async function run() {
   // ══════════════════════════════════════════════════════════════════
-  section('2 + 9. PROOF DOCS STAY VISIBLE AND ATTACHED ON self_attestation');
+  section('2 + 9. ON self_attestation, ONLY SELF-ATTESTATION IS ON SCREEN');
   setup('self_attestation');
   attachProofDoc();
   vm.runInContext('goStep(4);', ctx);
   await new Promise((r) => setImmediate(r));
-  check('the proof-document section is STILL on screen', docVisible());
-  check('  ...and the self-attestation section is revealed too', attestVisible());
-  check('  ...BOTH at once - not one replacing the other', docVisible() && attestVisible());
-  check('the uploaded document is still attached', proofDocIntact());
-  check('  ...and the rep is told why it cannot be sent yet',
-    el('lmi-doc-hint').style.display === 'block'
-    && /stays attached/i.test(el('lmi-doc-hint').textContent));
+  check('the proof-document section is NOT on screen', !docVisible());
+  check('  ...the self-attestation section is', attestVisible());
+  check('  ...exactly one path is shown, not both', attestVisible() && !docVisible());
+  check('  ...and no hint invites a document anyway',
+    el('lmi-doc-hint').style.display === 'none');
+  check('NO proof document is taken in on this step', (function () {
+    const before = vm.runInContext('state.lmi.documentId', ctx);
+    sandbox.handleLmiUpload([{ name: 'liheap.pdf', size: 1000 }]);
+    return vm.runInContext('state.lmi.documentId', ctx) === before
+      && calls('/documents').length === 0;
+  })());
   check('the mutually-exclusive toggle row is gone from the screen',
     el('lmi-mode-doc').style.display === 'none'
     && el('lmi-mode-attest').style.display === 'none'
@@ -224,7 +228,7 @@ async function run() {
     && vm.runInContext('selfAttestation.county', ctx) === 'Ulster'
     && vm.runInContext('selfAttestation.choice', ctx) === 'below');
   check('the proof document is untouched by any of it', proofDocIntact());
-  check('  ...and its section is still on screen', docVisible());
+  check('  ...and its section stays off screen throughout', !docVisible());
 
   fetchLog.length = 0;
   routes['/lmi/self-attestation'] = { status: 200, body: { next_step_key: 'contracts' } };
@@ -273,9 +277,9 @@ async function run() {
     vm.runInContext('perchContext.nextStepKey', ctx) === 'self_attestation');
   check('  ...no "unexpected next step" is shown',
     !/unexpected next step/i.test(el('lmi-submit-error').textContent));
-  check('the proof documents are STILL attached', proofDocIntact());
-  check('  ...their section is still visible', docVisible());
-  check('  ...and the self-attestation section is now revealed', attestVisible());
+  check('the proof documents stay attached to the enrollment', proofDocIntact());
+  check('  ...but their section is no longer shown', !docVisible());
+  check('  ...the self-attestation section has replaced it', attestVisible());
   check('  ...the proof doc was posted ONCE, not re-posted',
     calls('/lmi/proof_docs').length === 1);
 
@@ -314,7 +318,8 @@ async function run() {
   attachProofDoc();
   vm.runInContext('goStep(4);', ctx);
   await new Promise((r) => setImmediate(r));
-  check('both sections are on screen', docVisible() && attestVisible());
+  check('only the self-attestation section is on screen',
+    attestVisible() && !docVisible());
   check('the proof-doc Continue is NOT armed', el('btn-lmi-next').disabled === true);
   fetchLog.length = 0;
   el('btn-lmi-next').disabled = false;

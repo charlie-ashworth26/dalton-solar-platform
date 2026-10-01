@@ -272,8 +272,8 @@ async function run() {
     vm.runInContext("setLmiMode('doc');", ctx);
   }
   assertAllHidden('30 alternating setLmiMode() calls');
-  check('  ...both sections are still open after all that',
-    isVisible('lmi-doc-panel') && isVisible('sa-panel'));
+  check('  ...the self-attestation section is still the one on screen',
+    isVisible('sa-panel') && !isVisible('lmi-doc-panel'));
 
   section('  ...and an invalid mode is not a way in');
   prime('self_attestation');

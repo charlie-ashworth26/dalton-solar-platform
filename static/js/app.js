@@ -2038,28 +2038,30 @@ const amiTable = [
   {size:1, amount:61750},{size:2, amount:70550},{size:3, amount:79350},{size:4, amount:88150},
   {size:5, amount:95250},{size:6, amount:102300},{size:7, amount:109350},{size:8, amount:116400},
 ];
-/* WHAT THE ELIGIBILITY SCREEN SHOWS, AND WHAT IT MAY SUBMIT.
+/* THE ELIGIBILITY SCREEN MIRRORS PERCH'S next_step EXACTLY.
    ──────────────────────────────────────────────────────────────────────
-   These are TWO different questions and the old code conflated them into
-   one mutually-exclusive `state.lmi.mode` radio:
+   One LMI path is on screen at a time, and it is the path Perch named.
+   UBS never offers an alternative Perch did not ask for, and never gathers
+   data for a path that is not the current one.
 
-       show the doc section  ==  submit proof docs
-       show the attest panel ==  submit self-attestation
+       next_step = /lmi/proof_docs       -> proof-document upload only
+       next_step = /lmi/self_attestation -> self-attestation only
+       next_step = /lmi/self_attestation/accept -> self-attestation only
+       next_step = /contracts            -> neither
+       anything else / unknown           -> neither, and nothing submittable
 
-   Proof documents and self-attestation are not competing rep choices. A NY
-   LMI enrollment can legitimately carry both - the uploaded LIHEAP/SNAP
-   document AND the NYSERDA household-income survey - so the two sections
-   coexist on one screen.
+   `submits` names the single API action authorised right now. It tracks
+   the visible section exactly: a section that is not shown cannot submit,
+   and nothing is collected or stored for a path that is not shown - the
+   proof-document upload does not exist on the self-attestation step, so no
+   document is taken in locally there either.
 
-   `submits` is separate and is PERCH'S decision, never ours: exactly one
-   API action is authorised at a time, named by Perch's next_step. The doc
-   section stays visible and uploadable while self-attestation is the
-   authorised action, because uploading stores the file LOCALLY
-   (POST /api/enrollments/<id>/documents) - no Perch call - so the document
-   is already attached when Perch later asks for it.
+   This replaces an earlier design in which both sections were open at once
+   and documents were gathered ahead of Perch asking for them. That is gone
+   deliberately: UBS follows the one path Perch returned.
 
-   An unrecognised or absent step authorises nothing and shows nothing. A
-   step we do not understand must never be read as permission to act. */
+   NOT keyed to any utility, ZIP or project - only to next_step, so every NY
+   enrollment behaves the same way for the same Perch state. */
 function lmiSectionsForCurrentStep(){
   const key = perchContext.nextStepKey;
   if(key === 'proof_docs'){
@@ -2068,14 +2070,11 @@ function lmiSectionsForCurrentStep(){
             attestHint:null};
   }
   if(key === 'self_attestation' || key === 'self_attestation_accept'){
-    return {doc:true, attest:true, submits:key,
-            // The section stays open so documents can be gathered now; only
-            // sending them to Perch waits for Perch to ask.
-            docHint:'Perch is asking for the income self-attestation on this '
-                  + 'enrollment. You can still upload proof documentation here '
-                  + 'and it stays attached - it will be submitted when Perch '
-                  + 'asks for it.',
-            attestHint:null};
+    // SELF-ATTESTATION ONLY. The proof-document section is not shown and no
+    // proof document is collected or stored while this is the step. UBS
+    // mirrors the single path Perch returned rather than offering both.
+    return {doc:false, attest:true, submits:key,
+            docHint:null, attestHint:null};
   }
   return {doc:false, attest:false, submits:null, docHint:null, attestHint:null};
 }
@@ -2147,9 +2146,9 @@ function setIncomeAnswer(isBelow){
 }
 async function handleLmiUpload(files){
   if(!files.length) return;
-  // Uploading no longer switches the screen into a "document mode" - the two
-  // sections coexist, so an upload while self-attestation is on screen simply
-  // attaches the file and leaves the attestation section exactly as it was.
+  // Nothing is collected for a path Perch did not ask for. Guarded here, not
+  // only in the markup, because drag-and-drop reaches this without the control.
+  if(!lmiSectionsForCurrentStep().doc) return;
   // MULTI-FILE: front/back or multi-page proofs form ONE document set.
   docSetAddFiles('lmi_document', files);
   const f = files[0];

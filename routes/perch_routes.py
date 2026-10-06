@@ -379,6 +379,30 @@ def _stored_document(enrollment_id, category, document_id=None):
     )
 
 
+def _bill_documents_for(enrollment_id, doc):
+    """Every page of the bill `doc` belongs to, in page order.
+
+    A multi-page bill is stored as a document SET: one row per page, sharing a
+    document_set_id and ordered by page_order. Sending only the single
+    document_id the caller named dropped every page after the first.
+
+    Falls back to the one document when it has no set - a single-file upload is
+    a complete bill on its own, and that path is unchanged.
+
+    Scoped to THIS enrollment and this category, so a set id can never pull in
+    another enrollment's documents.
+    """
+    set_id = doc["document_set_id"] if "document_set_id" in doc.keys() else None
+    if not set_id:
+        return [doc]
+    pages = query(
+        """SELECT * FROM documents
+            WHERE document_set_id = ? AND enrollment_id = ? AND doc_category = 'utility_bill'
+         ORDER BY COALESCE(page_order, 0), id""",
+        (set_id, enrollment_id))
+    return list(pages) if pages else [doc]
+
+
 def _bill_pdf_path(doc):
     """Return (path, cleanup_path). Perch accepts bills as PDF only.
 
@@ -451,9 +475,26 @@ def create_perch_enrollment(enrollment_id):
     if len(digits) != 10:
         return jsonify({"error": "Phone number must contain exactly 10 US digits."}), 400
 
-    pdf_path = cleanup_path = None
+    # EVERY PAGE OF THE BILL, NOT JUST THE ONE NAMED.
+    # A bill photographed page by page is stored as a document SET
+    # (documents.document_set_id, ordered by page_order). Sending only the
+    # document_id the browser happened to name transmitted page 1 and silently
+    # dropped the rest, which is how enrollments reached Perch missing their
+    # usage/sizing pages.
+    #
+    # Perch's multipart contract already carries several bills per account -
+    # utility_accounts[0][utility_bills][0..n] - and build_enrollment_multipart()
+    # already emits that indexing. No payload format is invented here.
+    bill_docs = _bill_documents_for(enrollment_id, doc)
+
+    pdf_paths = []
+    cleanup_paths = []
     try:
-        pdf_path, cleanup_path = _bill_pdf_path(doc)
+        for bill_doc in bill_docs:
+            path, cleanup = _bill_pdf_path(bill_doc)
+            pdf_paths.append(path)
+            if cleanup:
+                cleanup_paths.append(cleanup)
         payload = {
             "email_address": customer["email"],
             "first_name": customer["first_name"],
@@ -467,7 +508,7 @@ def create_perch_enrollment(enrollment_id):
                     "address_1": svc["street"], "address_2": svc["unit"],
                     "city": svc["city"], "state": svc["state"], "zip": svc["zip"],
                 },
-                "utility_bills": [pdf_path],
+                "utility_bills": pdf_paths,
             }],
         }
         # The program choice is authoritative from the DATABASE. It used to be
@@ -527,8 +568,8 @@ def create_perch_enrollment(enrollment_id):
                 pass
         return _perch_error_response(enrollment_id, "enroll", e)
     finally:
-        if cleanup_path:
-            import os
+        import os
+        for cleanup_path in cleanup_paths:
             try:
                 os.remove(cleanup_path)
             except OSError:

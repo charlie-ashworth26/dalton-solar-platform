@@ -1674,6 +1674,16 @@ async function submitBill(){
   try{
     if(billUploadPromise) await billUploadPromise;
     if(!state.bill.documentId) throw new Error('The utility bill has not finished saving. Please try again.');
+    // NO PARTIAL BILL REACHES PERCH. Every page the rep selected must have a
+    // stored document id; if any upload failed, this stops here with the page
+    // named rather than submitting a bill that is quietly missing pages.
+    const unsaved = (DocSets.utility_bill.files || []).filter(function(x){ return !x.documentId; });
+    if(unsaved.length){
+      throw new Error(unsaved.length + ' of ' + DocSets.utility_bill.files.length +
+        ' bill pages did not finish uploading (' +
+        unsaved.map(function(x){ return x.file.name; }).join(', ') +
+        '). Remove or re-add them before continuing.');
+    }
     const payload = {
       customer:{first_name:state.customer.first,last_name:state.customer.last,email:state.customer.email,phone:state.customer.phone || null},
       service_address:{street:state.address.street,unit:state.address.unit,city:state.address.city,state:'NY',zip:state.address.zip},
@@ -1878,12 +1888,18 @@ async function handleBillUpload(files){
   // extracts across the whole set on upload and its result is authoritative.
   docSetAddFiles('utility_bill', files);
   const f = files[0];
-  if(f.size > 4 * 1024 * 1024){
-    removeBill();
-    const errEl=document.getElementById('bill-submit-error');
-    errEl.textContent='Perch accepts utility bills up to 4 MB. Choose a smaller PDF or image.';
-    errEl.style.display='block';
-    return;
+  // SIZE IS CHECKED ON EVERY PAGE, not just the first. Perch's 4 MB limit
+  // applies per bill file, so a later oversized page must be caught here rather
+  // than failing at submission after the rep has moved on.
+  for(let i = 0; i < files.length; i++){
+    if(files[i].size > 4 * 1024 * 1024){
+      removeBill();
+      const errEl=document.getElementById('bill-submit-error');
+      errEl.textContent='Perch accepts utility bills up to 4 MB per page. "' +
+        files[i].name + '" is larger than that — choose a smaller PDF or image.';
+      errEl.style.display='block';
+      return;
+    }
   }
   const generation = ++billUploadGeneration;
   billRuntimeFile = f;
@@ -1892,12 +1908,25 @@ async function handleBillUpload(files){
   state.bill.uploadError = null;
   showBillChip(f.name);
 
-  // Persist the exact same file selected for OCR. The generation guard prevents
-  // a slower, older upload from overwriting the document ID for a newer bill.
-  billUploadPromise = uploadDocumentToDalton(f, 'utility_bill')
-    .then(saved => {
-      if(generation === billUploadGeneration) state.bill.documentId = saved.document_id;
-      return saved;
+  // EVERY PAGE IS UPLOADED, not just the one previewed.
+  // This used to call uploadDocumentToDalton(files[0]) - a single file - while
+  // docSetAddFiles() above listed all of them on screen. The rep saw four pages
+  // and only one ever left the browser, which is how bills reached Perch
+  // missing their usage pages. uploadDocumentSet() posts the whole set to
+  // /document-sets, which stores one row per page with its page_order.
+  //
+  // state.bill.documentId stays the FIRST page, so every existing caller is
+  // unchanged; the backend expands it to the whole set at submission.
+  // The generation guard still prevents a slower, older upload from overwriting
+  // the document id for a newer bill.
+  billUploadPromise = uploadDocumentSet('utility_bill')
+    .then(body => {
+      const first = (body && body.files && body.files[0]) || null;
+      if(generation === billUploadGeneration){
+        if(!first) throw new Error('The bill upload did not return a saved document.');
+        state.bill.documentId = first.document_id;
+      }
+      return {document_id: first ? first.document_id : null, files: (body && body.files) || []};
     })
     .catch(err => {
       if(generation === billUploadGeneration) state.bill.uploadError = err.message;
@@ -3098,10 +3127,20 @@ function renderDocSetList(category){
 async function uploadDocumentSet(category){
   const set = DocSets[category];
   if(!set || !set.files.length) return null;
+  // Only files NOT yet stored are sent. Re-sending ones that already have a
+  // documentId would append them to the set a second time and duplicate pages,
+  // because the server treats every received file as a new page.
+  const pending = set.files.filter(function(x){ return !x.documentId; });
+  if(!pending.length){
+    // Nothing new to send - e.g. the rep re-picked a file already stored.
+    // Report what IS stored so callers still resolve a document id.
+    return {document_set_id: set.id,
+            files: set.files.map(function(x){ return {document_id: x.documentId}; })};
+  }
   const fd = new FormData();
   fd.append('category', category);
   if(set.id) fd.append('document_set_id', String(set.id));
-  set.files.forEach(function(x){ fd.append('files', x.file, x.file.name); });
+  pending.forEach(function(x){ fd.append('files', x.file, x.file.name); });
   const body = await apiFetch('/api/enrollments/' + currentDraft.enrollment_id +
                               '/document-sets', {method:'POST', body: fd});
   set.id = body.document_set_id;

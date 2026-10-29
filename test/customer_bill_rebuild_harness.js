@@ -37,7 +37,8 @@ check('POD ID preserved as a conditional field',
 check('  ...uses the mockup canvas width', /\.wb\{max-width:1120px/.test(css));
 check('page header with title and sub (mockup has no eyebrow)',
   /wb-title/.test(block) && /wb-sub/.test(block) && !/wb-eyebrow/.test(block));
-check('  ...with a 36px display title', /\.wb \.wb-title\{font-size:36px/.test(css));
+check('  ...with the fluid hero title',
+  /\.wb \.wb-title\{font-size:var\(--t-hero\)/.test(css));
 check('the 620px shell cap that crushed this screen is lifted',
   /\.wizard-inner\{width:100%;max-width:1200px/.test(css));
 check('  ...upload is its own full-width section, capped at 620px',
@@ -46,10 +47,27 @@ check('  ...upload is its own full-width section, capped at 620px',
 // compact metadata strip under the header, giving full width to the work.
 check('  ...no rail; the utility chip carries context',
   !block.includes('wb-rail') && block.includes('id="util-chip"'));
-check('  ...mockup grids are declared',
-  /\.access\{display:grid;grid-template-columns:1fr 1fr 1fr/.test(css)
-  && /\.address\{display:grid;grid-template-columns:2fr 1fr 110px/.test(css)
-  && /\.fields\{display:grid;grid-template-columns:repeat\(2/.test(css));
+/* RE-PINNED (Phase C4). This asserted the mockup's three separate grids -
+   .access at 1fr 1fr 1fr, .address at 2fr 1fr 110px, .fields at repeat(2).
+   Having three grids on one form WAS the alignment defect C4 was asked to
+   fix: measured at 1440px the screen showed seven field widths and seven left
+   edges, and the address needed five rows. One twelve-column grid now serves
+   all three, which is what makes the rows line up and cut the screen from
+   1965px to 1744px. The check is for the single grid, and for the spans that
+   put three fields on a row - the thing the old repeat(2) could not express. */
+const flatCss = css.replace(/\s+/g, '');
+check('  ...one shared twelve-column grid, not three ad-hoc ones',
+  /\.access,\.fields,\.address\{display:grid;grid-template-columns:repeat\(12,minmax\(0,1fr\)\)/
+    .test(flatCss)
+  && !/\.address\{display:grid;grid-template-columns:2fr1fr110px/.test(flatCss));
+check('  ...with thirds for the name/account and access rows',
+  /\.access>\.fd,\.fields>\.fd\{grid-column:span4/.test(flatCss));
+check('  ...and the address spanning 8+4 then 6+3+3',
+  /\.address\.street\{grid-column:span8/.test(flatCss)
+  && /\.address\.unit\{grid-column:span4/.test(flatCss)
+  && /\.address\.city\{grid-column:span6/.test(flatCss)
+  && /\.address\.state\{grid-column:span3/.test(flatCss)
+  && /\.address\.zip\{grid-column:span3/.test(flatCss));
 
 console.log('\n--- sections separated by hierarchy, not card chrome ---');
 check('four sections, in the approved order',
@@ -59,7 +77,7 @@ check('  ...no numbered mini-steps', !block.includes('class="blk-num"'));
 // Service address became its own full-width row, so there are five headings.
 
 check('  ...separated by a top rule, not a bordered box',
-  /\.sec\{padding:26px 0;border-top:1px solid/.test(css));
+  /\.sec\{padding:var\(--s5\) 0;border-top:1px solid/.test(css));
 check('  ...no background fill on sections', !/\.sec\{[^}]*background:/.test(css));
 check('section heads pair a title with supporting copy', /\.sec-head h2\{/.test(css));
 // Approved order: program -> customer access -> utility bill -> review.
@@ -109,8 +127,22 @@ check('  ...accepting pdf/jpg/png/heic', /accept="\.pdf,\.jpg,\.jpeg,\.png,\.hei
 
 console.log('\n--- responsive intent ---');
 
-check('single 900px breakpoint per the mockup',
-  /@media\(max-width:900px\)/.test(css));
+// RE-PINNED (Phase C3): the mockup's intent was ONE breakpoint for this
+// screen, not the number 900. C3 consolidated the thirteen scattered
+// breakpoints into four (430/599/899/1199), which moved this screen's rules
+// from a 900px band to the shared 899px touch band - one band still, and now
+// the same one as the rest of the application rather than a near-duplicate
+// one pixel away. What is asserted is the intent: the screen's responsive
+// rules live in a single band, and it is one of the four documented ones.
+// C4: the single-column collapse is now declared on the shared grid
+// (.access,.fields,.address) rather than on .fields alone, so this looks for
+// that rule instead. The property - ONE band carries this screen's responsive
+// rules, and it is one of the four documented breakpoints - is unchanged.
+const screenBands = [...new Set(
+  (css.match(/@media[^{]*?max-width:\s*(\d+)px\s*\)\s*\{[\s\S]*?\.access,\.fields,\.address\{grid-template-columns:repeat\(6/g)
+   || []).map((s) => +/(\d+)px/.exec(s)[1]))];
+check(`single breakpoint per the mockup (${screenBands.join(', ') || 'none'})`,
+  screenBands.length === 1 && [430, 599, 899, 1199].includes(screenBands[0]));
 check('actions row is a bordered footer', /\.actions\{display:flex;justify-content:space-between/.test(css));
 
 console.log('\n--- untouched elsewhere ---');

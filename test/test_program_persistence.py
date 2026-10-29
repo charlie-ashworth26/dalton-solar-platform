@@ -18,6 +18,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _ubs_test_db  # noqa: F401  - throwaway database; see test/_ubs_test_db.py
 os.environ.setdefault("PERCH_API_MODE", "mock")
 
 from app import app
@@ -117,8 +118,15 @@ def main():
     detail = c.get(f"/api/enrollments/{eid}", headers=rep).get_json()
     check("enrollment detail exposes the selection for resume",
           detail["selected_customer_type"] == "LMI")
+    # E2: the branch test moved from `=== 'LMI'` to isLmiCustomerType(), which
+    # is true for LMI_IRA as well. The old literal would have resumed an IRA
+    # enrollment with no Eligibility step, so pinning it would pin the bug.
     check("frontend hydrates the branch on resume",
-          "e.selected_customer_type" in JS and "lmi_required: e.selected_customer_type === 'LMI'" in JS)
+          "e.selected_customer_type" in JS
+          and "lmi_required: isLmiCustomerType(e.selected_customer_type)" in JS)
+    check("  ...and the branch test covers BOTH income-qualified types",
+          "const LMI_CUSTOMER_TYPES = ['LMI', 'LMI_IRA']" in JS
+          and "function isLmiCustomerType" in JS)
 
     section("B. /enroll ACCEPTS the already-selected LMI path")
     # The regression: the route read customer_type but never forwarded it.
@@ -246,20 +254,33 @@ def main():
         migs = [x["filename"] for x in
                 query_one.__globals__["query"]("SELECT filename FROM schema_migrations")]
     check("008 migration applied", any("008_program_selection" in m for m in migs))
-    check("  ...plus 009-012 self-attestation, magic link, admin name, discard",
-          len(migs) == 12)
+    check("  ...plus 009-015 self-attestation, magic link, admin name, "
+          "discard, v2 capacity entries, capacity county, savings rate",
+          len(migs) == 15)
     check("column is nullable with no backfill",
           "ALTER TABLE enrollments ADD COLUMN selected_customer_type TEXT" in
           open(os.path.join(ROOT, "db", "migrations", "008_program_selection.sql"),
                encoding="utf-8").read())
+    # E2's migration must be additive for the same reason 008's was: an
+    # existing capacity row cannot be rewritten into a shape Perch never sent.
+    _m013 = open(os.path.join(ROOT, "db", "migrations",
+                              "013_v2_capacity_entries.sql"),
+                 encoding="utf-8").read()
+    check("013 adds the v2 capacity columns",
+          "ADD COLUMN capacity_entries_json TEXT" in _m013
+          and "ADD COLUMN capacity_shape TEXT" in _m013)
+    check("  ...and contains no UPDATE, DELETE, DROP or backfill",
+          not any(kw in _m013.upper().replace("-- ", "")
+                  for kw in ("\nUPDATE ", "\nDELETE ", "\nDROP ")))
     check("no auto-selection workaround was introduced",
           "selectedProgram = availablePrograms[1]" not in JS)
     check("one acknowledgement checkbox", JS.count('id="agr-ack-check"') == 1)
     check("one Agree & finish button", JS.count('id="agr-agree-btn"') == 1)
     check("resume reconciliation intact", "canRegenerate" in JS)
     check("B2 design system intact",
-          "Clean Energy Enrollment — design tokens" in
-          open(os.path.join(ROOT, "static", "css", "app.css"), encoding="utf-8").read())
+          all(t in open(os.path.join(ROOT, "static", "css", "app.css"),
+                        encoding="utf-8").read()
+              for t in ("--brand:", "--ink:", "--radius:", "--s1:", "--ease:")))
 
     print(f"\n{'='*72}\nPROGRAM PERSISTENCE - ALL CHECKS PASSED\n{'='*72}")
 

@@ -357,6 +357,22 @@ def _sales_report_rows():
             "enrollment_code": r["enrollment_code"],
             "customer_email": r["customer_email"],
             "status": status,
+            # ── THE KEY BEHIND THE LABEL (C5) ──────────────────────────────
+            # `status` above is a LABEL. The Sales Report rendered it as bare
+            # text while every other list in UBS shows a semantic status pill,
+            # and the design system forbids choosing a colour by reading a
+            # label - C1 asserts the label text is never parsed to pick one.
+            # So the authoritative key this row ALREADY used to build that
+            # label is serialized beside it, and the frontend reuses the same
+            # resolver as every other list. Nothing is invented, nothing is
+            # recomputed, and `status` is untouched, so the CSV export and
+            # every existing consumer see exactly what they saw before.
+            "workflow_step_key": step_key,
+            "workflow_step_label": status,
+            "workflow_is_terminal": (
+                perch_workflow.is_terminal(step_key) if step_key else False),
+            "workflow_is_blocked": (
+                perch_workflow.is_blocked(step_key) if step_key else False),
             "utility": _utility_display(r["utility_name"]),
             "created_at": r["created_at"],
             "updated_at": r["updated_at"],

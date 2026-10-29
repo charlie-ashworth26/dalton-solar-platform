@@ -22,8 +22,10 @@ from db import query_one, query, execute
 from auth import (require_auth, require_role, require_staff_or_customer,
                   require_customer_auth)
 from helpers import next_enrollment_code, resolve_stored_path
-from services import audit, status_machine, enrollment_cleanup
-from services.perch import adapter, workflow, utilities
+from services import audit, status_machine, enrollment_cleanup, zip_state
+from services import rep_errors
+from services.perch import adapter, workflow, utilities, markets
+from services.perch import capacity
 from services.perch import client as perch_client
 from services.perch.errors import (
     PerchError, PerchNoCapacityError, PerchValidationError, PerchAmbiguousOutcomeError,
@@ -183,7 +185,7 @@ def get_workflow(enrollment_id):
     enrollment, err = _visible(enrollment_id)
     if err:
         return err
-    descriptor = workflow.resolve(enrollment_id)
+    descriptor = _workflow_descriptor(enrollment_id)
     if descriptor is None:
         return jsonify({"error": "Enrollment not found"}), 404
     return jsonify(descriptor)
@@ -236,7 +238,7 @@ def restart_service_area(enrollment_id):
         user_id=g.current_user["id"], details={"prior_step": current},
         ip_address=request.remote_addr,
     )
-    return jsonify({"workflow": workflow.resolve(enrollment_id)})
+    return jsonify({"workflow": _workflow_descriptor(enrollment_id)})
 
 
 @bp.route("/enrollments/<int:enrollment_id>/capacity", methods=["POST"])
@@ -267,19 +269,22 @@ def check_capacity(enrollment_id):
                   ip_address=request.remote_addr)
         return jsonify({"error": str(e), "perch_error": type(e).__name__}), getattr(e, "http_status", 502)
 
-    step_key, recognized = workflow.resolve_next_step_key(result.get("next_step_url"))
+    step_key, recognized = _next_key_of(result)
     workflow.set_state(
         enrollment_id,
         "capacity_result" if result["capacity_available"] else "no_capacity",
-        next_step_url=result.get("next_step_url"),
+        next_step_url=_next_step_raw(result),
         recognized=recognized,
         last_response=result.get("project_details"),
     )
 
-    if not recognized and result.get("next_step_url"):
+    # E1: asks for the value, not for a version's name for it. An
+    # unrecognized v2 path has to be as loud as an unrecognized v1 URL.
+    _unrecognized = _next_step_raw(result)
+    if not recognized and _unrecognized:
         # Perch pointed us at something we have not implemented. Loud, not silent.
         audit.log("perch_unrecognized_next_step", enrollment_id=enrollment_id,
-                  user_id=g.current_user["id"], details={"next_step_url": result["next_step_url"]},
+                  user_id=g.current_user["id"], details={"next_step_url": _unrecognized},
                   ip_address=request.remote_addr)
 
     audit.log("perch_capacity_checked", enrollment_id=enrollment_id, user_id=g.current_user["id"],
@@ -295,7 +300,8 @@ def check_capacity(enrollment_id):
         except status_machine.InvalidTransition:
             pass
 
-    return jsonify({"result": result, "workflow": workflow.resolve(enrollment_id)})
+    return jsonify({"result": result,
+                    "workflow": _workflow_descriptor(enrollment_id)})
 
 
 @bp.route("/enrollments/<int:enrollment_id>/capacity", methods=["GET"])
@@ -354,16 +360,61 @@ def diagnostics():
 
 
 def _perch_error_response(enrollment_id, operation, exc):
+    """The rep-facing half of a failed Perch call.
+
+    D-2. This used to return str(exc) verbatim, so a rep could be shown
+    "Perch returned 503 ...", an endpoint path or an exception class name. The
+    full text is still recorded in the audit entry below, and in the
+    perch_api_calls record the adapter writes, so nothing is hidden from an
+    admin, a developer or a log. Only the sentence on the rep's screen changes.
+
+    A message already written FOR a rep - the E3 422 field translations, which
+    name the exact field to correct - passes through untouched: rep_message()
+    replaces only what carries internals.
+    """
     audit.log(
         f"perch_{operation}_failed", enrollment_id=enrollment_id,
-        user_id=_actor_id(), details=_actor_details({"error": str(exc)}),
+        user_id=_actor_id(),
+        # The diagnostic detail, kept whole.
+        details=_actor_details({"error": str(exc), "error_class": type(exc).__name__}),
         ip_address=request.remote_addr,
     )
-    return jsonify({"error": str(exc), "perch_error": type(exc).__name__}), getattr(exc, "http_status", 502)
+    return jsonify({
+        "error": rep_errors.for_operation(operation, exc),
+        # Kept because the browser routes one documented condition on it
+        # (PerchEnrollmentInProgressError). It is a class name, not prose, and
+        # is never rendered to the rep.
+        "perch_error": type(exc).__name__,
+    }), getattr(exc, "http_status", 502)
 
 
-def _next_key(url):
-    key, recognized = workflow.resolve_next_step_key(url)
+def _next_key(value):
+    """Step key for a next_step that may be a v1 URL or a v2 path.
+
+    Kept for callers that already hold the raw value; prefer
+    _next_key_of(result), which does not make the caller choose a
+    spelling."""
+    key, recognized = workflow.resolve_next_step_key(value)
+    return key, recognized
+
+
+def _next_step_raw(result):
+    """The next_step VALUE from a normalized result, whichever key held
+    it. Stored as-is: a v1 full URL or a v2 bare path, exactly as Perch
+    sent it, so the audit record is what came back and not our reading
+    of it. The column is still named *_url for now - renaming it is
+    database work, not transport work."""
+    return (result or {}).get("next_step") or (result or {}).get("next_step_url")
+
+
+def _next_key_of(result):
+    """Step key straight from a normalized Perch result (E1).
+
+    Routes used to read `result["next_step_url"]` - a v1 name for a
+    value that is a bare path on v2 - which made every call site care
+    which version answered. They ask for the step instead, and the
+    client/workflow layer decides which key carried it."""
+    key, recognized, _raw = workflow.resolve_next_step(result)
     return key, recognized
 
 
@@ -379,28 +430,34 @@ def _stored_document(enrollment_id, category, document_id=None):
     )
 
 
-def _bill_documents_for(enrollment_id, doc):
-    """Every page of the bill `doc` belongs to, in page order.
+def _set_documents_for(enrollment_id, doc, category):
+    """Every document of the SET that `doc` belongs to, in page order.
 
-    A multi-page bill is stored as a document SET: one row per page, sharing a
-    document_set_id and ordered by page_order. Sending only the single
-    document_id the caller named dropped every page after the first.
+    A multi-file upload is stored as a document SET: one row per file, sharing
+    a document_set_id and ordered by page_order. Sending only the single
+    document_id the caller named dropped every file after the first.
 
     Falls back to the one document when it has no set - a single-file upload is
-    a complete bill on its own, and that path is unchanged.
+    complete on its own, and that path is unchanged, which is what keeps every
+    historical set-less document working exactly as before.
 
-    Scoped to THIS enrollment and this category, so a set id can never pull in
-    another enrollment's documents.
+    Scoped to THIS enrollment AND this category, so a set id can never pull in
+    another enrollment's documents or another category's.
     """
     set_id = doc["document_set_id"] if "document_set_id" in doc.keys() else None
     if not set_id:
         return [doc]
     pages = query(
         """SELECT * FROM documents
-            WHERE document_set_id = ? AND enrollment_id = ? AND doc_category = 'utility_bill'
+            WHERE document_set_id = ? AND enrollment_id = ? AND doc_category = ?
          ORDER BY COALESCE(page_order, 0), id""",
-        (set_id, enrollment_id))
+        (set_id, enrollment_id, category))
     return list(pages) if pages else [doc]
+
+
+def _bill_documents_for(enrollment_id, doc):
+    """Every page of the bill `doc` belongs to. Behaviour unchanged."""
+    return _set_documents_for(enrollment_id, doc, "utility_bill")
 
 
 def _bill_pdf_path(doc):
@@ -467,7 +524,7 @@ def create_perch_enrollment(enrollment_id):
         "zip": enrollment["billing_zip"] or (svc["zip"] if enrollment["billing_same_as_service"] else None),
     }
     if any(not billing[k] for k in ("address_1", "city", "state", "zip")):
-        return jsonify({"error": "A complete billing/mailing address is required by Perch."}), 400
+        return jsonify({"error": "A complete billing/mailing address is required."}), 400
 
     digits = ''.join(ch for ch in (customer["phone"] or "") if ch.isdigit())
     if len(digits) == 11 and digits.startswith("1"):
@@ -504,6 +561,14 @@ def create_perch_enrollment(enrollment_id):
             "utility_accounts": [{
                 "utility_account_number": acct["account_number"],
                 "secondary_account_identifier": acct["secondary_account_identifier"],
+                # Required by some utilities (Dominion needs a 10-digit meter
+                # number), not required by others. The multipart builder has
+                # always emitted utility_accounts[n][meter_numbers][m]; nothing
+                # was populating it because no NY utility in this funnel asks
+                # for one. Omitted entirely when absent, so no NY request body
+                # changes: a None here produces no multipart part at all.
+                "meter_numbers": ([acct["meter_number"]]
+                                  if acct["meter_number"] else []),
                 "service_address": {
                     "address_1": svc["street"], "address_2": svc["unit"],
                     "city": svc["city"], "state": svc["state"], "zip": svc["zip"],
@@ -575,10 +640,10 @@ def create_perch_enrollment(enrollment_id):
             except OSError:
                 pass
 
-    step_key, recognized = _next_key(result.get("next_step_url"))
+    step_key, recognized = _next_key_of(result)
     workflow.set_state(
         enrollment_id, step_key or "unknown_next_step",
-        next_step_url=result.get("next_step_url"), recognized=recognized,
+        next_step_url=_next_step_raw(result), recognized=recognized,
         last_response={"customer_type": result.get("customer_type")},
     )
     return jsonify({"result": result, "next_step_key": step_key, "next_step_recognized": recognized})
@@ -606,7 +671,7 @@ def submit_perch_proof_docs(enrollment_id):
     valid_doc_types = {"card", "letter", "account_statement", "utility_bill", "other", "unknown"}
     proof_type = query_one("SELECT * FROM perch_proof_doc_types WHERE source_type=? AND category='proof_doc' AND is_active=1", (source_type,))
     if not proof_type:
-        return jsonify({"error": "Select a proof-document type supported by Perch."}), 400
+        return jsonify({"error": "Select a supported proof-document type."}), 400
     if not name_on_document:
         return jsonify({"error": "Name on document is required."}), 400
     if relationship not in valid_relationships:
@@ -614,13 +679,30 @@ def submit_perch_proof_docs(enrollment_id):
     if document_type not in valid_doc_types:
         return jsonify({"error": "Select the physical document format."}), 400
 
+    # EVERY STORED PROOF FILE IS SENT, not just the one the caller named.
+    #
+    # Perch's /lmi/proof_docs contract takes a LIST of documents, each with
+    # exactly one file part (documents[i][file]) and its own metadata, and
+    # build_proof_docs_multipart() has always looped over that list. This route
+    # built a list of ONE, so a rep who attached a two-page award letter had the
+    # second page stored by UBS and never seen by Perch. The bill path already
+    # expands its set for exactly this reason.
+    #
+    # The METADATA IS THE REP'S SINGLE ANSWER, repeated per file: source_type,
+    # name on document, relationship and physical format describe the proof the
+    # rep is attesting to, and the files are the pages of it. Nothing is
+    # invented per page - there is no second answer to copy from.
+    #
+    # A set-less legacy proof returns a one-element list here, which is byte
+    # for byte the request this route sent before.
+    proof_files = _set_documents_for(enrollment_id, doc, "lmi_document")
     documents = [{
         "source_type": source_type,
         "name_on_document": name_on_document,
         "relationship": relationship,
         "document_type": document_type,
-        "file_path": resolve_stored_path(doc["stored_path"]),
-    }]
+        "file_path": resolve_stored_path(p["stored_path"]),
+    } for p in proof_files]
     try:
         result = adapter.submit_proof_docs(
             enrollment_id, acct["account_number"], documents,
@@ -642,11 +724,16 @@ def submit_perch_proof_docs(enrollment_id):
             return _perch_error_response(enrollment_id, "proof_docs", e)
         return jsonify({"error": str(e)}), 400
 
-    step_key, recognized = _next_key(result.get("next_step_url"))
+    step_key, recognized = _next_key_of(result)
     workflow.set_state(
         enrollment_id, step_key or "unknown_next_step",
-        next_step_url=result.get("next_step_url"), recognized=recognized,
-        last_response={"proof_document_id": doc["id"], "source_type": source_type},
+        next_step_url=_next_step_raw(result), recognized=recognized,
+        last_response={"proof_document_id": doc["id"], "source_type": source_type,
+                       # WHICH files went, so a later reader is not left
+                       # inferring it from the one id the caller happened to
+                       # name.
+                       "proof_document_ids": [p["id"] for p in proof_files],
+                       "proof_file_count": len(proof_files)},
     )
     return jsonify({"result": result, "next_step_key": step_key, "next_step_recognized": recognized})
 
@@ -657,24 +744,29 @@ def generate_perch_contracts(enrollment_id):
     enrollment, err = _visible_to_actor(enrollment_id)
     if err:
         return err
+    # Server-side half of the Virginia hard stop. A not-qualified enrollment
+    # must never reach contract generation, however the request arrives.
+    blocked = _blocked_guard(enrollment_id)
+    if blocked:
+        return blocked
     try:
         result = adapter.generate_contracts(enrollment_id, user_id=_actor_id())
     except PerchError as e:
         return _perch_error_response(enrollment_id, "contracts", e)
 
     safe = adapter.contracts_safe(result) if hasattr(adapter, "contracts_safe") else result.get("contracts", [])
-    step_key, recognized = _next_key(result.get("next_step"))
+    step_key, recognized = _next_key_of(result)
     # Persist only the URL-free contract metadata. Presigned URLs remain in the
     # local `result` object for this request and die with it.
     workflow.set_state(
         enrollment_id, "contracts_review",
-        next_step_url=result.get("next_step"), recognized=recognized,
+        next_step_url=_next_step_raw(result), recognized=recognized,
         last_response={"contracts": safe, "contract_count": len(safe)},
     )
     return jsonify({
         "contracts": safe,
         "contract_count": len(safe),
-        "next_step_url": result.get("next_step"),
+        "next_step_url": _next_step_raw(result),
         "next_step_key": step_key,
         "acceptance_enabled": True,
     })
@@ -693,13 +785,12 @@ def review_perch_contract(enrollment_id):
         return jsonify({"error": "A contract index is required."}), 400
 
     state = workflow.get_state(enrollment_id) or {}
-    try:
-        saved = json.loads(state.get("last_response_json") or "{}")
-    except (TypeError, ValueError):
-        saved = {}
+    # Via the shared helper: a last_response payload that is not a JSON object
+    # (the v2 capacity array, for one) yields {} rather than raising.
+    saved = workflow.last_response_dict(state)
     safe_contracts = saved.get("contracts") or []
     if index < 0 or index >= len(safe_contracts):
-        return jsonify({"error": "That contract is not in the current Perch review packet."}), 404
+        return jsonify({"error": "That agreement is not in the current review packet."}), 404
 
     now = time.time()
     for expired_token, ctx in list(_contract_review_tokens.items()):
@@ -748,11 +839,13 @@ def open_contract_review(token):
     if item is None and 0 <= index < len(raw_items) and isinstance(raw_items[index], dict):
         item = raw_items[index]
     if item is None:
-        return jsonify({"error": "Perch did not return that contract in the refreshed packet."}), 502
+        return jsonify({"error": "That agreement could not be opened right now. "
+                                 "Please try again."}), 502
     url = item.get("url") if isinstance(item, dict) else None
     parsed = urlparse(url or "")
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return jsonify({"error": "Perch did not return a review URL for that contract."}), 502
+        return jsonify({"error": "That agreement could not be opened right now. "
+                                 "Please try again."}), 502
     # PRE-FLIGHT: confirm the object actually exists before handing the browser
     # to S3.
     #
@@ -836,10 +929,7 @@ _MAX_USER_AGENT = 2048
 def _prior_contract_names(enrollment_id):
     """URL-free contract names previously stored at the contracts_review step."""
     state = workflow.get_state(enrollment_id) or {}
-    try:
-        saved = json.loads(state.get("last_response_json") or "{}")
-    except (TypeError, ValueError):
-        return []
+    saved = workflow.last_response_dict(state)
     items = saved.get("contracts")
     if not isinstance(items, list):
         return []
@@ -907,6 +997,12 @@ def accept_perch_contracts(enrollment_id):
     enrollment, err = _visible_to_actor(enrollment_id)
     if err:
         return err
+    # No agreement completion for a stopped enrollment. The pre-existing
+    # blocked states were already refused further down via step_key; this makes
+    # the refusal uniform and covers lmi_not_qualified.
+    blocked = _blocked_guard(enrollment_id)
+    if blocked:
+        return blocked
 
     data = request.get_json(force=True, silent=True) or {}
 
@@ -926,10 +1022,7 @@ def accept_perch_contracts(enrollment_id):
     # successful acceptance, do not call Perch again. Perch has not documented
     # whether /contracts/accept is idempotent.
     if step_key == "contracts_accepted":
-        try:
-            saved = json.loads(state.get("last_response_json") or "{}")
-        except (TypeError, ValueError):
-            saved = {}
+        saved = workflow.last_response_dict(state)
         return jsonify({
             "already_accepted": True,
             "message": saved.get("message"),
@@ -1115,8 +1208,44 @@ def enrollment_available_programs(enrollment_id):
             "message": "Run a capacity check before choosing a program.",
         })
 
-    details = capacity.get("project_details") or {}
-    programs = adapter.available_programs(details)
+    # E2: built from the stored ENTRY MODEL, so a v2 capacity response drives
+    # the program list. Falls back to the flat columns for a capacity row
+    # written before migration 013.
+    model = adapter.capacity_model_for(capacity)
+    county_required, county_options, county_source = _county_requirement(
+        model, capacity)
+    selected_county = _stored_county(enrollment)
+
+    # E2.1: WHEN COUNTY DECIDES, NOTHING IS OFFERED UNTIL IT IS ANSWERED.
+    #
+    # Returning the unrestricted subset first and letting it GROW once a county
+    # arrives would show a rep one list and then a different one - the "UI
+    # shows one option while the backend carries another" failure, just spread
+    # over two seconds. So while the answer is outstanding the list is empty
+    # and `awaiting_county` says why.
+    awaiting_county = bool(county_required and not selected_county)
+    if awaiting_county:
+        programs = []
+    else:
+        programs = adapter.available_programs(model, county=selected_county)
+
+    # The stored program, kept only while it is still on offer - a selection
+    # the capacity no longer supports is not a selection.
+    selected_type = (
+        enrollment["selected_customer_type"]
+        if enrollment["selected_customer_type"] in [p["customer_type"] for p in programs]
+        else None)
+    selected_program = next((p for p in programs
+                             if p["customer_type"] == selected_type), None)
+    selected_rate = _stored_savings_rate(enrollment)
+    # Same rule for the rate: reported only while the selected program still
+    # offers it, so the UI can never show a rate the backend would refuse.
+    if selected_rate is not None and selected_program is not None:
+        if selected_rate not in selected_program["savings_percents"]:
+            selected_rate = None
+    elif selected_program is None:
+        selected_rate = None
+
     return jsonify({
         "enrollment_id": enrollment_id,
         "capacity_checked": True,
@@ -1124,17 +1253,356 @@ def enrollment_available_programs(enrollment_id):
         "utility_slug": capacity.get("utility_slug"),
         "zip_code": capacity.get("zip_code"),
         "available_programs": programs,
+        # Which wire shape this capacity came from. Diagnostic only - no
+        # client branches on it - but it is the one thing that tells a reader
+        # of a bug report whether they are looking at v1 or v2 behaviour.
+        "capacity_shape": model.shape,
+        # Whether ANY available entry is restricted to counties at this
+        # location. Informational: restrictions can exist without MATTERING.
+        "county_restrictions_present": model.has_county_restrictions(),
+        # E2.1 - whether the county actually CHANGES what can be offered here.
+        # This, not the line above, is what reveals the field.
+        "county_required": county_required,
+        "county_options": county_options,
+        "county_source": county_source,
+        "selected_county": selected_county,
+        "awaiting_county": awaiting_county,
         # True only when the rep genuinely has a choice to make. One option is
         # unambiguous and is selected automatically at enroll time.
         "selection_required": len(programs) > 1,
         # The persisted choice, so the wizard hydrates from the backend instead
         # of relying on transient JS state. Only returned when it is still one
         # of the programs currently on offer.
-        "selected_customer_type": (
-            enrollment["selected_customer_type"]
-            if enrollment["selected_customer_type"] in [p["customer_type"] for p in programs]
-            else None),
+        "selected_customer_type": selected_type,
+        # E3 - THE SAVINGS RATE.
+        #
+        # Perch v2 can offer several rates for one program and then REQUIRES
+        # one at /enroll. These three fields are what the program area needs
+        # to render that choice, and nothing more: which rate is stored, and
+        # whether one is still outstanding.
+        #
+        # savings_selection_required is about the SELECTED program only. A
+        # location where some other program offers several rates does not owe
+        # the rep a decision they are not making.
+        "selected_savings_percent": selected_rate,
+        "savings_selection_required": bool(
+            selected_program and len(selected_program["savings_percents"]) > 1
+            and selected_rate is None),
+        "savings_options": ((selected_program or {}).get("savings_percents")
+                            if selected_program else []),
     })
+
+
+def _workflow_descriptor(enrollment_id):
+    """workflow.resolve(), with the County field's options filled in.
+
+    THE ONE PLACE the two layers meet. services/perch/workflow.py decides
+    WHETHER the Availability step needs a County field - it owns the step
+    descriptors - but it must not import the markets layer, so it cannot fetch
+    the county list itself. This supplies it.
+
+    For every location with no county-dependent capacity this is
+    workflow.resolve() and nothing else: the step has no County field, the
+    fill is a no-op, and not a single market lookup happens.
+    """
+    descriptor = workflow.resolve(enrollment_id)
+    step = (descriptor or {}).get("step") or {}
+    if not any(f.get("name") == workflow.COUNTY_FIELD_NAME
+               for f in (step.get("fields") or [])):
+        return descriptor
+
+    capacity = adapter.latest_capacity_check(enrollment_id)
+    counties, source = _state_counties(capacity)
+    return workflow.fill_county_options(descriptor, counties, source)
+
+
+def _stored_savings_rate(enrollment):
+    """The savings rate already chosen for this enrollment, or None."""
+    try:
+        value = enrollment["selected_savings_percent"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _clear_rate_if_unavailable(enrollment_id, model, customer_type, county):
+    """Drop a stored savings rate the capacity no longer offers. Returns it.
+
+    Called whenever the PROGRAM or the COUNTY changes, because both decide
+    which rates apply. Leaving a stale rate behind would not be harmless: it
+    is re-validated at enroll, so the rep would be stopped at the end of the
+    wizard over a choice they made and then invalidated three screens ago.
+
+    Clearing rather than re-pointing is deliberate - the same rule the program
+    selection follows. UBS does not pick a replacement rate on the rep's
+    behalf.
+    """
+    row = query_one("SELECT selected_savings_percent FROM enrollments "
+                    "WHERE id = ?", (enrollment_id,))
+    current = row["selected_savings_percent"] if row else None
+    if current is None:
+        return None
+    offered = []
+    if customer_type:
+        program = adapter.program_for(model, customer_type, county=county)
+        offered = (program or {}).get("savings_percents") or []
+    if current in offered:
+        return None
+    execute("UPDATE enrollments SET selected_savings_percent = NULL, "
+            "updated_at = datetime('now') WHERE id = ?", (enrollment_id,))
+    return current
+
+
+def _stored_county(enrollment):
+    """The county the rep already chose for this enrollment, or None."""
+    try:
+        value = enrollment["service_county"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return (value or "").strip() or None
+
+
+def _capacity_state(capacity):
+    """The two-letter state a capacity check belongs to, or None.
+
+    Resolved from the ZIP, because the Availability step runs BEFORE any
+    service address exists - there is nothing else to ask. This is the same
+    resolution the step already uses to populate its utility dropdown, so a
+    ZIP the utility list could be built from is a ZIP the county list can be
+    built from too.
+    """
+    return zip_state.state_for_zip((capacity or {}).get("zip_code"))
+
+
+def _state_counties(capacity):
+    """(counties, source) for the state a capacity check belongs to.
+
+    THE ONE E2.1 ENTRY POINT to the county list: this feature reaches the
+    shared non-NY lookup here and nowhere else, so it adds one call site
+    rather than three. A failure yields an
+    empty list rather than an exception: every caller here has something
+    honest to do with "the question applies but there are no options", and
+    none of them should turn a market outage into a 500 in the middle of an
+    enrollment.
+    """
+    state = _capacity_state(capacity)
+    if not state:
+        return [], None
+    counties, source, err = _market_counties(state)
+    if err:
+        return [], None
+    return list(counties or []), source
+
+
+def _county_requirement(model, capacity):
+    """(county_required, county_options, county_source) for this capacity.
+
+    county_required is True only when the county genuinely CHANGES what can be
+    offered - see adapter.county_decides_options(). A location whose
+    restricted entries add nothing beyond the unrestricted ones never shows
+    the field, which is what keeps the Availability screen exactly as it was
+    for every market that has no county restrictions at all.
+
+    The options are Perch's OWN controlled list for the state
+    (GET /markets/counties, via the markets service, which falls back to the
+    local NY reference table when Perch is unreachable). The full state list,
+    not only the restricted counties: a customer in an unrestricted county
+    still has to be able to say where they are, and would otherwise be unable
+    to pick anything.
+
+    A lookup failure returns required=True with NO options rather than
+    pretending the question does not apply. Offering programs whose
+    availability depends on an answer that cannot be collected would be the
+    guess this whole mechanism exists to avoid.
+    """
+    if not adapter.county_decides_options(model):
+        return False, [], None
+
+    counties, source = _state_counties(capacity)
+    return True, counties, source
+
+
+@bp.route("/enrollments/<int:enrollment_id>/savings-rate", methods=["POST"])
+@require_auth
+@require_role("sales_rep", "admin")
+def select_enrollment_savings_rate(enrollment_id):
+    """Persist the savings rate the rep chose (E3).
+
+    Perch v2 can offer SEVERAL rates for one customer type, and POST /enroll
+    then requires one: "Optional when only one rate applies, required when
+    more than one does." This is where that choice is recorded.
+
+    VALIDATED against the rates Perch published for THIS enrollment's
+    customer_type and county, so a tampered client cannot store a rate that
+    was never offered - and the same validation runs again at enroll time,
+    because capacity moves.
+    """
+    enrollment, err = _visible(enrollment_id)
+    if err:
+        return err
+
+    # Same commit boundary as the program and the county. After /enroll the
+    # rate is part of what Perch accepted, and the record must keep explaining
+    # the enrollment that actually happened.
+    if workflow.perch_committed(enrollment_id):
+        audit.log("savings_rate_change_rejected_committed",
+                  enrollment_id=enrollment_id, user_id=g.current_user["id"],
+                  ip_address=request.remote_addr)
+        return jsonify({
+            "error": "This enrollment has already been submitted and the "
+                     "savings rate can no longer be changed.",
+            "committed": True,
+        }), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    raw = data.get("savings_percent")
+
+    if raw in (None, "", "null"):
+        execute("UPDATE enrollments SET selected_savings_percent = NULL, "
+                "updated_at = datetime('now'), updated_by_user_id = ? WHERE id = ?",
+                (g.current_user["id"], enrollment_id))
+        return jsonify({"enrollment_id": enrollment_id,
+                        "selected_savings_percent": None})
+
+    capacity = adapter.latest_capacity_check(enrollment_id)
+    if not capacity:
+        return jsonify({"error": "Run a capacity check before choosing a "
+                                 "savings rate."}), 400
+
+    selected_type = enrollment["selected_customer_type"]
+    if not selected_type:
+        return jsonify({"error": "Choose a savings program before choosing a "
+                                 "rate."}), 400
+
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Choose one of the savings rates shown."}), 400
+
+    model = adapter.capacity_model_for(capacity)
+    program = adapter.program_for(model, selected_type,
+                                  county=_stored_county(enrollment))
+    offered = (program or {}).get("savings_percents") or []
+    if value not in offered:
+        return jsonify({"error": "That savings rate is not available for this "
+                                 "customer. Choose one of the rates "
+                                 "shown."}), 400
+
+    execute("UPDATE enrollments SET selected_savings_percent = ?, "
+            "updated_at = datetime('now'), updated_by_user_id = ? WHERE id = ?",
+            (value, g.current_user["id"], enrollment_id))
+    audit.log("enrollment_savings_rate_selected", enrollment_id=enrollment_id,
+              user_id=g.current_user["id"],
+              details={"savings_percent": value,
+                       "customer_type": selected_type},
+              ip_address=request.remote_addr)
+    return jsonify({"enrollment_id": enrollment_id,
+                    "selected_savings_percent": value})
+
+
+@bp.route("/enrollments/<int:enrollment_id>/county", methods=["POST"])
+@require_auth
+@require_role("sales_rep", "admin")
+def select_enrollment_county(enrollment_id):
+    """Persist the customer's county for capacity filtering (E2.1).
+
+    The value is VALIDATED against Perch's controlled list for the state and
+    stored in Perch's spelling - a rep cannot free-type a county, and a
+    tampered client cannot store one Perch has never heard of. Matching is
+    case-insensitive; the stored value is not.
+
+    NOT SENT ANYWHERE YET. This filters capacity inside UBS. POST /enroll
+    carries no county until E3.
+    """
+    enrollment, err = _visible(enrollment_id)
+    if err:
+        return err
+
+    # Same commit boundary as the program choice, for the same reason: after
+    # /enroll the customer_type is fixed, and the county is what decided which
+    # ones were selectable. Letting it move afterwards would leave the stored
+    # program unexplainable by the stored county.
+    if workflow.perch_committed(enrollment_id):
+        audit.log("county_change_rejected_committed", enrollment_id=enrollment_id,
+                  user_id=g.current_user["id"], ip_address=request.remote_addr)
+        return jsonify({
+            "error": "This enrollment has already been submitted and the "
+                     "county can no longer be changed.",
+            "committed": True,
+        }), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    requested = (data.get("county") or "").strip()
+
+    capacity = adapter.latest_capacity_check(enrollment_id)
+    if not capacity:
+        return jsonify({"error": "Run a capacity check before choosing a county."}), 400
+
+    if not requested:
+        execute("UPDATE enrollments SET service_county = NULL, "
+                "updated_at = datetime('now'), updated_by_user_id = ? WHERE id = ?",
+                (g.current_user["id"], enrollment_id))
+        return jsonify({"enrollment_id": enrollment_id, "selected_county": None})
+
+    counties, _source = _state_counties(capacity)
+    if not counties:
+        return jsonify({"error": "The county list for this market is "
+                                 "unavailable right now. Re-check "
+                                 "availability and try again.",
+                        "market_data_unavailable": True}), 503
+
+    # Case-insensitive match, PERCH'S SPELLING stored. Virginia's independent
+    # cities carry a lowercase "city" suffix that Perch validates exactly.
+    canonical = next((c for c in counties
+                      if c.strip().lower() == requested.lower()), None)
+    if not canonical:
+        return jsonify({"error": "Select the customer's county from the list."}), 400
+
+    execute("UPDATE enrollments SET service_county = ?, "
+            "updated_at = datetime('now'), updated_by_user_id = ? WHERE id = ?",
+            (canonical, g.current_user["id"], enrollment_id))
+
+    # CHANGING THE COUNTY CAN INVALIDATE THE PROGRAM. A rep who picked a
+    # program under one county and then corrected the county must not be left
+    # holding a selection that county cannot support - that is precisely the
+    # stale state the selection rules forbid. The stored choice is cleared
+    # rather than silently re-pointed, so the rep chooses again from what is
+    # actually available.
+    cleared = None
+    previous = enrollment["selected_customer_type"]
+    model = adapter.capacity_model_for(capacity)
+    if previous:
+        still_offered = [p["customer_type"] for p in
+                         adapter.available_programs(model, county=canonical)]
+        if previous not in still_offered:
+            execute("UPDATE enrollments SET selected_customer_type = NULL, "
+                    "selected_savings_percent = NULL, "
+                    "updated_at = datetime('now') WHERE id = ?", (enrollment_id,))
+            cleared = previous
+
+    # E3: THE RATE DEPENDS ON THE COUNTY TOO. A county-restricted entry can
+    # publish rates the unrestricted one does not, so a rate chosen under one
+    # county may simply not exist under another. Cleared for the same reason
+    # the program is - a stored value the capacity no longer offers would be
+    # re-validated and refused at enroll, after the rep had moved on.
+    cleared_rate = _clear_rate_if_unavailable(enrollment_id, model,
+                                              (previous if not cleared else None),
+                                              canonical)
+
+    audit.log("enrollment_county_selected", enrollment_id=enrollment_id,
+              user_id=g.current_user["id"],
+              details={"county": canonical, "cleared_program": cleared,
+                       "cleared_savings_percent": cleared_rate},
+              ip_address=request.remote_addr)
+    return jsonify({"enrollment_id": enrollment_id,
+                    "selected_county": canonical,
+                    "cleared_program": cleared,
+                    "cleared_savings_percent": cleared_rate})
 
 
 @bp.route("/workflow/new", methods=["GET"])
@@ -1295,21 +1763,48 @@ def select_enrollment_program(enrollment_id):
     if not capacity:
         return jsonify({"error": "Run a capacity check before choosing a program."}), 400
 
-    details = capacity.get("project_details") or {}
+    # E2.1: a county-dependent location cannot have a program chosen until the
+    # county is known - the set of valid programs is not yet decided, so there
+    # is nothing to validate against.
+    model = adapter.capacity_model_for(capacity)
+    selected_county = _stored_county(enrollment)
+    county_required, _options, _source = _county_requirement(model, capacity)
+    if county_required and not selected_county:
+        return jsonify({
+            "error": "Select the customer's county before choosing a savings "
+                     "program.",
+            "county_required": True,
+        }), 400
+
     try:
-        # Reuses the SAME validator the enroll path uses, so the two can never
-        # disagree about what is selectable.
-        canonical, _reason = adapter.resolve_customer_type(details, requested=requested)
+        # Reuses the SAME validator the enroll path uses, on the SAME stored
+        # entry model and the SAME county, so the two can never disagree about
+        # what is selectable. A selection that passes here is therefore a
+        # selection that will still pass at enroll - which is what stops the UI
+        # and the backend from carrying different programs for one enrollment.
+        canonical, _reason = adapter.resolve_customer_type(
+            model, requested=requested, county=selected_county)
     except PerchValidationError as e:
         return jsonify({"error": str(e), "perch_error": "PerchValidationError"}), 400
 
     execute("UPDATE enrollments SET selected_customer_type = ?, "
             "updated_at = datetime('now'), updated_by_user_id = ? WHERE id = ?",
             (canonical, g.current_user["id"], enrollment_id))
+
+    # E3: a rate belongs to a PROGRAM. Switching programs makes the stored
+    # rate meaningless - 20% was the LMI rate, not the Residential one - so it
+    # is cleared unless the new program happens to offer the same number.
+    cleared_rate = _clear_rate_if_unavailable(enrollment_id, model, canonical,
+                                              selected_county)
+
     audit.log("enrollment_program_selected", enrollment_id=enrollment_id,
-              user_id=g.current_user["id"], details={"customer_type": canonical},
+              user_id=g.current_user["id"],
+              details={"customer_type": canonical,
+                       "cleared_savings_percent": cleared_rate},
               ip_address=request.remote_addr)
-    return jsonify({"enrollment_id": enrollment_id, "selected_customer_type": canonical})
+    return jsonify({"enrollment_id": enrollment_id,
+                    "selected_customer_type": canonical,
+                    "cleared_savings_percent": cleared_rate})
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1332,6 +1827,152 @@ def _self_attestation_row(enrollment_id):
                      "WHERE enrollment_id = ?", (enrollment_id,))
 
 
+def _blocked_guard(enrollment_id):
+    """Refuse to advance an enrollment whose workflow state is blocked.
+
+    Returns a (response, code) tuple to return, or None to continue.
+
+    Blocked states are settled outcomes with no path onward: the two
+    reconciliation states that already existed, plus lmi_not_qualified. For
+    lmi_not_qualified specifically this is the server-side half of the hard
+    stop - a client that skipped the UI message still cannot reach contracts.
+
+    No NY enrollment can be in lmi_not_qualified (NY publishes status values,
+    so it records its answer at Perch instead), and the two pre-existing
+    blocked states are unchanged, so this guard is a no-op for every
+    enrollment that reaches contracts today.
+    """
+    state = workflow.get_state(enrollment_id) or {}
+    key = state.get("current_step_key")
+    if not key or not workflow.is_blocked(key):
+        return None
+    if key == "lmi_not_qualified":
+        return jsonify({
+            "error": ("This customer does not qualify for the community solar "
+                      "program currently available in their area. The enrollment "
+                      "cannot continue."),
+            "not_qualified": True,
+            "next_step_key": key,
+        }), 409
+    return jsonify({
+        "error": f"This enrollment needs review before it can continue "
+                 f"({workflow.step_label(key)}).",
+        "next_step_key": key,
+    }), 409
+
+
+def _enrollment_state(enrollment):
+    """Two-letter state for this enrollment, from its service address.
+
+    Returns None when no service address has been captured yet. Callers treat
+    None the way they always have: as the existing single-market behaviour.
+    """
+    if not enrollment or not enrollment["service_address_id"]:
+        return None
+    row = query_one("SELECT state FROM service_addresses WHERE id = ?",
+                    (enrollment["service_address_id"],))
+    st = ((row["state"] if row else "") or "").strip().upper()
+    return st or None
+
+
+def _authoritative_county(enrollment):
+    """(county, locked) - the county this enrollment is BOUND to, if any.
+
+    E3.1. From the moment a v2 enrollment is submitted with a `county`, that
+    county is the only one this enrollment has. Perch stores it and reuses it
+    for the self-attestation, so every county-dependent decision UBS makes
+    afterwards - which income limits apply, above all - has to be made against
+    the SAME county, or UBS and Perch end up disagreeing about who is
+    eligible.
+
+    The failure this prevents is specific and quiet: enrolled under county A,
+    income limits read against county B, both sides internally consistent and
+    nobody notified. An earlier draft logged a warning and carried on, which
+    is not a safeguard - it is a record of the mismatch after it happened.
+
+    locked is True only when BOTH hold:
+      * a county is stored on the enrollment, and
+      * the enrollment was validated against a V2 capacity response.
+
+    v1 is excluded deliberately. v1's /enroll has no county field, so a county
+    stored on a v1 enrollment never reached Perch, Perch holds none, and the
+    self-attestation must still collect and send one. Nothing about the v1
+    path changes.
+
+    Read from the stored capacity SHAPE rather than the environment flag, for
+    the same reason every other E2/E3 decision is: a flag flipped after the
+    enrollment was submitted must not retroactively change what UBS believes
+    it sent.
+    """
+    if not enrollment:
+        return None, False
+    county = _stored_county(enrollment)
+    if not county:
+        return None, False
+    try:
+        enrollment_id = enrollment["id"]
+    except (KeyError, IndexError, TypeError):
+        return county, False
+    check = adapter.latest_capacity_check(enrollment_id)
+    if not check:
+        return county, False
+    shape = adapter.capacity_model_for(check).shape
+    return county, shape == capacity.SHAPE_V2_ENTRIES
+
+
+def _market_counties(state, with_state_in_error=False):
+    """Perch's controlled county list for a NON-NY market.
+
+    Returns (counties, source, error). `error` is a ready (response, status)
+    pair when the lookup failed and None otherwise, so each caller returns it
+    unchanged and the two endpoints keep byte-identical error payloads - the
+    reference endpoint includes `state`, the submit path does not, which is
+    what `with_state_in_error` selects.
+
+    ONLY THE MARKET LOOKUP IS SHARED. Each caller keeps its own NY branch on
+    purpose: the reference endpoint lists every active ny_counties row, while
+    the submit path does an exact-match existence check against that table.
+    Folding those together would quietly make the live NY path
+    case-insensitive, which is a change to a production market and not part of
+    adding Virginia.
+    """
+    try:
+        found = markets.counties(state)
+    except markets.MarketDataUnavailable as e:
+        payload = {"error": str(e), "market_data_unavailable": True}
+        if with_state_in_error:
+            payload["state"] = state
+        return None, None, (jsonify(payload), 503)
+    except PerchValidationError as e:
+        payload = {"error": str(e)}
+        if with_state_in_error:
+            payload["state"] = state
+        return None, None, (jsonify(payload), 400)
+    return found["counties"], found["source"], None
+
+
+def _sends_status(state):
+    """Does this market's self-attestation payload carry a `status` key?
+
+    Read from the market's own self_attestation_options - never from a state
+    comparison. NY publishes ["accepted", "rejected"] so it keeps sending
+    status; VA publishes [] so the key is omitted.
+
+    FAILS SAFE TOWARD TODAY'S BEHAVIOUR. If the market layer cannot answer
+    (outage, or mock mode which has no NY market data), this returns True, which
+    is exactly what this route has always required. So an NY enrollment is never
+    altered by a market-data problem, and a market that genuinely has no status
+    field stops rather than proceeding on a guess - its county list and income
+    limits would be unavailable in that situation anyway.
+    """
+    if not state:
+        return True
+    try:
+        return bool(markets.self_attestation_options(state)["status"])
+    except (markets.MarketDataUnavailable, PerchValidationError):
+        return True
+
+
 @bp.route("/enrollments/<int:enrollment_id>/lmi/self-attestation/reference", methods=["GET"])
 @require_auth
 @require_role("sales_rep", "admin")
@@ -1341,23 +1982,95 @@ def self_attestation_reference(enrollment_id):
     Served from the DB so the values are versioned and updatable by migration -
     never hardcoded in the frontend. Side-effect free.
     """
-    _enrollment, err = _visible(enrollment_id)
+    enrollment, err = _visible(enrollment_id)
     if err:
         return err
+
+    state = _enrollment_state(enrollment)
+    sends_status = _sends_status(state)
+    existing = _self_attestation_row(enrollment_id)
+
+    # ── COUNTY LIST ───────────────────────────────────────────────────────
+    # NY keeps reading ny_counties. That table has backed the live NY dropdown
+    # since migration 009 and is already reconciled with Perch in production;
+    # repointing a live market's controlled list at a different source is a
+    # change of its own, not something to fold into adding Virginia. Every
+    # other market reads Perch, which is the only place its counties exist.
+    #
+    # The state comparison is deliberate conservatism rather than a derived
+    # rule. It appears at TWO call sites in this file - here and in the
+    # self-attestation submit path below - and both route the non-NY lookup
+    # through _market_counties() so the Perch call and its status mapping exist
+    # once. The NY branches stay separate by design; see that helper. Moving NY
+    # onto markets.counties() - which already falls back to this very table -
+    # is the obvious follow-up now that VA HAS been exercised end to end: Perch
+    # updated staging, the VA state LMI self-attestation flow was tested
+    # successfully, and Perch confirmed Virginia can move toward production
+    # (2026-10-27). That consolidation is a change of its own and is not folded
+    # in here.
+    if state and state != "NY":
+        counties, counties_source, err = _market_counties(
+            state, with_state_in_error=True)
+        if err:
+            return err
+    else:
+        counties = [r["name"] for r in
+                    query("SELECT name FROM ny_counties WHERE is_active = 1 ORDER BY name")]
+        counties_source = "ny_counties"
+
+    # ── INCOME LIMITS ─────────────────────────────────────────────────────
+    # NY publishes ONE statewide 80%-SMI table, versioned locally, so the whole
+    # table ships with this response as it always has.
+    #
+    # Virginia's limits are PER COUNTY, so there is no table to ship: the
+    # frontend reads them from GET /api/markets/county-income-limits once a
+    # county is chosen. `income_basis` tells it which shape to expect, so the
+    # frontend never has to know a state name either.
     version = query_one("SELECT * FROM perch_lmi_threshold_versions "
                         "WHERE is_active = 1 ORDER BY created_at DESC LIMIT 1")
-    if not version:
+    statewide = version is not None and counties_source == "ny_counties"
+    if statewide:
+        rows = query("SELECT occupancy, income_level_cents FROM perch_lmi_income_thresholds "
+                     "WHERE version_label = ? AND is_active = 1 ORDER BY occupancy",
+                     (version["version_label"],))
+    else:
+        rows = []
+    if counties_source == "ny_counties" and not version:
+        # Unchanged behaviour for the live market: without the versioned table
+        # the NY form cannot be rendered honestly.
         return jsonify({"error": "No active income-threshold table is configured."}), 500
-    rows = query("SELECT occupancy, income_level_cents FROM perch_lmi_income_thresholds "
-                 "WHERE version_label = ? AND is_active = 1 ORDER BY occupancy",
-                 (version["version_label"],))
-    counties = [r["name"] for r in
-                query("SELECT name FROM ny_counties WHERE is_active = 1 ORDER BY name")]
-    existing = _self_attestation_row(enrollment_id)
+
+    # E3.1 - THE ENROLLED COUNTY WINS.
+    #
+    # A v2 enrollment that was submitted with a county is BOUND to it: Perch
+    # stored it and will reuse it for this attestation, so offering the rep a
+    # list here would be offering them a way to make UBS's income test
+    # disagree with the enrollment Perch actually created. The list collapses
+    # to that one county and the frontend renders it as a fixed value.
+    #
+    # v1 and any enrollment with no stored county are untouched: `locked` is
+    # False, the full controlled list is returned, and the form behaves
+    # exactly as it did.
+    bound_county, county_locked = _authoritative_county(enrollment)
+    if county_locked:
+        counties = [bound_county]
+
     return jsonify({
-        "version_label": version["version_label"],
-        "source_document": version["source_document"],
-        "table_caption": version["table_caption"],
+        "state": state,
+        # Whether the payload carries `status`, derived from the market's own
+        # options. The frontend asks the above/below question when true and the
+        # qualification question when false.
+        "sends_status": sends_status,
+        "income_basis": "statewide_table" if statewide else "per_county",
+        "counties_source": counties_source,
+        # E3.1: the county this enrollment is bound to, and whether it may be
+        # changed here. When locked, the income limits MUST be read against
+        # this county - it is the one Perch enrolled the customer under.
+        "county": bound_county,
+        "county_locked": county_locked,
+        "version_label": version["version_label"] if statewide else None,
+        "source_document": version["source_document"] if statewide else None,
+        "table_caption": version["table_caption"] if statewide else None,
         "thresholds": [{"occupancy": r["occupancy"],
                         "income_level_cents": r["income_level_cents"]} for r in rows],
         "counties": counties,
@@ -1392,24 +2105,120 @@ def generate_self_attestation(enrollment_id):
     data = request.get_json(force=True, silent=True) or {}
     occupancy = data.get("occupancy")
     county = (data.get("county") or "").strip()
-    status = (data.get("status") or "").strip()
+
+    state = _enrollment_state(enrollment)
+    sends_status = _sends_status(state)
 
     # ---- validate against the CONTROLLED sources, before touching Perch ----
     try:
         occupancy = int(occupancy)
     except (TypeError, ValueError):
         return jsonify({"error": "Select the number of people living in the home."}), 400
-    if not query_one("SELECT 1 FROM perch_lmi_income_thresholds "
-                     "WHERE occupancy = ? AND is_active = 1", (occupancy,)):
-        # The published table covers 1-8, matching the documented range.
+    # 1-8 is the documented range for every market, so this bound is checked
+    # against the local table for NY and against the range itself elsewhere -
+    # the VA limits live per-county at Perch, not in this table.
+    if sends_status or (state or "NY") == "NY":
+        if not query_one("SELECT 1 FROM perch_lmi_income_thresholds "
+                         "WHERE occupancy = ? AND is_active = 1", (occupancy,)):
+            # The published table covers 1-8, matching the documented range.
+            return jsonify({"error": "Household size must be between 1 and 8."}), 400
+    elif not 1 <= occupancy <= 8:
         return jsonify({"error": "Household size must be between 1 and 8."}), 400
-    if not county or not query_one("SELECT 1 FROM ny_counties WHERE name = ? AND is_active = 1",
-                                   (county,)):
+
+    # ---- county: THE ENROLLED ONE, when there is one (E3.1) ---------------
+    #
+    # A v2 enrollment submitted with a county is bound to it. Perch stored it
+    # and will use it for this attestation whatever is sent here, so UBS must
+    # make its own eligibility decision against the SAME county - otherwise
+    # the income limits are read for one county while the customer is enrolled
+    # under another, and both halves look correct in isolation.
+    #
+    # A submitted county that DISAGREES is refused rather than reconciled.
+    # Silently preferring one would be choosing which county the customer
+    # lives in, which is not UBS's to choose, and silently preferring the
+    # other would re-create the mismatch. The realistic cause is a stale form
+    # left open across a county change, so the message says to reload.
+    bound_county, county_locked = _authoritative_county(enrollment)
+    if county_locked:
+        if county and county.strip().lower() != bound_county.strip().lower():
+            audit.log("self_attestation_county_conflict",
+                      enrollment_id=enrollment_id, user_id=g.current_user["id"],
+                      details={"submitted": county, "enrolled": bound_county},
+                      ip_address=request.remote_addr)
+            return jsonify({
+                "error": "This enrollment was submitted for "
+                         f"{bound_county}, so the eligibility check has to "
+                         "use that county. Reload this page to continue.",
+                "county_conflict": True,
+                "enrolled_county": bound_county,
+            }), 409
+        county = bound_county
+
+    # ---- county: a controlled list, from whichever source owns this market ---
+    # Perch 422s on free text, so the value must come from a list we fetched.
+    # The NY branch is the original query, unchanged. The bound county above
+    # is validated by exactly the same rules - it came from this list when the
+    # rep chose it on Availability, and is re-checked here rather than trusted
+    # because the controlled list is what Perch validates against.
+    if state and state != "NY":
+        allowed, _source, err = _market_counties(state)
+        if err:
+            return err
+        # Matched case-insensitively, then SENT AS PERCH SPELLS IT. Virginia's
+        # independent cities ("Alexandria city") must not be title-cased or
+        # re-suffixed on the way through.
+        match = next((c for c in allowed if c.lower() == county.lower()), None)
+        if not match:
+            return jsonify({"error": f"Select a {state} county from the list."}), 400
+        county = match
+    elif not county or not query_one(
+            "SELECT 1 FROM ny_counties WHERE name = ? AND is_active = 1", (county,)):
         # Controlled list only - Perch validates county and would 422 on free text.
         return jsonify({"error": "Select a New York county from the list."}), 400
-    if status not in ("accepted", "rejected"):
-        return jsonify({"error": "Select whether the household income is at or below, "
-                                 "or above, the level shown."}), 400
+
+    # ---- the income answer ------------------------------------------------
+    # Two shapes, chosen by whether the market HAS a status field:
+    #
+    #   status field exists (NY)  -> `status`, "accepted" or "rejected", sent on
+    #                                to Perch exactly as before.
+    #   no status field (VA)      -> `qualifies`, true or false, which Perch
+    #                                never sees. Perch has no way to express
+    #                                "does not qualify", so a false answer must
+    #                                stop the enrollment HERE.
+    if sends_status:
+        status = (data.get("status") or "").strip()
+        if status not in ("accepted", "rejected"):
+            return jsonify({"error": "Select whether the household income is at or below, "
+                                     "or above, the level shown."}), 400
+    else:
+        status = None
+        qualifies = data.get("qualifies")
+        if not isinstance(qualifies, bool):
+            return jsonify({"error": "Confirm whether the household meets the income "
+                                     "requirement shown."}), 400
+        if not qualifies:
+            # HARD STOP. No Perch call is made - not /lmi/self_attestation, not
+            # /accept, not /contracts. Nothing is written to
+            # perch_self_attestation_submissions either, because no attestation
+            # was submitted; the decision lives in the workflow state, which is
+            # what the contracts route checks.
+            workflow.set_state(enrollment_id, "lmi_not_qualified", recognized=False,
+                               last_response={"not_qualified": True,
+                                              "occupancy": occupancy,
+                                              "county": county})
+            audit.log("perch_self_attestation_not_qualified",
+                      enrollment_id=enrollment_id, user_id=g.current_user["id"],
+                      details={"occupancy": occupancy, "county": county,
+                               "state": state},
+                      ip_address=request.remote_addr)
+            return jsonify({
+                "not_qualified": True,
+                "next_step_key": "lmi_not_qualified",
+                "message": ("This customer does not qualify for the community solar "
+                            "program currently available in their area, which requires "
+                            "household income at or below the published limit. The "
+                            "enrollment cannot continue."),
+            })
 
     account = query_one("SELECT ua.account_number FROM utility_accounts ua "
                         "JOIN enrollments e ON e.utility_account_id = ua.id WHERE e.id = ?",
@@ -1431,9 +2240,9 @@ def generate_self_attestation(enrollment_id):
         return jsonify({"error": str(e), "perch_error": type(e).__name__}), getattr(
             e, "http_status", 502)
 
-    step_key, recognized = _next_key(result.get("next_step_url"))
+    step_key, recognized = _next_key_of(result)
     workflow.set_state(enrollment_id, step_key or "unknown_next_step",
-                       next_step_url=result.get("next_step_url"), recognized=recognized)
+                       next_step_url=_next_step_raw(result), recognized=recognized)
 
     # LEDGER. document_url_returned is a BOOLEAN - the presigned URL is not stored.
     if existing:
@@ -1504,9 +2313,9 @@ def generate_self_attestation(enrollment_id):
             return jsonify({"error": str(e), "perch_error": type(e).__name__,
                             "document_prepared": True}), getattr(e, "http_status", 502)
 
-        step_key, recognized = _next_key(accept_result.get("next_step_url"))
+        step_key, recognized = _next_key_of(accept_result)
         workflow.set_state(enrollment_id, step_key or "unknown_next_step",
-                           next_step_url=accept_result.get("next_step_url"),
+                           next_step_url=_next_step_raw(accept_result),
                            recognized=recognized)
         execute("""UPDATE perch_self_attestation_submissions
                    SET accepted_at=datetime('now'), accepted_next_step=?,
@@ -1557,7 +2366,8 @@ def customer_self_attestation_document(enrollment_id):
 
     url = ((result.get("raw") or {}).get("self_attestation") or {}).get("url")
     if not url:
-        return jsonify({"error": "Perch did not return the self-attestation document."}), 502
+        return jsonify({"error": "The self-attestation document could not be opened "
+                                 "right now. Please try again."}), 502
     response = jsonify({
         "document_url": url,          # handed to the browser, never persisted
         "already_accepted": bool(row["accepted_at"]),
@@ -1578,6 +2388,12 @@ def accept_self_attestation(enrollment_id):
     _enrollment, err = _visible_to_actor(enrollment_id)
     if err:
         return err
+    # A not-qualified enrollment has no attestation row at all, so the next
+    # check would already stop it. This one makes the reason explicit rather
+    # than reporting "not prepared yet" for something that will never be.
+    blocked = _blocked_guard(enrollment_id)
+    if blocked:
+        return blocked
 
     row = _self_attestation_row(enrollment_id)
     if not row or not row["generated_at"]:
@@ -1611,9 +2427,9 @@ def accept_self_attestation(enrollment_id):
         return jsonify({"error": str(e), "perch_error": type(e).__name__}), getattr(
             e, "http_status", 502)
 
-    step_key, recognized = _next_key(result.get("next_step_url"))
+    step_key, recognized = _next_key_of(result)
     workflow.set_state(enrollment_id, step_key or "unknown_next_step",
-                       next_step_url=result.get("next_step_url"), recognized=recognized)
+                       next_step_url=_next_step_raw(result), recognized=recognized)
     execute("""UPDATE perch_self_attestation_submissions
                SET accepted_at=datetime('now'), accepted_next_step=?,
                    updated_at=datetime('now')

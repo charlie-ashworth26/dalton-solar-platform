@@ -83,10 +83,11 @@ console.log('='.repeat(72));
   const okV=vm.runInContext('validateProgramSelection();',e.ctx);
   check('validation blocks', okV===false);
   const perr=e.cache.get('program-error');
-  check('  ...error shown in #program-error', perr.style.display==='block');
+  check('  ...error shown in #program-error', perr.style.display!=='none'
+    && !!perr.textContent);
   check('  ...with actionable wording', /Choose which program/i.test(perr.textContent));
   check('  ...NOT dumped in the page-bottom error',
-    ((e.cache.get('bill-submit-error')||{style:{}}).style.display||'')!=='block');
+    !((e.cache.get('bill-submit-error')||{textContent:''}).textContent));
   check('  ...and the program area is scrolled into view',
     (e.cache.get('program-options')||{}).scrolled===true);
   check('submitBill validates the program before anything else',

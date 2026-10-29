@@ -1,11 +1,12 @@
 """
 HMAC-SHA256 request authentication for Perch.
 
-Required for exactly three endpoints (OpenAPI spec, "Authentication and
-Authorization"):
+Required for (OpenAPI spec, "Authentication and Authorization"):
     POST  /token
     PATCH /refresh_token
-    GET   /markets/capacity
+    GET   /markets/*      (capacity, utilities, utility_account_fields,
+                           counties, counties/income_limits,
+                           self_attestation_options)
 
 Enrollment-session endpoints (Check Capacity through Submit Contracts
 Acceptance, plus GET /status) use X-Enrollment-Token instead and must NOT
@@ -16,9 +17,14 @@ Signing procedure, verbatim from the spec:
     Step 1 - Serialise the request body
       * POST /token, PATCH /refresh_token: compact JSON, no extra whitespace,
         UTF-8 encoded.
-      * GET /markets/capacity (no body): the canonical query string -
-        key=value pairs joined with '&', sorted alphabetically by key.
+      * GET /markets/* (no body): the canonical query string - key=value
+        pairs joined with '&', sorted alphabetically by key, with the RAW
+        (not URL-encoded) values.
         e.g. utility_name=consolidated-edison-ny&zip_code=10001
+        e.g. county=Martinsville city&state=VA   <- a space stays a space
+        The SIGNED string and the TRANSMITTED string therefore differ
+        whenever a value needs percent-encoding. See canonical_query_string()
+        (signed) vs encoded_query_string() (sent).
     Step 2 - Unix timestamp, within +/-5 minutes of server time
     Step 3 - signed_payload = timestamp + "\n" + request_body
     Step 4 - hex_signature = lowercase_hex(hmac_sha256(secret, signed_payload))
@@ -33,7 +39,7 @@ import hashlib
 import hmac
 import json
 import time
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 # Spec header names, exactly as published. HTTP headers are case-insensitive
 # per RFC 7230, but these are reproduced verbatim so a reviewer comparing
@@ -60,17 +66,49 @@ def compact_json(payload: dict) -> str:
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
-def canonical_query_string(params: dict) -> str:
-    """Step 1 for GET /markets/capacity: key=value pairs joined with '&',
-    sorted alphabetically by key.
+def _sorted_items(params: dict):
+    """Shared ordering for both query-string forms, so they correspond
+    key-for-key. None values are dropped, never sent as the string 'None'."""
+    return sorted((str(k), str(v)) for k, v in params.items() if v is not None)
 
-    The spec's example is `utility_name=consolidated-edison-ny&zip_code=10001`
-    and states "this exact string is both signed and sent" - so the caller must
-    append this same string to the URL rather than letting a client library
-    re-encode the params in a different order.
+
+def canonical_query_string(params: dict) -> str:
+    """Step 1 for GET /markets/*: the string that is SIGNED.
+
+    key=value pairs joined with '&', sorted alphabetically by key, with RAW
+    (not URL-encoded) values.
+
+    Spec, "Generating the HMAC Signature":
+        "the canonical query string - key=value pairs joined with &, sorted
+         alphabetically by key, with the raw (not URL-encoded) values."
+    and on GET /markets/counties/income_limits:
+        "the value is signed as-is, not URL-encoded (a space stays a space)."
+
+    This is NOT what goes on the wire - see encoded_query_string(). For the
+    existing NY call (zip_code + utility slug) the two are byte-identical,
+    because no value contains a character that needs encoding; they diverge for
+    every multi-word county name.
+
+    CONFIRMED AGAINST PERCH STAGING 2026-10-25, county=Martinsville city&state=VA:
+        signed raw              -> HTTP 200
+        signed urlencode()      -> HTTP 401
+    This function previously returned urlencode(items), which is the 401 case.
+    Do not "simplify" it back.
     """
-    items = sorted((str(k), str(v)) for k, v in params.items() if v is not None)
-    return urlencode(items)
+    return "&".join(f"{k}={v}" for k, v in _sorted_items(params))
+
+
+def encoded_query_string(params: dict) -> str:
+    """The string that is TRANSMITTED, percent-encoded.
+
+    Sorted identically to canonical_query_string so signature and wire form
+    correspond key-for-key.
+
+    quote (space -> %20), not urlencode's default quote_plus (space -> '+'):
+    %20 is the form the spec's own `curl --data-urlencode` examples produce and
+    the form confirmed working against staging.
+    """
+    return urlencode(_sorted_items(params), quote_via=quote)
 
 
 def build_signed_payload(timestamp: str, request_body: str) -> str:
@@ -115,21 +153,27 @@ def sign_json_request(api_key: str, secret_key: str, payload: dict, timestamp: s
 
 
 def sign_query_request(api_key: str, secret_key: str, params: dict, timestamp: str = None):
-    """Signs a query-string request (GET /markets/capacity).
+    """Signs a query-string request (GET /markets/*).
 
-    Returns (headers, query_string). Per the spec, Content-Type is NOT sent for
-    this call (no request body), and the returned query string must be appended
-    to the URL exactly as-is.
+    Returns (headers, query_string) where:
+      * the signature is computed over the RAW canonical string, and
+      * query_string is the PERCENT-ENCODED form, to be appended to the URL.
+
+    The caller appends the returned string as-is and must not let a client
+    library re-encode or reorder the params - re-encoding '%20' or reordering
+    the keys invalidates the signature.
+
+    Per the spec, Content-Type is NOT sent for this call (no request body).
     """
     ts = timestamp or current_timestamp()
-    qs = canonical_query_string(params)
-    signature = compute_signature(secret_key, build_signed_payload(ts, qs))
+    signed = canonical_query_string(params)
+    signature = compute_signature(secret_key, build_signed_payload(ts, signed))
     headers = {
         HEADER_API_KEY: api_key,
         HEADER_SIGNATURE: signature,
         HEADER_TIMESTAMP: ts,
     }
-    return headers, qs
+    return headers, encoded_query_string(params)
 
 
 def verify_signature(secret_key: str, signed_payload: str, provided_signature: str) -> bool:

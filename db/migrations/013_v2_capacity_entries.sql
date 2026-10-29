@@ -1,0 +1,60 @@
+-- Perch API v2 capacity: entry-shaped project_details.
+--
+-- WHY THE EXISTING COLUMNS ARE NOT ENOUGH
+--
+-- perch_capacity_checks was built for the v1 capacity response, which was one
+-- flat object: three booleans, a proof-docs flag, and two scalar savings
+-- rates. Each of those became one column, and that was a faithful model of
+-- what Perch sent.
+--
+-- The v2 response is an ARRAY. Three things about it cannot be stored in flat
+-- columns at all:
+--
+--   1. A customer type can appear SEVERAL TIMES, once per distinct set of
+--      county restrictions. `residential_capacity_available INTEGER` has room
+--      for one answer; v2 can return "available in Aspen and Boulder" AND
+--      "available anywhere" as separate facts about the same type.
+--   2. `savings_percents` is an ARRAY. `savings_percent_res_commercial REAL`
+--      holds one number; v2 can offer [5.0, 10.0], or none at all.
+--   3. There are now FIVE capacity types, not three, and `lmi` and `lmi_ira`
+--      are distinct. The old `proof_documents_required` boolean was the only
+--      hint that IRA LMI existed.
+--
+-- ── ADDITIVE ONLY. NOTHING IS DROPPED, REWRITTEN OR BACKFILLED. ───────────
+--
+-- This migration adds two columns and nothing else. It contains no UPDATE, no
+-- DELETE, no table rebuild and no backfill, so:
+--
+--   * every existing capacity row is untouched and still readable by exactly
+--     the code that read it yesterday;
+--   * the v1 flat columns REMAIN and remain populated on v1 responses, so an
+--     environment still running PERCH_API_VERSION=v1 behaves identically;
+--   * raw_response_json REMAINS the faithful copy of the wire response and is
+--     still the diagnostic record of record.
+--
+-- WHY NO BACKFILL: a historical row holds a v1 response. Synthesizing v2
+-- entries for it would write a shape Perch never sent into a table whose
+-- purpose is to record what Perch sent. The synthesis is done in memory at
+-- read time instead (services/perch/capacity.py::_parse_v1_flat), where it is
+-- clearly a translation rather than a stored fact. Old rows therefore keep
+-- capacity_entries_json NULL, and the hydration path falls back to the flat
+-- columns for them - which is why those columns are kept rather than retired.
+
+-- The normalized capacity model as JSON:
+--   {"shape": "v2_entries" | "v1_flat",
+--    "entries": [{"capacity_type", "county_restriction", "capacity_available",
+--                 "capacity_available_kw", "savings_percents"}, ...],
+--    "v1_proof_documents_required": bool | null}
+--
+-- JSON rather than a child table on purpose. These entries are read as one
+-- whole, always for a single capacity check, and are never queried across
+-- rows or joined - the same reason raw_response_json is a column. A child
+-- table would add a second write path and a cascade to the capacity flow
+-- without answering a question anyone asks.
+ALTER TABLE perch_capacity_checks ADD COLUMN capacity_entries_json TEXT;
+
+-- Which wire shape produced this row: 'v1_flat', 'v2_entries', 'empty'.
+-- Recorded rather than inferred from the version flag at read time, because
+-- the flag can be changed between the write and the read, and a row must keep
+-- saying which shape it actually came from.
+ALTER TABLE perch_capacity_checks ADD COLUMN capacity_shape TEXT;

@@ -9,6 +9,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _ubs_test_db  # noqa: F401  - throwaway database; see test/_ubs_test_db.py
 os.environ.setdefault("PERCH_API_MODE", "mock")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -71,7 +72,10 @@ import sys; sys.path.insert(0,'.')
 from db import DB_PATH, init_db, get_db
 from app import app
 print("DB", DB_PATH)
-init_db(reset=True)
+# NON-destructive, exactly as create_app() calls it. A deployment must
+# never reset the database it is configured to use; db.assert_reset_allowed
+# refuses that, and the check below proves it.
+init_db()
 import os
 print("EXISTS", os.path.exists(DB_PATH))
 with app.app_context():
@@ -96,12 +100,44 @@ with app.app_context():
         check("busy timeout defaults to 5000ms", int(o["BUSY"]) == 5000)
         check("foreign keys still enforced", o["FK"] == "1")
 
+        section("THE CONFIGURED DEPLOYMENT DATABASE CANNOT BE ERASED")
+        # On a hosted instance DALTON_DB_PATH points at the live database
+        # (/var/data/dalton_solar.db on Render). A destructive reset of it -
+        # from a stray script, a mis-set flag, a start command - must fail.
+        r = run_py("""
+import sys; sys.path.insert(0,'.')
+import db
+try:
+    db.init_db(reset=True)
+    print("RESULT wiped")
+except db.DatabaseResetRefused:
+    print("RESULT refused")
+""", env={"DALTON_DB_PATH": target})
+        check("a reset of the configured database is refused",
+              "RESULT refused" in r.stdout)
+        check("  ...and the database is still there", os.path.exists(target))
+
+        # Same command on a hosting platform: refused even WITH the opt-in.
+        r = run_py("""
+import sys; sys.path.insert(0,'.')
+import db
+try:
+    db.init_db(reset=True)
+    print("RESULT wiped")
+except db.DatabaseResetRefused:
+    print("RESULT refused")
+""", env={"DALTON_DB_PATH": target, "RENDER": "true",
+          "UBS_ALLOW_DB_RESET": "1"})
+        check("on a hosting platform the opt-in does not unlock it",
+              "RESULT refused" in r.stdout)
+        check("  ...and the database is still there", os.path.exists(target))
+
     with tempfile.TemporaryDirectory(prefix="dalton_db2_") as tmp:
         r = run_py(f"""
 import sys; sys.path.insert(0,'.')
 from db import init_db, get_db, SQLITE_BUSY_TIMEOUT_MS
 from app import app
-init_db(reset=True)
+init_db()
 with app.app_context():
     print("BUSY", get_db().execute("PRAGMA busy_timeout").fetchone()[0])
 print("CONST", SQLITE_BUSY_TIMEOUT_MS)
@@ -187,7 +223,11 @@ print("UNDER_DATA_DIR", abs_path.startswith({tmp!r}))
 v = c.get(f'/api/enrollments/{{eid}}/documents/{{did}}/view', headers=h)
 print("VIEW", v.status_code)
 print("BYTES_MATCH", v.data == png)
-""", env={"DALTON_DATA_DIR": tmp, "DALTON_DB_PATH": os.path.join(tmp, "d.db")})
+""", env={"DALTON_DATA_DIR": tmp, "DALTON_DB_PATH": os.path.join(tmp, "d.db"),
+          # seed() resets the database it is pointed at, and the reset
+          # guard refuses that by default. This one is a throwaway file
+          # in a temp dir, so the opt-in is scoped to this subprocess.
+          "UBS_ALLOW_DB_RESET": "1"})
         check("full upload flow works with overrides", r.returncode == 0)
         o = dict(l.split(" ", 1) for l in r.stdout.strip().splitlines() if " " in l)
         check("stored_path stays RELATIVE in the database",
@@ -413,6 +453,10 @@ print("FACTORY", hasattr(m, 'create_app'))
     # sqlite connection open. POSIX allows unlink on an open file so it was
     # invisible; on Windows the NEXT suite's init_db(reset=True) failed with
     # WinError 32, and WAL made it worse by holding -wal/-shm too.
+    # It runs against a TEMP database, never the repo one: the probe ends by
+    # deleting the file it is pointed at, and the repo path is the real
+    # application database. (This suite used to point it there.)
+    _probe_dir = tempfile.mkdtemp(prefix='dalton_lifecycle_')
     rr = run_py("""
 import sys, gc, sqlite3, os; sys.path.insert(0,'.')
 import db
@@ -436,7 +480,8 @@ print("LEAKED_AFTER", hasattr(db._local, "conn"))
 print("USABLE_AFTER", usable())
 os.remove(db.DB_PATH)                      # the operation that failed on Windows
 print("REMOVED", not os.path.exists(db.DB_PATH))
-""")
+""", env={"DALTON_DB_PATH": os.path.join(_probe_dir, "lifecycle.db"),
+          "UBS_ALLOW_DB_RESET": "1"})
     check("the lifecycle probe runs", rr.returncode == 0)
     o = dict(l.split(" ", 1) for l in rr.stdout.strip().splitlines() if " " in l)
     check("a bare query DOES cache a connection", o.get("LEAKED_BEFORE") == "True")

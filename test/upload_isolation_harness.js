@@ -69,7 +69,10 @@ check('  ...and its set id cleared', run(`DocSets.utility_bill.id`)===null);
 check('DocSets lmi_document emptied', run(`DocSets.lmi_document.files.length`)===0);
 check('  ...and its set id cleared', run(`DocSets.lmi_document.id`)===null);
 check('state.bill cleared', run(`state.bill.documentId`)===null && run(`state.bill.fileName`)==='');
-check('  ...amount cleared', run(`state.bill.amount`)==='');
+// state.bill.amount no longer exists: bill amount is not part of this
+// workflow, so the property was removed rather than reset to ''.
+check('  ...and carries no bill amount at all',
+  run(`state.bill.amount`)===undefined);
 check('state.lmi cleared',
   run(`state.lmi.documentId`)===null && run(`state.lmi.fileName`)==='');
 check('the visible bill list is empty',

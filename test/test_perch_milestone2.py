@@ -11,6 +11,7 @@ import sys, os, json
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _ubs_test_db  # noqa: F401  - throwaway database; see test/_ubs_test_db.py
 os.environ["PERCH_API_MODE"] = "mock"
 
 from app import app
@@ -275,8 +276,14 @@ def main():
     check("capacity_available is False", b["result"]["capacity_available"] is False)
     check("no project_details when there is no capacity", b["result"]["project_details"] is None)
     check("workflow moves to the no_capacity step", b["workflow"]["step"]["key"] == "no_capacity")
+    # D-2: the panel no longer says "Perch returned 503 ... must not be
+    # submitted". The rep is still told the enrollment cannot go ahead - in
+    # their own terms, with no vendor name or status code.
+    _panels = json.dumps(b["workflow"]["step"]["panels"])
     check("rep is told not to proceed",
-          "must not be submitted" in json.dumps(b["workflow"]["step"]["panels"]))
+          "cannot be submitted until an availability check succeeds" in _panels)
+    check("  ...with no vendor name or HTTP status in the copy",
+          "Perch" not in _panels and "503" not in _panels)
     with app.app_context():
         chk = query_one("SELECT * FROM perch_capacity_checks WHERE enrollment_id=?", (eid3,))
         e3 = query_one("SELECT status FROM enrollments WHERE id=?", (eid3,))
@@ -326,7 +333,19 @@ def main():
     wf2 = c.get(f"/api/perch/enrollments/{eid4}/workflow", headers=rep).get_json()
     check("workflow advanced to capacity_result", wf2["step"]["key"] == "capacity_result")
     check("step renders Perch's data as panels", wf2["step"]["panels"][0]["type"] == "capacity_summary")
-    check("three capacity segments rendered", len(wf2["step"]["panels"][0]["segments"]) == 3)
+    # E2.1: the segments are the UBS PROGRAMS, not Perch's capacity types.
+    # There used to be three rows because mass_market got one of its own,
+    # labelled "Small commercial" and later "Residential (mass market)" - a
+    # distinction the API makes and a rep does not, since they enrol a
+    # residential customer either way. Two rows here: Residential and
+    # Residential LMI. The IRA row appears only where IRA capacity exists,
+    # which v1 cannot report at all.
+    _segs = wf2["step"]["panels"][0]["segments"]
+    check(f"one segment per available program ({[x['label'] for x in _segs]})",
+          [x["label"] for x in _segs] == ["Residential", "Residential LMI"])
+    check("  ...and no Perch capacity-type vocabulary in any label",
+          not any(tok in x["label"] for x in _segs
+                  for tok in ("mass market", "mass_market", "commercial")))
     check("savings shown without spurious decimals",
           wf2["step"]["panels"][0]["metrics"][0]["value"] == "10%")
     # Wording tightened in the capacity-copy fix: the proof requirement is now
@@ -976,9 +995,21 @@ def main():
                    "Contact Perch Energy and fetch capacity using the /capacity endpoint"}]}))
     msg = _fmt(observed)
     check("no longer renders as the useless 'None: None'", msg != "None: None")
-    check("field name surfaced", "customer_type" in msg)
-    check("error code surfaced", "capacity_unavailable" in msg)
-    check("human message surfaced", "capacity is not available" in msg)
+    # E3 REWROTE THIS. The old assertions pinned `customer_type` and
+    # `capacity_unavailable` appearing in the text - which is the leak E3 was
+    # asked to remove. Perch's own message is integrator-facing too ("Contact
+    # Perch Energy and fetch capacity using the /capacity endpoint" is an
+    # instruction to US, not to a rep on a doorstep), so the whole item is
+    # rewritten into something a rep can act on. The raw body is still
+    # attached by attach_response_diagnostics() for the audit record.
+    check(f"the rep gets a plain-language sentence ({msg!r})",
+          msg.startswith("The selected savings program"))
+    check("  ...naming no machine code",
+          "capacity_unavailable" not in msg and "customer_type" not in msg)
+    check("  ...and none of Perch's endpoint instructions",
+          "Contact Perch" not in msg and "/capacity" not in msg)
+    check("  ...while telling the rep what to do next",
+          "availability" in msg.lower())
 
     # Multiple errors, including one scoped to a utility account.
     multi = _ErrResp(json.dumps({"errors": [
@@ -987,15 +1018,31 @@ def main():
         {"utility_account_number": "1234567890", "field": "Utility bill size",
          "code": "file_too_large", "message": "Utility bill size must be less than 4MB"}]}))
     mmsg = _fmt(multi)
-    check("multiple validation errors are all reported",
-          "too_many_utility_accounts" in mmsg and "file_too_large" in mmsg)
-    check("account-scoped errors name the account",
-          "utility_account_number=1234567890" in mmsg)
+    # Both errors still reach the rep - that was the point of handling the
+    # envelope at all - but as sentences rather than as codes.
+    check(f"multiple validation errors are all reported ({mmsg!r})",
+          "utility account" in mmsg.lower()
+          and "too large to upload" in mmsg.lower())
+    check("  ...with no codes in the text",
+          "too_many_utility_accounts" not in mmsg and "file_too_large" not in mmsg)
+    check("account-scoped errors still name the account",
+          "1234567890" in mmsg)
+    check("  ...as something a rep can look up, not a JSON key",
+          "utility_account_number=" not in mmsg)
 
     # The other documented envelope must still work.
+    #
+    # E1: this used to be pinned as "unprocessable_entity: Email is invalid".
+    # That assertion was pinning a LEAK. On v2 the `error` key holds a machine
+    # code and `message` holds the sentence, so joining both put the token
+    # `unprocessable_entity` in front of a rep. The code is dropped from the
+    # text and kept in the attached body; the v1 shape, where `error` IS the
+    # sentence, is pinned separately in test_availability_utilities.py.
     env = _ErrResp(json.dumps({"error": "unprocessable_entity", "message": "Email is invalid"}))
-    check("standard {error,message} envelope still formats",
-          _fmt(env) == "unprocessable_entity: Email is invalid")
+    check("v2 {code,message} envelope renders the human message",
+          _fmt(env) == "Email is invalid")
+    check("  ...and the machine code is nowhere in the text",
+          "unprocessable_entity" not in _fmt(env))
 
     class _HtmlResp:
         status_code = 422
@@ -1310,7 +1357,12 @@ def main():
     except _VE as e:
         _r422 = e
     check("422 raises PerchValidationError", _r422 is not None)
-    check("422 message names the offending field", "metadata.timestamp" in str(_r422))
+    # E3: field keys are rendered as words. `metadata.timestamp` is not in
+    # the label table, so it falls through to the generic path and reads as
+    # "Metadata.timestamp" - still naming what went wrong, without printing a
+    # JSON path at a rep.
+    check(f"422 message names the offending field ({str(_r422)[-60:]!r})",
+          "etadata.timestamp" in str(_r422))
     check("422 is NOT treated as ambiguous", not isinstance(_r422, PerchAmbiguousOutcomeError))
 
     # Ambiguous outcomes must never be retryable.

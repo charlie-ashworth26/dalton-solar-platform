@@ -176,6 +176,35 @@ Render gives you `https://dalton-staging-XXXX.onrender.com`.
 
 ---
 
+## 10. Backups
+
+The database lives on the persistent disk at `/var/data/dalton_solar.db`.
+Nothing backs it up on its own — a backup happens because a schedule or a
+person runs `scripts/backup_db.py`. Full runbook: **BACKUP_AND_RECOVERY.md**.
+
+```bash
+python scripts/backup_db.py --allow-same-disk   # take one, verified
+python scripts/backup_db.py --list              # what is stored
+python scripts/backup_db.py --verify-all        # re-check all of them
+```
+
+Two things about Render specifically:
+
+* **One disk per service.** A separate Cron Job service gets its own empty
+  disk and cannot see this database, so scheduling the backup that way backs
+  up nothing. Run it as a one-off Job against *this* service instead, on an
+  external schedule.
+* **Backups share the database's disk.** `DALTON_BACKUP_DIR=/var/data/backups`
+  is on the same volume as the database, which covers a bad migration or a
+  wrong `DELETE` but not losing the disk. The tool refuses a same-disk backup
+  on a deployed service unless `--allow-same-disk` says the limitation is
+  understood. Staging accepts it because staging is fake data. **Production
+  must copy backups off-host.**
+
+Restoring never happens automatically, and `scripts/restore_db.py` will not
+overwrite a live database. Replacing one is a service-down sequence written
+out step by step in BACKUP_AND_RECOVERY.md.
+
 ## Notes and limits
 
 - **SQLite is deliberate for this milestone.** PostgreSQL is a separate

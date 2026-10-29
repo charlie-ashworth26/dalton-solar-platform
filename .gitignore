@@ -16,6 +16,8 @@ env/
 
 # Runtime data: contains password hashes, session tokens, customer documents
 dalton_solar.db
+# Database backups: same contents as the database, so same rule.
+backups/
 uploads/*
 storage/generated/*
 storage/packages/*

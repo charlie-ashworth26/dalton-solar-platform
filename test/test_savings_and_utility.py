@@ -1,5 +1,6 @@
 import os, sys
 sys.path.insert(0, '/tmp/own')
+import _ubs_test_db  # noqa: F401  - throwaway database; see test/_ubs_test_db.py
 os.environ.setdefault("PERCH_API_MODE","mock")
 from app import app
 from db import init_db, query_one

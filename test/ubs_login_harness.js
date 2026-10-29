@@ -88,19 +88,45 @@ check('patterned background layers',
 check('  ...plus the soft glow layer', /filter:blur\(26px\)/.test(CSS));
 check('brand panel gradient', /linear-gradient\(160deg, rgba\(38,137,94,\.98\)/.test(CSS));
 check('  ...with the orbital rings', /\.ubs-brand-side::after\{[\s\S]{0,240}border-radius:50%/.test(CSS));
-check('54px inputs and button',
-  /#screen-login input\{[\s\S]{0,120}height:54px/.test(CSS) && /\.ubs-submit\{[\s\S]{0,120}height:54px/.test(CSS));
-check('  ...14px radii', /border-radius:14px/.test(CSS));
-check('34px heading', /\.ubs-form-wrap h2\{margin:0 0 28px;font-size:34px/.test(CSS));
+// C2 brought the sign-in screen's own controls onto the shared 48px touch
+// step; they were the only 54/56px controls left in the application.
+check('48px inputs and button',
+  /#screen-login input\{[\s\S]{0,120}height:48px/.test(CSS) && /\.ubs-submit\{[\s\S]{0,160}height:48px/.test(CSS));
+check('  ...a consistent radius token', /border-radius:var\(--radius\)/.test(CSS));
+check('display-step heading',
+  /\.ubs-form-wrap h2\{margin:0 0 28px;font-size:var\(--t-display\)/.test(CSS));
 check('styles are SCOPED to the login screen',
   CSS.includes('#screen-login{') && CSS.includes('#screen-login input'));
 
 console.log('\n--- RESPONSIVE ---');
-check('820px breakpoint', /@media \(max-width:820px\)[\s\S]{0,2000}\.ubs-brand-side\{display:none/.test(CSS));
+// RE-PINNED (Phase C3): this matched the literal 'max-width:820px' plus a
+// 2000-character window. C3 consolidated thirteen scattered breakpoints into
+// the four the brief names (430/599/899/1199), so the sign-in screen's band
+// became 899px while the rule inside it - the brand panel stepping aside on a
+// phone - was untouched. The rule is the property; the band's number is not,
+// and the character window was only ever a proxy for "inside that band".
+const TOUCH_BAND = (() => {
+  const re = /@media\s*\(\s*max-width:\s*899px\s*\)\s*\{/g;
+  let m, out = '';
+  while((m = re.exec(CSS))){
+    let i = m.index + m[0].length, depth = 1;
+    while(i < CSS.length && depth){
+      if(CSS[i] === '{') depth++;
+      else if(CSS[i] === '}') depth--;
+      i++;
+    }
+    out += CSS.slice(m.index + m[0].length, i - 1);
+  }
+  return out;
+})();
+check('the touch band hides the desktop brand panel',
+  /\.ubs-brand-side\{display:none/.test(TOUCH_BAND));
 check('  ...mobile brand appears', /\.ubs-mobile-brand\{display:flex/.test(CSS));
 check('  ...shell goes full-bleed', /\.ubs-shell\{display:block;width:100%;min-height:100vh/.test(CSS));
-check('  ...controls grow to 56px', /#screen-login input,\.ubs-submit\{height:56px/.test(CSS));
-check('430px breakpoint', /@media \(max-width:430px\)[\s\S]{0,200}\.ubs-form-wrap h2\{font-size:28px/.test(CSS));
+check('  ...controls stay on the touch step',
+  /#screen-login input,\.ubs-submit\{height:48px/.test(CSS));
+check('430px breakpoint drops the heading one step',
+  /@media \(max-width:430px\)[\s\S]{0,400}\.ubs-form-wrap h2\{font-size:var\(--t-h1\)/.test(CSS));
 
 console.log('\n--- PASSWORD TOGGLE (presentation only) ---');
 check('toggle present', LOGIN.includes('id="login-pass-toggle"'));
@@ -116,10 +142,26 @@ check('  ...touching no auth logic',
 console.log('\n--- ACCOUNTS / IDENTIFIERS UNCHANGED ---');
 check('rep emails untouched in seed',
   fs.readFileSync(path.join(ROOT,'seed.py'),'utf8').includes('charlie@daltonsolar.com'));
+// REWRITTEN (Phase B), not loosened. These two read the RAW files, so they
+// also fired on PROSE: Phase B's comments explain which fields UBS persists
+// and that UBS is one page served at several URLs. A comment is not branding
+// leakage - the property being guarded is that no brand string reaches
+// EXECUTABLE backend code, where it could end up in a response, a template
+// name or an identifier.
+//
+// Docstrings and whole-line # comments are dropped; everything else - string
+// literals, identifiers, and even a trailing # comment - still fails, so real
+// branding in code cannot slip through.
+function pyCode(...parts){
+  return fs.readFileSync(path.join(ROOT, ...parts), 'utf8')
+    .replace(/"""[\s\S]*?"""/g, '""')
+    .replace(/'''[\s\S]*?'''/g, "''")
+    .split('\n').filter(l => !/^\s*#/.test(l)).join('\n');
+}
 check('auth routes untouched by branding',
-  !/Utility Bill Savings|UBS/.test(fs.readFileSync(path.join(ROOT,'routes','auth_routes.py'),'utf8')));
+  !/Utility Bill Savings|UBS/.test(pyCode('routes','auth_routes.py')));
 check('  ...and no branding leaked into the backend',
-  !/UBS/.test(fs.readFileSync(path.join(ROOT,'app.py'),'utf8')));
+  !/UBS/.test(pyCode('app.py')));
 
 const f=R.filter(r=>!r.ok);
 console.log('\n'+'='.repeat(72));

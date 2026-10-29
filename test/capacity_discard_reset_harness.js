@@ -153,6 +153,11 @@ function readState() {
     program: vm.runInContext('selectedProgram ? selectedProgram.id : null', ctx),
     email: vm.runInContext("perchContext.email || ''", ctx),
     errText: (documentStub.getElementById('wf-form-error') || {}).textContent,
+    // C3 item 8 moved the duplicate-email rejection off the foot of the form
+    // and onto the Email field itself, so there are now two places an error
+    // can legitimately appear. Both are read; each case below says which one
+    // it expects.
+    fieldErrText: (documentStub.getElementById('wf-err-email') || {}).textContent,
   };
 }
 
@@ -176,10 +181,27 @@ async function run() {
   check('the wizard DROPS its enrollment id', s.draft === null);
   check('  ...and clears the transient program state', s.program === null);
   check('  ...and clears the captured capacity context', s.email === '');
-  check('  ...while still showing the specific duplicate message',
-    typeof s.errText === 'string' && s.errText.toLowerCase().includes('already registered'));
+  // RE-PINNED (Phase C3 item 8). This asserted that #wf-form-error carried
+  // Perch's own sentence ("...already registered with Perch and has no
+  // in-progress enrollment to resume..."). C3 was asked to put this rejection
+  // on the Email field as a concise field error and to keep the backend's long
+  // message off the screen entirely, so the old assertion now pins the exact
+  // thing the brief removed. The property - the rep is told specifically that
+  // the email is the problem, not given a generic technical failure - is
+  // unchanged and is asserted in its new location, with the leak check the
+  // brief adds.
+  // D-2: the same one exact sentence on the email field, with the vendor
+  // name removed. What this guards - that the rep is told the EMAIL is the
+  // problem rather than being given a generic technical failure - is unchanged.
+  check('  ...while still naming the duplicate email specifically',
+    s.fieldErrText === "An enrollment already exists for this email address.");
+  check('  ...on the field, not at the foot of the form',
+    !s.errText || !String(s.errText).toLowerCase().includes('already registered'));
   check('  ...and NOT a generic technical message',
-    !String(s.errText).toLowerCase().includes('not found'));
+    !String(s.fieldErrText).toLowerCase().includes('not found'));
+  check('  ...with no Perch endpoint or raw backend text anywhere',
+    !/\/token|\/status|endpoint|PerchEnrollmentInProgressError|422/
+      .test(String(s.fieldErrText) + String(s.errText)));
 
   // ── CASE 2 ────────────────────────────────────────────────────────────
   section('RETRY against an existing enrollment, failed, NOT discarded');

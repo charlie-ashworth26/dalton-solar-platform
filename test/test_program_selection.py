@@ -13,6 +13,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _ubs_test_db  # noqa: F401  - throwaway database; see test/_ubs_test_db.py
 os.environ.setdefault("PERCH_API_MODE", "mock")
 
 from app import app
@@ -200,8 +201,21 @@ def main():
           resolve_customer_type(RES_ONLY, "   ")[0] == CUSTOMER_TYPE_RESIDENTIAL)
     check("commercial cannot be selected even if Perch offers it",
           rejects(dict(BOTH, small_commercial_capacity_available=True), "SmallCommercial"))
-    check("selectable set is exactly Residential + LMI",
-          set(SELECTABLE_CUSTOMER_TYPES) == {"Residential", "LMI"})
+    # E2: LMI_IRA joined the selectable set. v2 reports `lmi` and `lmi_ira` as
+    # separate capacity types, and the IRA one is what carries the proof-doc
+    # flow, so a rep must be able to pick it when Perch offers it. On v1 it is
+    # never OFFERED (v1 cannot express IRA LMI as a capacity type), which the
+    # v1 fixtures above still prove.
+    #
+    # Business is modeled in adapter.PROGRAM_RULES but stays UNSELECTABLE -
+    # POST /enroll requires business fields the wizard never collects - and the
+    # second assertion is what keeps it that way.
+    check("selectable set is exactly Residential + LMI + LMI_IRA",
+          set(SELECTABLE_CUSTOMER_TYPES) == {"Residential", "LMI", "LMI_IRA"})
+    check("  ...and Business is modeled but NOT selectable",
+          "Business" in adapter.PROGRAM_RULES
+          and adapter.PROGRAM_RULES["Business"]["selectable"] is False
+          and "Business" not in SELECTABLE_CUSTOMER_TYPES)
 
     # ═══════════════════════════════════════════════════════
     section("API — GET /programs reflects the capacity response")
@@ -283,8 +297,18 @@ def main():
 
     section("ENROLL VALIDATES THE SELECTION AGAINST CAPACITY")
     src = open(os.path.join(ROOT, "services", "perch", "adapter.py"), encoding="utf-8").read()
+    # E2: the validator takes the parsed CapacityModel instead of the flat
+    # project_details dict, built from the STORED capacity check - so a v2
+    # response is validated against v2's own entries, and the rep's choice is
+    # still re-checked server-side rather than trusted.
     check("create_enrollment resolves against the capacity response",
-          "resolve_customer_type(details, requested=requested_type)" in src)
+          "resolve_customer_type(\n        model, requested=requested_type, county=county)" in src
+          and "model = capacity_model_for(capacity)" in src)
+    # E2.1/E3: and against the county the rep chose AND the savings rate,
+    # both read from the enrollment rather than trusted from the request.
+    check("  ...and against the stored county and rate",
+          "SELECT service_county, selected_savings_percent FROM enrollments"
+          in src)
     check("  ...taking the request from the payload",
           'requested_type = (enrollment_payload or {}).get("customer_type")' in src)
     check("the resolved type is what gets sent to Perch",
@@ -310,8 +334,9 @@ def main():
     with app.app_context():
         migrations = query("SELECT filename FROM schema_migrations")
     # 008_program_selection added later for dual-program persistence; this
-    # milestone itself still added none. 012 is the orphan-enrollment discard.
-    check("this milestone added no migration of its own", len(migrations) == 12)
+    # milestone itself still added none. 012 is the orphan-enrollment discard,
+    # 013 the additive v2 capacity entries (E2), 014 the capacity county (E2.1).
+    check("this milestone added no migration of its own", len(migrations) == 15)
 
     print(f"\n{'='*72}\nPROGRAM SELECTION - ALL CHECKS PASSED\n{'='*72}")
 

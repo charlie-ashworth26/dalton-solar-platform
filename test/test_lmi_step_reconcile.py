@@ -83,8 +83,14 @@ def upload(client, headers, eid, path, category):
 
 
 def completed_error():
+    # E1: the `unprocessable_entity: ` prefix this fixture used to carry is no
+    # longer what _msg() produces for a v2 {code, message} body - the code is
+    # dropped from the text and kept in body_json, which is what
+    # is_step_already_completed_error() reads anyway. The raw human message is
+    # still here deliberately: the assertions below prove it never reaches the
+    # rep.
     e = PerchValidationError(
-        "Perch rejected the proof documents (422): unprocessable_entity: "
+        "Perch rejected the proof documents (422): "
         + COMPLETED_BODY["message"])
     e.status_code = 422
     e.body_json = COMPLETED_BODY
@@ -236,8 +242,23 @@ def main():
         check(f"{message[:34]!r} stays an error", r3.status_code >= 400)
         check("  ...it is NOT reconciled", r3.get_json().get("reconciled") is not True)
         check("  ...no /status call was made", status_calls["n"] == 0)
-        check("  ...the rep still sees the correctable message",
-              message in (r3.get_json().get("error") or ""))
+        # D-2: the rep is still told this is CORRECTABLE rather than being
+        # asked to retry later - that distinction is what this check is about.
+        # Two of these three raw messages name a machine field (source_type,
+        # name_on_document); those are now replaced with validation wording
+        # instead of being shown as-is. A message already fit for a rep ("The
+        # document could not be read") still passes through verbatim.
+        # ordinary_422() wraps every one of these in upstream text -
+        # "Perch rejected the proof documents (422): ..." - so after D-2 the
+        # rep reads validation wording rather than that envelope, whichever
+        # message it carried.
+        _shown = r3.get_json().get("error") or ""
+        check("  ...the rep still sees a CORRECTABLE message",
+              "not accepted" in _shown and "check the information" in _shown)
+        check("  ...and it is not worded as a retry-later failure",
+              "try again in a moment" not in _shown)
+        check("  ...with no machine field name shown to the rep",
+              "source_type" not in _shown and "name_on_document" not in _shown)
         check("  ...and the enrollment is preserved on proof_docs",
               step_key(eid3) == "proof_docs")
         check("  ...with its documents intact",
@@ -305,8 +326,9 @@ def main():
                       "name_on_document": "Dalton Testcustomer",
                       "relationship": "self", "document_type": "letter"})
     check("a legacy guessed label is still rejected", r6.status_code == 400)
+    # D-2: was "Select a proof-document type supported by Perch."
     check("  ...with the taxonomy message",
-          "supported by Perch" in (r6.get_json().get("error") or ""))
+          "Select a supported proof-document type" in (r6.get_json().get("error") or ""))
     check("published types still come from the DB table",
           query_one("SELECT COUNT(*) n FROM perch_proof_doc_types "
                     "WHERE category='proof_doc' AND is_active=1")["n"] > 0)

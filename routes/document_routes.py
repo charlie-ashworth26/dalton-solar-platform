@@ -4,7 +4,7 @@ import uuid
 
 from flask import Blueprint, request, jsonify, g, send_file
 
-from db import query, query_one, execute
+from db import query, query_one, execute, transaction
 from auth import require_auth, require_role
 from helpers import validate_upload, to_json, resolve_stored_path, DATA_ROOT
 from services import extraction, lmi_validation, audit
@@ -14,6 +14,21 @@ bp = Blueprint("document_routes", __name__, url_prefix="/api/enrollments")
 
 UPLOAD_DIR = os.path.join(DATA_ROOT, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+def _enrollment_utility(enrollment):
+    """The enrollment's Perch utility slug, or None.
+
+    Defensive about the row shape on purpose: this is only a HINT for field
+    extraction, so a row selected without the column, or no row at all, must
+    degrade to "no hint" rather than turning a successful upload into a 500.
+    """
+    if enrollment is None:
+        return None
+    try:
+        return enrollment["utility_name"]
+    except (KeyError, IndexError, TypeError):
+        return None
 
 
 @bp.route("/<int:enrollment_id>/documents", methods=["POST"])
@@ -56,7 +71,10 @@ def upload_document(enrollment_id):
         # already written; the documents row is inserted below regardless.
         from services import extraction_engine as engine
         try:
-            result = engine.get_extractor().extract([stored_path_abs], category=category)
+            result = engine.extract_with_hint(
+                engine.get_extractor(),
+                [stored_path_abs], category=category,
+                utility_hint=_enrollment_utility(enrollment))
         except Exception as e:
             result = engine.ExtractionResult(
                 engine.ExtractionStatus.ERROR, provider="local",
@@ -258,8 +276,13 @@ def upload_document_set(enrollment_id):
         (set_id,))
     paths = [resolve_stored_path(r["stored_path"]) for r in ordered]
 
+    # THE UTILITY THIS ENROLLMENT IS FOR, used only when the document does
+    # not name its own. Read-only: nothing is written, and the upload above
+    # has already completed and been recorded.
+    hint = _enrollment_utility(enrollment)
     try:
-        result = engine.get_extractor().extract(paths, category=category)
+        result = engine.extract_with_hint(engine.get_extractor(), paths,
+                                          category=category, utility_hint=hint)
     except Exception as e:
         # Defence in depth: extract() is contracted not to raise, but a bug in a
         # provider must still never cost the rep their upload.
@@ -280,6 +303,43 @@ def upload_document_set(enrollment_id):
         execute("UPDATE documents SET extracted_data_json = ?, extraction_confidence = ? WHERE id = ?",
                 (to_json(result.fields), result.confidence, r["id"]))
 
+    # ── LMI PROOF VALIDATION, preserved when a proof arrives as a set ──────
+    #
+    # WHY THIS IS HERE. The older single-file route (upload_document above)
+    # runs lmi_validation and writes a validation_results row for every proof
+    # document; this set route never did, because until now only bills came
+    # through it. Moving proof uploads onto document sets without this would
+    # have silently removed LMI validation from the enrollment detail payload,
+    # the developer/QA review and the submission package - a regression that
+    # would not have shown up as a failed upload anywhere.
+    #
+    # ONE ROW FOR THE SET, not one per file. The set IS one logical proof, and
+    # its classification is made from the text of every page together. Running
+    # it per file is the mistake the set abstraction exists to prevent: page 2
+    # of an award letter carries none of the keywords and would be judged
+    # "likely_invalid" on its own.
+    lmi_result = None
+    if category == "lmi_document" and ordered:
+        holder = query_one(
+            "SELECT c.first_name, c.last_name FROM customers c "
+            "JOIN enrollments e ON e.customer_id = c.id WHERE e.id = ?",
+            (enrollment_id,))
+        holder_name = (f"{holder['first_name']} {holder['last_name']}"
+                       if holder else None)
+        lmi_result = lmi_validation.validate_lmi_document(result.text or "",
+                                                          holder_name)
+        # Attached to the FIRST page, which is the document id every existing
+        # caller already uses as the proof's identity (state.lmi.documentId,
+        # lmi_qualifications.document_id, the /lmi/proof_docs request).
+        execute(
+            """INSERT INTO validation_results (enrollment_id, document_id, validation_type,
+               classification, confidence, reasons_json, missing_info_json, mismatch_warnings_json)
+               VALUES (?, ?, 'lmi_document', ?, ?, ?, ?, ?)""",
+            (enrollment_id, ordered[0]["id"], lmi_result["classification"],
+             lmi_result["confidence"], to_json(lmi_result["reasons"]),
+             to_json(lmi_result["missing_info"]),
+             to_json(lmi_result["mismatch_warnings"])))
+
     audit.log("document_set_uploaded", enrollment_id=enrollment_id,
               user_id=g.current_user["id"],
               details={"category": category, "document_set_id": set_id,
@@ -293,6 +353,9 @@ def upload_document_set(enrollment_id):
                    "page_order": d["page_order"]} for d in stored],
         "file_count": len(ordered),
         "extraction": result.to_dict(),
+        # The LMI judgement for the whole set, when this was a proof upload.
+        # Absent for a bill, exactly as before.
+        "lmi_validation": lmi_result,
         # The rep-facing consequence, decided server-side.
         "manual_entry_required": bool(result.needs_manual_entry and category == "utility_bill"),
         "message": _extraction_message(result, category),
@@ -354,7 +417,14 @@ def remove_document_from_set(enrollment_id, set_id, document_id):
         (document_id, set_id, enrollment_id))
     if not doc:
         return jsonify({"error": "File not found in this document set."}), 404
-    execute("DELETE FROM documents WHERE id = ?", (document_id,))
+    # Detached inside the same transaction as the delete, for the reason given
+    # above _detach_document_references(). This route has never hit the FK in
+    # practice - a set upload writes no validation_results row - but it is the
+    # same delete against the same constraints, and it must not be one legacy
+    # upload away from the 500 the other route just produced.
+    with transaction() as tx:
+        _detach_document_references(tx, enrollment_id, document_id)
+        tx.execute("DELETE FROM documents WHERE id = ?", (document_id,))
     # Re-number so page_order stays dense and deterministic.
     remaining = query(
         "SELECT id FROM documents WHERE document_set_id = ? ORDER BY page_order ASC, id ASC",
@@ -366,6 +436,113 @@ def remove_document_from_set(enrollment_id, set_id, document_id):
               details={"document_set_id": set_id, "document_id": document_id},
               ip_address=request.remote_addr)
     return jsonify({"removed": document_id, "remaining": len(remaining)})
+
+
+# Tables that FOREIGN KEY to documents(id). None declares ON DELETE, so SQLite
+# blocks the delete (NO ACTION) and the request becomes a 500 - which is exactly
+# what happened the first time a legacy single-file upload was removed:
+#
+#   sqlite3.IntegrityError: FOREIGN KEY constraint failed
+#
+# The set-scoped route never hit it only because upload_document_set() writes no
+# validation_results row, while the older upload_document() does. The reference
+# therefore has to be dealt with explicitly, and WHAT TO DO DIFFERS BY TABLE:
+#
+#   validation_results  DELETED. It is a judgement derived from that exact file
+#                       at upload - classification, confidence, reasons. Once
+#                       the file is detached the judgement describes nothing,
+#                       and leaving it would show QA a "likely_valid utility
+#                       bill" for a document that is no longer attached: the
+#                       same class of stale state this whole fix is about.
+#
+#   lmi_qualifications  DETACHED, NOT deleted (document_id -> NULL). This row
+#                       holds REP-ENTERED work - qualification type, household
+#                       size, the chosen path - which is not derived from the
+#                       file and must not be destroyed because a photo was
+#                       swapped. The qualification survives, now pointing at no
+#                       document, which is the truthful state and is what the
+#                       LMI step reads to ask for the proof again.
+#
+# agreements.generated_document_id and submissions.package_*_document_id also
+# reference documents(id), but only for UBS-GENERATED categories, which the
+# category guard below refuses outright - a rep cannot reach them here.
+def _detach_document_references(tx, enrollment_id, document_id):
+    """Clear the FK references to this document. Scoped to the enrollment."""
+    tx.execute("DELETE FROM validation_results WHERE document_id = ? AND enrollment_id = ?",
+               (document_id, enrollment_id))
+    tx.execute("UPDATE lmi_qualifications SET document_id = NULL "
+               "WHERE document_id = ? AND enrollment_id = ?",
+               (document_id, enrollment_id))
+
+
+@bp.route("/<int:enrollment_id>/documents/<int:document_id>", methods=["DELETE"])
+@require_auth
+@require_role("sales_rep", "admin")
+def remove_document(enrollment_id, document_id):
+    """Detach ONE document from this enrollment, with or without a set.
+
+    WHY THIS EXISTS. The only removal route was set-scoped
+    (/document-sets/<set>/files/<doc>), so a document with document_set_id
+    NULL - every single-file upload made through the older /documents route -
+    had NO removal endpoint at all. The browser could not persist its removal
+    even in principle, and quietly stopped trying. A rep could attach such a
+    document and never detach it.
+
+    SCOPING is by enrollment, exactly as the set-scoped route scopes by
+    enrollment AND set: a document belonging to another enrollment is a 404,
+    not a deletion.
+
+    THE FILE ON DISK IS DEDUCTIBLY LEFT ALONE, matching the set-scoped route.
+    UBS has never physically deleted an uploaded document - removal has always
+    meant detaching the reference - and introducing unlink here would make a
+    rep's click destroy bytes that QA, audit and the submission package may
+    still refer to. Orphaned files are a known, separate maintenance question;
+    see KNOWN_ISSUES.md.
+    """
+    enrollment, _authz_err = visible_enrollment(enrollment_id)
+    if _authz_err:
+        return _authz_err
+
+    doc = query_one("SELECT * FROM documents WHERE id = ? AND enrollment_id = ?",
+                    (document_id, enrollment_id))
+    if not doc:
+        return jsonify({"error": "Document not found for this enrollment."}), 404
+
+    # Only a rep-uploaded document may be detached this way. A generated
+    # agreement, signature certificate or submission package is produced by
+    # UBS and referenced elsewhere; deleting one through the uploader would
+    # break the record it belongs to.
+    if doc["doc_category"] not in ("utility_bill", "lmi_document", "other"):
+        return jsonify({"error": "That document cannot be removed here."}), 400
+
+    set_id = doc["document_set_id"] if "document_set_id" in doc.keys() else None
+
+    # ONE all-or-nothing unit. execute() commits per call, so detaching the
+    # references and removing the row separately could leave a validation
+    # record deleted for a document that is still attached.
+    with transaction() as tx:
+        _detach_document_references(tx, enrollment_id, document_id)
+        tx.execute("DELETE FROM documents WHERE id = ? AND enrollment_id = ?",
+                   (document_id, enrollment_id))
+
+    remaining = 0
+    if set_id:
+        # Same re-densing as the set-scoped route, so page_order stays
+        # deterministic whichever route removed the page.
+        rows = query(
+            "SELECT id FROM documents WHERE document_set_id = ? "
+            "ORDER BY page_order ASC, id ASC", (set_id,))
+        for i, r in enumerate(rows):
+            execute("UPDATE documents SET page_order = ? WHERE id = ?", (i, r["id"]))
+        remaining = len(rows)
+
+    audit.log("document_removed", enrollment_id=enrollment_id,
+              user_id=g.current_user["id"],
+              details={"document_id": document_id, "document_set_id": set_id,
+                       "category": doc["doc_category"]},
+              ip_address=request.remote_addr)
+    return jsonify({"removed": document_id, "document_set_id": set_id,
+                    "remaining": remaining})
 
 
 @bp.route("/extraction-status", methods=["GET"])

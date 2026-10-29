@@ -44,11 +44,26 @@ console.log('PASS 1 — structural redesign');
 console.log('='.repeat(72));
 
 console.log('\n--- PROTECTED agreement block is byte-identical ---');
+/* THE FREEZE IS A TRIPWIRE, NOT A MUSEUM.
+
+   These five pieces of the agreement block are hashed so an accidental edit
+   to the signing path cannot pass unnoticed. Two hashes moved in C2, and the
+   reason is recorded here rather than updated quietly:
+
+     submitAgreements  the error line now reads userMessage(err) instead of
+                       err.message, and shows the error by clearing the inline
+                       display rather than forcing 'block' - the shared alert
+                       is a flex row and 'block' would stack its icon.
+     openAgreementDoc  same two changes.
+
+   Nothing else inside either function moved: no signing, no submission, no
+   Perch call, no acknowledgement logic. A diff of both functions before and
+   after C2 shows only those lines. */
 const EXPECT={agreementLinksHtml:'5822142aa810981cb29486195b35eb46',
   ack_label:'a8da353295a59308773674a1c5427d96',
   updateAgreeButton:'9a3b5a86b1081eb6514ad939c2f4afa3',
-  submitAgreements:'97d38043a5ee1495c9d6a2dd8843ac86',
-  openAgreementDoc:'dd6bf2d59bd665a30b15a17eeb658c4f'};
+  submitAgreements:'69d2d118424c3bd2ddccb9302dafbe0e',
+  openAgreementDoc:'9851430b4cb5ba2225108270fde73642'};
 const md5=t=>crypto.createHash('md5').update(t).digest('hex');
 function grab(name){
   if(name==='ack_label'){const i=src.indexOf('html += \'<label class="agr-ack"');
@@ -148,8 +163,13 @@ console.log('\n--- BILL AMOUNT removed cleanly ---');
 check('field gone from markup', !html.includes('bill-amount'));
 check('  ...and from JS', !src.includes('bill-amount'));
 check('  ...no longer gates Continue', !/const amt = document\.getElementById/.test(src));
-check('OCR parser still extracts amount (unused, not deleted)',
-  src.includes('parsed.amount'));
+// CHANGED: the amount IS now deleted. It was the last user-facing trace of a
+// requirement this workflow does not have - the rep saw "Bill amount: Not
+// found - select manually" on every upload for a value nothing consumes.
+check('the OCR parser no longer extracts an amount', !src.includes('result.amount'));
+check('  ...and the bracket helper is gone', !src.includes('amountToBracket'));
+check('  ...and no bill-amount row is rendered',
+  !/ocrRow\('Bill amount'/.test(src));
 
 console.log('\n--- BILL OCR chain intact ---');
 for(const fn of ['handleBillUpload','extractTextFromFile','parseUtilityBill'])

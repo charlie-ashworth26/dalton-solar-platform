@@ -60,6 +60,83 @@ def resolve_slug(value):
     return aliases.get(value.lower())
 
 
+def display_name_for_slug(slug):
+    """A rep-facing label for a utility slug.
+
+    Prefers the display_name in perch_utilities, so every existing NY utility
+    keeps its exact established label ("Central Hudson Gas & Electric").
+
+    For a slug that is NOT in the local table - a new market's utility, read
+    from GET /markets/utilities at runtime - the label is derived GENERICALLY
+    from the slug. No per-utility name is written into UBS.
+
+    A TRAILING STATE CODE IS DROPPED, not upper-cased. Perch namespaces its
+    slugs by state, which the API needs and a rep does not: the slug is the
+    value we transmit, and the label is only ever for a human to read. Showing
+    the state token made the screen read like the raw slug, which is the one
+    thing a label must never do. The token is recognised by membership in the
+    state table UBS already has (services/zip_state), so this names no state
+    and no utility; a slug whose last token is not a state code keeps it.
+
+        consolidated-edison-ny -> "Consolidated Edison NY"   (from the table,
+                                                              left untouched)
+        some-new-utility-xx    -> "Some New Utility"         (derived, XX dropped)
+        some-utility-coop      -> "Some Utility Coop"        (not a state code)
+
+    Two markets can have utilities whose names differ ONLY by that token, and
+    the cross-market dropdown would then show the same label twice. Callers
+    that build such a list disambiguate with label_for_options() below rather
+    than putting the state back on every label.
+    """
+    row = by_slug(slug)
+    if row and row.get("display_name"):
+        return row["display_name"]
+    parts = [p for p in str(slug or "").replace("_", "-").split("-") if p]
+    if not parts:
+        return str(slug or "")
+    # Only ever drop the LAST token, and never the only one: a slug that is
+    # just "va" is a utility named VA, not an empty label.
+    if len(parts) > 1 and parts[-1].upper() in _STATE_CODES:
+        parts = parts[:-1]
+    return " ".join(p.upper() if len(p) == 2 else p.capitalize() for p in parts)
+
+
+def _state_codes():
+    """The state codes UBS knows, from the ZIP table it already maintains.
+
+    Imported lazily so this module keeps no import-time dependency on
+    zip_state, and falling back to an empty set means a trailing token is
+    simply kept - the label is uglier, never wrong.
+    """
+    try:
+        from services import zip_state
+        return set(zip_state.covered_states())
+    except Exception:
+        return set()
+
+
+_STATE_CODES = _state_codes()
+
+
+def label_for_options(options):
+    """Disambiguate labels across a multi-state option list, in place.
+
+    Every option is {value, label, state, ...}. Labels are left exactly as
+    they are unless the SAME label appears for more than one state - then each
+    colliding label gets its state appended, so the rep can tell two
+    identically-named utilities apart. This is the only place a state reaches
+    a label, and only when the alternative is an ambiguous dropdown.
+    """
+    seen = {}
+    for o in options or []:
+        seen.setdefault(o.get("label"), set()).add(o.get("state"))
+    for o in options or []:
+        states = seen.get(o.get("label")) or set()
+        if len(states) > 1 and o.get("state"):
+            o["label"] = f"{o['label']} ({o['state']})"
+    return options
+
+
 def select_options():
     """Options for the workflow renderer's utility dropdown. Value is always the
     slug so the frontend never has to know about translation."""

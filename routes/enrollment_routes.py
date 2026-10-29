@@ -6,10 +6,12 @@ from flask import Blueprint, request, jsonify, g
 
 from db import query, query_one, execute, rows_to_list
 from auth import require_auth, require_role
-from helpers import mask_account_number, next_enrollment_code, json_or_none, to_json
+from helpers import (mask_account_number, looks_masked, next_enrollment_code,
+                     json_or_none, to_json)
 from services import audit, status_machine, lmi_validation
 from services.authz import visible_enrollment
 from services.perch import workflow as perch_workflow, utilities
+from services.perch import adapter
 
 bp = Blueprint("enrollment_routes", __name__, url_prefix="/api/enrollments")
 
@@ -71,6 +73,43 @@ def _serialize_enrollment(row, requester_role):
         # "—" honestly rather than inventing one. Never inferred from ZIP or
         # project.
         "utility_name": _utility_display(d.get("utility_name")),
+        # ── AVAILABILITY STATE, so a reopened enrollment can restore the
+        #    Availability step instead of dead-ending on a later one ──────────
+        #
+        # ROOT CAUSE THIS FIXES. The email the rep types at Availability is
+        # persisted as enrollments.perch_token_email - the Perch session
+        # identity, written by services/perch/adapter.py when the token is
+        # issued. customers.email is only written later, by the merged Continue
+        # on the Customer & Bill step. The frontend rehydrated its Perch context
+        # from customers.email alone, so an enrollment abandoned between those
+        # two points came back with no email, and the guard on the later step
+        # told the rep to "Re-run the availability check before continuing." on
+        # a screen that has no way to do that. The value was persisted the whole
+        # time; it was simply never serialized.
+        "perch_token_email": d.get("perch_token_email"),
+        # WHETHER a portal password exists - never the value, and never the
+        # hash. The rep needs to know the customer's login is already set up so
+        # the form can say so instead of presenting two empty password boxes
+        # that look like unfinished work. customers.password_hash is the only
+        # thing consulted; nothing derived from it leaves the server.
+        "customer_has_password": _has_portal_password(d.get("customer_id")),
+        # WHAT IS ACTUALLY ATTACHED. The documents and their set survive in the
+        # database across leave/reopen - that was never the problem - but the
+        # detail payload said nothing about them, and the browser's DocSets is
+        # cleared by resetWizardState() on every open. So a rep who reopened an
+        # enrollment saw an empty uploader for a bill that was still attached,
+        # and the only way to make the step continue was to upload it again.
+        "document_sets": _document_sets_summary(d["id"]),
+        # The RAW Perch slug, alongside the display name above. utility_account
+        # does not exist until the bill step has run, so the slug the rep chose
+        # at Availability was otherwise unavailable on reopen - which also left
+        # the Perch context's utility empty.
+        "utility_slug": d.get("utility_name"),
+        # The ZIP capacity was actually checked against. NOT always the service
+        # address ZIP: a real staging enrollment checked 22408 at Availability
+        # and recorded 22401 as the service address, so restoring the
+        # Availability step from the address would have shown the wrong ZIP.
+        "service_zip": d.get("service_zip"),
         # True once Perch has accepted /enroll. Persisted-state derived, so it
         # survives reload/resume/reopen - the frontend flag it replaces did not.
         "perch_committed": perch_workflow.perch_committed(row["id"]),
@@ -78,6 +117,15 @@ def _serialize_enrollment(row, requester_role):
         "workflow_step_label": perch_workflow.step_label(step_key) if step_key else None,
         "workflow_is_terminal": perch_workflow.is_terminal(step_key),
         "workflow_is_blocked": perch_workflow.is_blocked(step_key),
+        # WHEN UBS RECORDED THIS STATUS. perch_workflow_state.updated_at is
+        # rewritten by set_state() on every step change, and nothing writes it
+        # again once the workflow is terminal - so for a completed enrollment
+        # this is the moment it reached its final step.
+        #
+        # It is deliberately NOT called a Perch completion timestamp: Perch
+        # does not give us one, and the read-only screen labels this exactly
+        # what it is ("Status recorded"). Nothing is inferred from it.
+        "workflow_updated_at": wf["updated_at"] if wf else None,
         "perch_next_step_url": wf["perch_next_step_url"] if wf else None,
         # URL-free workflow payload, so a completed enrollment can be rendered
         # read-only without calling Perch. Contains contract NAMES, never URLs.
@@ -92,17 +140,67 @@ def _serialize_enrollment(row, requester_role):
 
 
 
+def _document_sets_summary(enrollment_id):
+    """The newest document set per category, with its files in page order.
+
+    Read-only and metadata only: ids, filenames, sizes and page order. No
+    stored path and no extracted content, so this adds nothing the rep could
+    not already request through the document-set endpoint.
+    """
+    out = {}
+    for category in ("utility_bill", "lmi_document"):
+        row = query_one(
+            "SELECT id FROM document_sets WHERE enrollment_id = ? AND category = ? "
+            "ORDER BY id DESC LIMIT 1", (enrollment_id, category))
+        if not row:
+            continue
+        files = query(
+            "SELECT id, original_filename, page_order, file_size, mime_type "
+            "FROM documents WHERE document_set_id = ? "
+            "ORDER BY page_order ASC, id ASC", (row["id"],))
+        if not files:
+            continue
+        out[category] = {"document_set_id": row["id"],
+                         "files": [dict(f) for f in files],
+                         "file_count": len(files)}
+    return out
+
+
+def _has_portal_password(customer_id):
+    """Whether this customer has a portal password set. Never the value.
+
+    Asked of the database directly rather than read off the customer row: the
+    row is selected with different column sets by different callers, and
+    reaching for password_hash on one that did not select it raised IndexError
+    inside the serializer - a 500 on an ordinary PATCH. Asking for exactly the
+    one fact needed cannot depend on another query's column list.
+    """
+    if not customer_id:
+        return False
+    row = query_one(
+        "SELECT 1 AS yes FROM customers "
+        "WHERE id = ? AND password_hash IS NOT NULL AND password_hash != ''",
+        (customer_id,))
+    return bool(row)
+
+
 def _utility_display(slug):
-    """Published display name for a persisted utility slug, or None."""
+    """Rep-facing name for a persisted utility slug, or None.
+
+    ONE DISPLAY-NAME SYSTEM. This used to look the slug up in perch_utilities
+    and return the RAW SLUG for anything not in it - that table is New York's
+    reference data, so every new market's utility rendered as
+    "dominion-energy-va" on the dashboard, the sales report, the capacity card
+    and the utility chip. display_name_for_slug() is the resolver that already
+    answers for both: the curated name for a utility in the table, a derived
+    clean name for one that is not.
+    """
     if not slug:
         return None
     try:
-        row = utilities.by_slug(slug)
-        if row and row["display_name"]:
-            return row["display_name"]
+        return utilities.display_name_for_slug(slug)
     except Exception:
-        pass
-    return slug          # readable even if the utility table lacks the row
+        return slug      # readable even if the lookup itself fails
 
 
 def _program_savings(enrollment_id):
@@ -143,13 +241,19 @@ def _program_savings(enrollment_id):
         # ever persisted (single-program locations resolve server-side).
         state = query_one("SELECT last_response_json FROM perch_workflow_state "
                           "WHERE enrollment_id = ?", (enrollment_id,))
-        if state and state["last_response_json"]:
-            try:
-                customer_type = (json.loads(state["last_response_json"]) or {}).get("customer_type")
-            except (TypeError, ValueError):
-                customer_type = None
+        # Read through the shared helper, which returns {} for a payload that
+        # is not a JSON object. From E2 the capacity step stores Perch's
+        # `project_details`, and on v2 that is an ARRAY - `.get()` on it raised
+        # AttributeError and turned this whole enrollment LIST into a 500.
+        customer_type = perch_workflow.last_response_dict(state).get(
+            "customer_type")
 
-    is_lmi = str(customer_type or "").strip().upper() == "LMI"
+    # E2: LMI_IRA is also an income-qualified program, and `== "LMI"` is
+    # FALSE for it - which would have shown an IRA enrollment the residential
+    # percentage, the exact bug this function was written to fix, one customer
+    # type later. Asked through the adapter's family helper so there is one
+    # answer to "is this the income-qualified branch" across the codebase.
+    is_lmi = adapter.is_lmi_customer_type(customer_type)
     value = row["savings_percent_lmi"] if is_lmi else row["savings_percent_res_commercial"]
     if value is None:
         return None
@@ -245,7 +349,21 @@ def get_enrollment(enrollment_id):
         if not rep or row["sales_rep_id"] != rep["id"]:
             return jsonify({"error": "Forbidden"}), 403
 
-    documents = rows_to_list(query("SELECT id, doc_category, original_filename, extraction_confidence, created_at FROM documents WHERE enrollment_id = ?", (enrollment_id,)))
+    # document_set_id AND page_order travel with every row.
+    #
+    # ROOT CAUSE THIS CLOSES. This flat list is the browser's SECOND source of
+    # attached documents (the first being document_sets above), and it used to
+    # omit the set id - so rehydrateDocumentsFromDetail() rebuilt the uploader
+    # with `id: null` and commented that the set id "is not exposed on detail".
+    # That null is what made removing a saved photo a no-op: docSetRemove()
+    # needs a set id to call the DELETE endpoint and silently gave up without
+    # one. The id was in the table the whole time and simply never selected.
+    documents = rows_to_list(query(
+        "SELECT id, doc_category, original_filename, extraction_confidence, "
+        "created_at, document_set_id, page_order "
+        "FROM documents WHERE enrollment_id = ? "
+        "ORDER BY COALESCE(document_set_id, 0), COALESCE(page_order, 0), id",
+        (enrollment_id,)))
     agreements = rows_to_list(query("SELECT * FROM agreements WHERE enrollment_id = ?", (enrollment_id,)))
     signatures = rows_to_list(query("SELECT * FROM signatures WHERE enrollment_id = ?", (enrollment_id,)))
     status_hist = rows_to_list(query("SELECT * FROM status_history WHERE enrollment_id = ? ORDER BY id", (enrollment_id,)))
@@ -348,6 +466,24 @@ def update_enrollment(enrollment_id):
                 # is no identity to attach it to.
                 return jsonify({"error": "Customer details are required before "
                                          "setting a password."}), 400
+
+            # customers.first_name, last_name and email are all NOT NULL, so a
+            # row cannot be created from a subset of them.
+            #
+            # WHY THIS GUARD EXISTS. The INSERT below used to hit the constraint
+            # and surface as a 500 "An unexpected server error occurred." for a
+            # perfectly legitimate partial payload - a name with no email, which
+            # is exactly what a progress save looks like. An opaque 500 is the
+            # wrong answer to "you have not given me enough yet": the caller
+            # cannot tell a bug from a missing field. 400 says which.
+            missing = [k for k in ("first_name", "last_name", "email")
+                       if not (c.get(k) or "").strip()]
+            if missing:
+                return jsonify({
+                    "error": "A customer needs a first name, last name and "
+                             "email address before it can be saved.",
+                    "missing_fields": missing,
+                }), 400
             columns = ", ".join(provided)
             placeholders = ", ".join("?" for _ in provided)
             cur = execute(
@@ -407,20 +543,80 @@ def update_enrollment(enrollment_id):
         u = data["utility_account"]
         current = query_one("SELECT * FROM enrollments WHERE id=?", (enrollment_id,))
         if current["utility_account_id"]:
-            execute(
-                """UPDATE utility_accounts SET utility_name=?, account_number=?, secondary_account_identifier=?, meter_number=?, rate_class=?,
-                   monthly_usage_kwh=?, updated_at=datetime('now') WHERE id=?""",
-                (u.get("utility_name"), u.get("account_number"), u.get("secondary_account_identifier"),
-                 u.get("meter_number"), u.get("rate_class"), u.get("monthly_usage_kwh"), current["utility_account_id"]),
-            )
+            # WRITE ONLY WHAT THE CALLER SUPPLIED, exactly as the customer
+            # branch above does. This used to UPDATE all six columns from
+            # u.get(...), so any payload that omitted one - a progress save
+            # carrying only the account and meter numbers, say - silently set
+            # rate_class and monthly_usage_kwh to NULL. Absent is now distinct
+            # from empty here too.
+            ACCOUNT_FIELDS = ("utility_name", "account_number",
+                              "secondary_account_identifier", "meter_number",
+                              "rate_class", "monthly_usage_kwh")
+            provided_acct = [k for k in ACCOUNT_FIELDS if k in u]
+
+            # A DISPLAY MASK IS NOT DATA.
+            #
+            # This payload is serialised back to a sales_rep with
+            # account_number masked ("******7890"), the wizard hydrates its
+            # form from it, and the next save returns the field as typed. So
+            # an ordinary Save & Exit -> reopen -> Continue wrote the MASK
+            # OVER THE REAL ACCOUNT NUMBER - the one value Perch matches the
+            # customer on, destroyed by the most ordinary thing a rep does.
+            #
+            # Treated as "not supplied" rather than rejected: the rep did not
+            # change the field, so the stored value is what they meant. An
+            # actual edit contains no mask character and writes normally.
+            # Guarded HERE, on the write, so no client can do it - the browser
+            # fix is the other half, not the protection.
+            masked_fields = [k for k in provided_acct if looks_masked(u.get(k))]
+            if masked_fields:
+                provided_acct = [k for k in provided_acct if k not in masked_fields]
+                audit.log("masked_value_ignored_on_write",
+                          enrollment_id=enrollment_id, user_id=g.current_user["id"],
+                          details={"fields": masked_fields},
+                          ip_address=request.remote_addr)
+
+            if provided_acct:
+                # Column names come from the fixed whitelist above, never from
+                # caller input, so this interpolation cannot inject.
+                assignments = ", ".join(f"{k}=?" for k in provided_acct)
+                execute(
+                    f"UPDATE utility_accounts SET {assignments}, "
+                    f"updated_at=datetime('now') WHERE id=?",
+                    tuple(u.get(k) for k in provided_acct)
+                    + (current["utility_account_id"],),
+                )
         else:
-            cur = execute(
-                """INSERT INTO utility_accounts (customer_id, service_address_id, utility_name, account_number, secondary_account_identifier, meter_number, rate_class, monthly_usage_kwh)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (current["customer_id"], current["service_address_id"], u.get("utility_name"), u.get("account_number"),
-                 u.get("secondary_account_identifier"), u.get("meter_number"), u.get("rate_class"), u.get("monthly_usage_kwh")),
-            )
-            execute("UPDATE enrollments SET utility_account_id=? WHERE id=?", (cur.lastrowid, enrollment_id))
+            # NO ROW YET, so there is nothing to fall back to and nothing to
+            # protect: the account number IS the row. utility_accounts.
+            # account_number is NOT NULL, so a payload that carries no usable
+            # one has no row to create - and attempting it raised
+            # IntegrityError, i.e. a 500 on an ordinary progress save. That was
+            # already reachable with the key absent; a masked value is the same
+            # situation wearing a value.
+            new_account = u.get("account_number")
+            if looks_masked(new_account):
+                # A mask with no stored value behind it is not something a
+                # correct client sends. Nothing is invented from it.
+                audit.log("masked_value_ignored_on_write",
+                          enrollment_id=enrollment_id, user_id=g.current_user["id"],
+                          details={"fields": ["account_number"], "on": "create"},
+                          ip_address=request.remote_addr)
+                new_account = None
+            if new_account:
+                cur = execute(
+                    """INSERT INTO utility_accounts (customer_id, service_address_id, utility_name, account_number, secondary_account_identifier, meter_number, rate_class, monthly_usage_kwh)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (current["customer_id"], current["service_address_id"],
+                     u.get("utility_name"), new_account,
+                     u.get("secondary_account_identifier"),
+                     None if looks_masked(u.get("meter_number")) else u.get("meter_number"),
+                     u.get("rate_class"), u.get("monthly_usage_kwh")),
+                )
+                execute("UPDATE enrollments SET utility_account_id=? WHERE id=?",
+                        (cur.lastrowid, enrollment_id))
+            # Without one, the rest of the PATCH still saves. The utility
+            # account is created on the save that carries a real number.
 
     if "project_id" in data:
         execute("UPDATE enrollments SET project_id=? WHERE id=?", (data["project_id"], enrollment_id))

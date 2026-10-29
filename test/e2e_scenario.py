@@ -15,6 +15,7 @@ import os
 import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _ubs_test_db  # noqa: F401  - throwaway database; see test/_ubs_test_db.py
 
 from app import app
 from db import init_db

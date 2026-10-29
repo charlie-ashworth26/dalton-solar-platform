@@ -14,6 +14,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _ubs_test_db  # noqa: F401  - throwaway database; see test/_ubs_test_db.py
 os.environ.setdefault("PERCH_API_MODE", "mock")
 
 from app import app
@@ -41,6 +42,16 @@ def check(label, cond):
         raise AssertionError(label)
 
 
+_REAL_SUBMIT = adapter.submit_self_attestation
+_REAL_ACCEPT = adapter.accept_self_attestation
+
+
+def restore_perch():
+    """Put the real adapter functions back."""
+    adapter.submit_self_attestation = _REAL_SUBMIT
+    adapter.accept_self_attestation = _REAL_ACCEPT
+
+
 def stub_perch():
     """Stub ONLY the two Perch calls; every Dalton layer runs for real."""
     def gen(eid, acct, occ, county, status, user_id=None):
@@ -59,6 +70,26 @@ def stub_perch():
 
 
 def main():
+    """Wrapped so the adapter stubs are ALWAYS taken back off.
+
+    PRODUCTION-HARDENING FIX. stub_perch() replaces
+    adapter.submit_self_attestation and adapter.accept_self_attestation for
+    this suite and nothing ever restored them - so once this suite ran in a
+    pytest process, every later suite exercising those paths silently got the
+    stubs instead of the real adapter. Nothing fails today, which is exactly
+    what makes it worth removing: the next suite added after this one would
+    inherit a stub without any sign of it.
+
+    Same shape as the fix applied to test_virginia_enrollment.py, which leaked
+    its client boundary the same way.
+    """
+    try:
+        _main()
+    finally:
+        restore_perch()
+
+
+def _main():
     init_db(reset=True)
     seed.seed()
     stub_perch()
@@ -97,8 +128,9 @@ def main():
     check("  ...never from utility / ZIP / customer_type",
           not any(p in JS.split("async function continueFromPerchNextStep")[1][:1500]
                   for p in ("utilitySlug", "capacityZip", "customer_type")))
+    # D-2: same fail-safe, vendor-neutral wording.
     check("19. an unknown next_step FAILS SAFE",
-          "Perch returned a next step we do not recognize" in JS)
+          "could not be advanced automatically" in JS and "It has not changed" in JS)
 
     section("4. EXACT DOCUMENTED PAYLOAD")
     eid, email = full_enrollment("sa1")

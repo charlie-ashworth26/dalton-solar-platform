@@ -123,11 +123,47 @@ const PACKET = [
   check('no per-document acceptance controls',
     (rendered.match(/type="checkbox"/g) || []).length === 1);
 
-  console.log('\n--- account details are shown ---');
+  /* RE-PINNED (Phase C4). These asserted that the REP's live card repeated
+     the enrollment details. On the real page that card is mounted inside
+     step-agreement, which already shows the same customer, service and
+     program in .summary-grid directly above it - so what this pinned was the
+     duplicated summary C4 was asked to remove.
+
+     The data has not gone anywhere: the page shows it once instead of twice,
+     verified in a browser at 1440 and 390. The rep's card is checked for the
+     ABSENCE of the duplicate, and the same values are checked where that list
+     IS the only summary - the customer surface, below. */
+  console.log('\n--- the rep card no longer repeats the page summary ---');
+  check('no second detail list on the rep card', !rendered.includes('agr-details'));
+  check('  ...no second "Final step" chip', !/card-eyebrow">Final step/.test(rendered));
+  check('  ...no second "Review &…" heading',
+    !/Review &amp; complete|Review & complete/.test(rendered));
+  check('  ...and no card nested inside the page card',
+    rendered.trim().startsWith('<div class="agr-block">'));
+
+  console.log('\n--- the CUSTOMER card still carries the details in full ---');
+  vm.runInContext(`mountAgreements({actor:'customer', enrollmentId: 42,
+    contracts: ${JSON.stringify(PACKET)},
+    acceptanceEnabled: true, readOnly: false, submitted: false,
+    summary: {customerName:'Johnnie Testcustomer', email:'j@example.com',
+              utility:'national-grid-ny', serviceAddress:'123 Main St, Albany, NY 12207',
+              accountNumber:'1234567890'}});`, ctx);
+  const custCard = cache.get('agr-host-customer')
+    ? cache.get('agr-host-customer').innerHTML : '';
+  check('the customer card rendered', custCard.length > 0);
+  check('  ...as a card, with its own framing',
+    custCard.trim().startsWith('<div class="card">')
+    && /card-eyebrow">Final step/.test(custCard));
   for (const v of ['Johnnie Testcustomer', 'j@example.com', 'national-grid-ny',
                    '123 Main St, Albany, NY 12207', '1234567890']) {
-    check(`details include ${v}`, rendered.includes(v));
+    check(`details include ${v}`, custCard.includes(v));
   }
+  // Back to the rep mount for the link checks that follow.
+  vm.runInContext(`mountAgreements({actor:'rep', enrollmentId: 42, contracts: ${JSON.stringify(PACKET)},
+    acceptanceEnabled: true, readOnly: false, submitted: false,
+    summary: {customerName:'Johnnie Testcustomer', email:'j@example.com',
+              utility:'national-grid-ny', serviceAddress:'123 Main St, Albany, NY 12207',
+              accountNumber:'1234567890'}});`, ctx);
 
   console.log('\n--- agreement names are inline links carrying the real index ---');
   const links = [...rendered.matchAll(/data-index="(\d+)"[^>]*onclick="openAgreementDoc\((\d+)\)/g)];

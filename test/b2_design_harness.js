@@ -42,7 +42,10 @@ check(`all ${HANDLERS.length} handlers still wired (missing: ${missingH.join(','
 
 console.log('\n--- design tokens ---');
 for(const t of ['--brand','--navy','--gold','--ink','--bg','--surface','--border',
-                '--radius','--shadow','--ease','--t-base'])
+                '--radius','--shadow','--ease','--dur-base',
+                // C1 design system
+                '--t-body','--t-label','--w-bold','--focus-ring',
+                '--status-action-bg','--status-complete-ink'])
   check(`token ${t} defined`, css.includes(t+':'));
 check('green reserved (not used as a page background)',
   !/--bg:\s*#[0-9a-f]*[^;]*green/i.test(css));
@@ -50,27 +53,30 @@ check('spacing scale exists', css.includes('--s1:')&&css.includes('--s6:'));
 check('single easing curve', (css.match(/--ease:/g)||[]).length===1);
 
 console.log('\n--- typography ---');
-check('h1 uses a fluid clamp', /h1\{font-size:clamp\(/.test(css));
+check('page titles use the h1 step', /h1\{[^}]*font-size:var\(--t-h1\)/.test(css));
+check('  ...and the one fluid step is reserved for hero titles',
+  /--t-hero:clamp\(/.test(css) && /\.agr-page h1\{[^}]*var\(--t-hero\)/.test(css));
 check('negative letter-spacing on headings', /letter-spacing:-0\.0\d+em/.test(css));
 check('lead copy has a measure cap', /\.lead\{[^}]*max-width:\s*\d+ch/.test(css));
 check('body line-height set for readability', /body\{[^}]*line-height:1\.5/.test(css));
 
 console.log('\n--- one obvious primary action ---');
-check('primary button is the brand colour', /\.btn-primary\{background:var\(--brand\)/.test(css));
+check('primary button is the accessible brand green',
+  /\.btn-primary\{background:var\(--brand-solid\)/.test(css));
 check('secondary is quiet', /\.btn-ghost\{background:var\(--surface\)/.test(css));
-check('disabled state defined', /\.btn:disabled\{/.test(css));
+check('disabled state defined', /\.btn:disabled,\.btn\[aria-disabled=true\]\{/.test(css));
 check('focus-visible ring on buttons', /\.btn:focus-visible\{/.test(css));
 
 console.log('\n--- form controls ---');
 check('inputs share one height', /input\[type=text\][\s\S]{0,400}height:44px/.test(css));
-check('focus ring on inputs', /input:focus[\s\S]{0,200}box-shadow:0 0 0 3px var\(--brand-ring\)/.test(css));
+check('focus ring on inputs', /input:focus[\s\S]{0,200}box-shadow:var\(--focus-ring\)/.test(css));
 check('error state defined', /input\.err[\s\S]{0,160}--danger/.test(css));
 check('selects get a custom chevron', /select\{[\s\S]{0,300}background-image:url\("data:image\/svg\+xml/.test(css));
 check('disabled inputs are visibly disabled', /input:disabled[\s\S]{0,120}surface-sunk/.test(css));
 
 console.log('\n--- motion is meaningful, not decorative ---');
 check('prefers-reduced-motion honoured', /@media \(prefers-reduced-motion: reduce\)/.test(css));
-check('  ...durations collapse to 1ms', /--t-base:1ms/.test(css));
+check('  ...durations collapse to 1ms', /--dur-base:1ms/.test(css));
 check('  ...animations disabled', /animation-duration:1ms !important/.test(css));
 check('entrance animation is subtle (<=8px travel)',
   /@keyframes ceeIn\{from\{opacity:0;transform:translateY\([0-8]px\)/.test(css));
@@ -88,17 +94,59 @@ check('skeleton shimmer defined', /@keyframes ceeShimmer/.test(css));
 check('loading helper used, not bare text', (js.match(/ceeLoading\(/g)||[]).length>=3);
 
 console.log('\n--- responsive: 4 breakpoints, no sideways scroll ---');
-for(const bp of ['1200px','820px','430px'])
-  check(`breakpoint ${bp} present`, css.includes(`max-width:${bp}`));
-check('overflow-x hidden globally', /html,body\{max-width:100%;overflow-x:hidden/.test(css));
+/* RE-PINNED (Phase C3). Everything in this section used to be matched by
+   literal breakpoint number - 'max-width:820px' plus a {0,900} character
+   window - and by the presence of the overflow-x:hidden crutch. C3 was asked
+   to consolidate the thirteen scattered breakpoints into four and to remove
+   that crutch, so seven checks here failed while every rule they name was
+   intact and merely sitting in a renumbered band.
+   The band is now resolved by name and its rules are looked for inside it,
+   which is both what these checks always meant and robust against the next
+   renumbering. The audit's ladder is the constant; the window is gone. */
+const BANDS = { wide: 1199, touch: 899, narrow: 599, tiny: 430 };
+function band(px){            // every @media (max-width:<px>) body, joined
+  const re = /@media\s*\(\s*max-width:\s*(\d+)px\s*\)\s*\{/g;
+  let m, out = '';
+  while((m = re.exec(css))){
+    if(+m[1] !== px) continue;
+    let i = m.index + m[0].length, depth = 1;
+    while(i < css.length && depth){
+      if(css[i] === '{') depth++;
+      else if(css[i] === '}') depth--;
+      i++;
+    }
+    out += css.slice(m.index + m[0].length, i - 1);
+  }
+  return out;
+}
+const TOUCH = band(BANDS.touch);
+for(const [name, px] of Object.entries(BANDS))
+  check(`breakpoint ${name} (${px}px) present`, band(px).length > 0);
+// @media only: a plain max-width DECLARATION on an ordinary rule is a layout
+// cap, not a breakpoint, and counting those made this read thirteen again.
+const bpList = [...new Set((css.match(/@media[^{]*?max-width:\s*(\d+)px/g)||[])
+  .map((s)=>+/(\d+)px/.exec(s)[1]))].sort((a,b)=>a-b);
+check(`four breakpoints, not thirteen (${bpList.join(', ')})`,
+  bpList.join(',') === '430,599,899,1199');
+/* The crutch is GONE on purpose: it hid the 390px clipping rather than fixing
+   it, so the audit's defect survived behind it. What remains is the
+   containment that is genuinely load-bearing. Whether the page actually
+   scrolls sideways is now measured, at six widths, by c3_responsive_harness.js
+   and in a real browser - not asserted from the presence of a hack. */
+check('nothing hides horizontal overflow',
+  !/(?:^|\})\s*(?:html|body|html\s*,\s*body)[^{}]*\{[^}]*overflow-x\s*:\s*hidden/
+    .test(css));
+check('  ...and the load-bearing containment stays',
+  /html,body\{max-width:100%/.test(css));
 check('tables become cards on mobile', /\.table thead[\s\S]{0,120}clip:rect\(0 0 0 0\)/.test(css));
 check('  ...cells carry their label', /\.table td::before[\s\S]{0,80}attr\(data-label\)/.test(css));
 check('  ...and the JS emits data-label', (js.match(/data-label=/g)||[]).length>=15);
-check('touch targets >=44px on mobile', /@media \(max-width:820px\)[\s\S]{0,900}\.btn\{height:46px/.test(css));
+check('touch targets >=44px on mobile',
+  /\.btn\{height:48px/.test(TOUCH));
 check('inputs 16px on mobile (no iOS zoom)',
-  /@media \(max-width:820px\)[\s\S]{0,1200}input,select,textarea\{height:46px;font-size:16px/.test(css));
+  /input,select,textarea\{height:48px;font-size:16px/.test(TOUCH));
 check('wizard actions stack on mobile',
-  /@media \(max-width:820px\)[\s\S]{0,900}\.wizard-actions\{flex-direction:column-reverse/.test(css));
+  /\.wizard-actions\{flex-direction:column-reverse/.test(TOUCH));
 check('address grid stays usable on mobile', /\.row3\.address-grid\{grid-template-columns/.test(css));
 // The Customer & Bill rebuild replaced .row3.address-grid with .fgrid-addr.
 // The billing block still uses row3 elsewhere; assert the ADDRESS GRID exists in
@@ -106,27 +154,60 @@ check('address grid stays usable on mobile', /\.row3\.address-grid\{grid-templat
 // Explicit CSS Grid replaced the fgrid helpers.
 check('  ...and the markup uses the mockup address grid',
   /class="address"/.test(html) && (html.match(/class="address"/g)||[]).length>=2);
-check('  ...declared 2fr 1fr 110px with a full-width street',
-  /\.address\{display:grid;grid-template-columns:2fr 1fr 110px/.test(css)
-  && /\.address \.street\{grid-column:1\/-1/.test(css));
-check('  ...collapsing at the mockup breakpoint',
-  /@media\(max-width:900px\)[\s\S]*?\.address\{grid-template-columns:1fr 120px/.test(css));
+/* RE-PINNED (Phase C4). These named the mockup's own track list - 2fr 1fr
+   110px, with the street opting out via grid-column:1/-1, collapsing to
+   1fr 120px on touch. C4 replaced the screen's THREE unrelated grids with one
+   twelve-column system because that track list was the alignment problem: it
+   produced seven different field widths on one form and five address rows.
+   The property these checks exist for is that the address is a grid whose
+   street spans wide and whose parts line up, and that it collapses on touch -
+   all still true, so they are re-pinned to the system that now provides it. */
+check('  ...on the shared twelve-column grid',
+  /\.access,\.fields,\.address\{display:grid;grid-template-columns:repeat\(12,minmax\(0,1fr\)\)/
+    .test(css.replace(/\s+/g, '')));
+check('  ...with the street spanning most of its row',
+  /\.address \.street\{grid-column:span 8/.test(css));
+// The street's full-span rule is written as one part of a selector LIST, so
+// this looks for the rule that contains it rather than for an exact block.
+const touchStreet = (TOUCH.match(/([^{}]+)\{([^{}]*)\}/g) || []).find((b) =>
+  /\.address\s+\.street/.test(b.split('{')[0]) && /grid-column:1\/-1/.test(b));
+check('  ...collapsing to a single-field grid on touch',
+  /\.access,\.fields,\.address\{grid-template-columns:repeat\(6,minmax\(0,1fr\)\)/
+    .test(TOUCH.replace(/\s+/g, '')) && !!touchStreet);
 check('modals become bottom sheets on mobile',
-  /@media \(max-width:820px\)[\s\S]{0,600}\.cee-modal-overlay\{padding:0;align-items:flex-end/.test(css));
+  /\.cee-modal-overlay\{padding:0;align-items:flex-end/.test(TOUCH));
 check('long values wrap rather than overflow', /overflow-wrap:anywhere/.test(css));
 
 console.log('\n--- dashboard polish ---');
 check('stat cards defined', /\.stat-card\{/.test(css));
-check('  ...complete bucket is highlighted', /\.stat-card\.stat-verified \.sc-num\{color:var\(--brand\)/.test(css));
+/* RE-PINNED (Phase C4). This asserted that ONE bucket - Complete, via a
+   .stat-verified hook - got a coloured numeral. That was the defect C4 was
+   asked to fix: the other three counters, including "Needs Attention", drew
+   in plain ink, so the only card that looked like it meant something was the
+   one that needed no action. All four counters now take their accent and
+   numeral from their own C1 status family, and .stat-verified is retired
+   because it was a second, disagreeing way of saying "complete". */
+const flat = css.replace(/\s+/g, '');
+check('  ...the neutral family sets the baseline treatment',
+  /\.stat-fam\{border-left:3pxsolidvar\(--status-neutral-ink\)/.test(flat)
+  && /\.stat-fam\.sc-num\{color:var\(--status-neutral-ink\)/.test(flat));
+check('  ...and each of the other three overrides it with its own ink',
+  [['action-needed', 'action'], ['complete', 'complete'], ['attention', 'attention']]
+    .every(([fam, ink]) =>
+      flat.includes(`.stat-fam-${fam}{border-left-color:var(--status-${ink}-ink)`)
+      && flat.includes(`.stat-fam-${fam}.sc-num{color:var(--status-${ink}-ink)`)));
+check('  ...and the one-off .stat-verified hook is no longer rendered',
+  /class="stat-card stat-fam stat-fam-'\s*\+\s*bucket\.family/.test(js));
 check('status pills have a dot indicator', /\.status-pill::before\{content:''/.test(css));
 check('dead Project column replaced by the enrollment code',
   !html.includes('<th>Project</th>') && html.includes('<th>Enrollment</th>'));
 check('  ...and the row renders it', js.includes("data-label=\"Enrollment\""));
 
 console.log('\n--- program cards ---');
-check('selected state is obvious', /\.prog-option\.selected\{box-shadow:0 0 0 3px var\(--brand-ring\)/.test(css));
+check('selected state is obvious', /\.prog-option\.selected\{box-shadow:var\(--ring-selected\)/.test(css));
 check('  ...with a check affordance', /\.prog-option\.selected \.prog-name::after\{content:'✓'/.test(css));
-check('savings uses the display face', /\.prog-savings\{font-family:'Manrope'/.test(css));
+check('savings uses the display face',
+  /\.prog-savings\{font-family:var\(--font-display\)/.test(css));
 
 console.log('\n--- B1 + Phase A behaviour untouched ---');
 check('one acknowledgement checkbox', (js.match(/id="agr-ack-check"/g)||[]).length===1);

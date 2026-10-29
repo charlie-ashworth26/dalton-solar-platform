@@ -33,7 +33,13 @@ function makeDom(){
       style:{},dataset:{},className:'',hidden:false,_rank:rank,
       classList:{_s:new Set(),add(c){this._s.add(c);},remove(c){this._s.delete(c);},
         contains(c){return this._s.has(c);},toggle(){}},
-      setAttribute(){},getAttribute:()=>null,appendChild(){},insertBefore(){},
+      // removeAttribute belongs beside setAttribute: an element stub that can
+      // only ever GAIN attributes is not modelling an element. C3 clearing a
+      // stale field error - setFieldError(..., '') drops aria-invalid - called
+      // it, and this stub threw on a method every real element has, failing
+      // the whole harness for a gap in the stub rather than a fault in the app.
+      setAttribute(){},getAttribute:()=>null,removeAttribute(){},
+      appendChild(){},insertBefore(){},
       removeChild(){},firstChild:null,focus(){this.focused=true;},click(){},
       addEventListener(){},removeEventListener(){},querySelector:()=>null,
       querySelectorAll:()=>[],scrollIntoView(){},offsetWidth:0};

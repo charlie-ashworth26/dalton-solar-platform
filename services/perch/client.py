@@ -112,6 +112,39 @@ def is_duplicate_email_error(exc) -> bool:
     return False
 
 
+def extract_next_step(data: dict):
+    """THE one place UBS reads 'where do I go next' from a Perch response.
+
+    Three spellings have to be tolerated at once, and this is the only
+    function that knows that:
+
+      * `next_step`      - documented on v1, and the ONLY spelling on v2
+      * `next_step_url`  - observed on Perch staging v1 (2026-08), confirmed
+                           on /token, /capacity, /enroll, /lmi/proof_docs and
+                           /contracts
+      * absent           - legitimately, on /contracts/accept, which is the
+                           last step and documents no next_step at all
+
+    The VALUE is returned exactly as Perch sent it: a full URL on v1, a bare
+    path like `/enroll` on v2. Resolving that into a step key is
+    workflow.resolve_next_step_key()'s job, not this one's - this function
+    only answers which key the value was under.
+
+    Returns (next_step, response_shape). The shape is recorded so the audit
+    trail says which spelling Perch actually used on each call.
+    """
+    data = data or {}
+    # The documented name wins when a response carries both.
+    next_step = data.get("next_step") or data.get("next_step_url")
+    if "next_step" in data:
+        shape = "documented"
+    elif "next_step_url" in data:
+        shape = "staging_alias"
+    else:
+        shape = "no_next_step"
+    return next_step, shape
+
+
 def normalize_capacity_response(data: dict) -> dict:
     """Normalizes BOTH the documented and the observed staging capacity response.
 
@@ -132,12 +165,11 @@ def normalize_capacity_response(data: dict) -> dict:
     """
     data = data or {}
     # Documented name wins when both are present.
-    next_step = data.get("next_step") or data.get("next_step_url")
+    next_step, _shape = extract_next_step(data)
     return {
         "project_details": data.get("project_details"),
         "next_step": next_step,
-        "response_shape": "documented" if "next_step" in data else (
-            "staging_alias" if "next_step_url" in data else "no_next_step"),
+        "response_shape": _shape,
         "raw": data,
     }
 
@@ -177,9 +209,28 @@ def build_enrollment_multipart(enrollment: dict):
     form = {}
     files = {}
 
-    # Flat top-level fields
+    # Flat top-level fields.
+    #
+    # E3 added two, both v2 and both OPTIONAL in the spec's sense - they are
+    # sent when UBS has them and omitted otherwise, never sent blank:
+    #
+    #   county           "County name of the customer, from
+    #                    GET /markets/counties. Matched case-insensitively. [...]
+    #                    If you do not send it, only projects with no county
+    #                    restriction can be used." A blank value is treated by
+    #                    Perch as not sent, so omitting is the same thing and
+    #                    is clearer on the wire.
+    #   savings_percent  "Optional when only one rate applies, required when
+    #                    more than one does." The caller decides which; this
+    #                    only serializes what it was handed.
+    #
+    # They are harmless on v1: v1 ignores savings_percent entirely ("Ignored
+    # when the project was already selected by the deprecated
+    # POST /v1/enrollments/capacity") and the adapter does not supply either
+    # field on a v1 enrollment - see adapter.create_enrollment.
     for key in ("email_address", "first_name", "last_name", "phone_number",
-                "customer_type", "utility_name", "zip_code",
+                "customer_type", "utility_name", "zip_code", "county",
+                "savings_percent",
                 "business_name", "business_title", "business_phone"):
         val = enrollment.get(key)
         if val not in (None, ""):
@@ -300,10 +351,18 @@ def normalize_self_attestation_response(data: dict) -> dict:
     sa = (data or {}).get("self_attestation") or {}
     if isinstance(sa, str):          # defensive: accept string form
         sa = {}
+    # E1: through the shared extractor, like every other normalizer. This one
+    # read `next_step` alone, so it would miss the staging alias the other
+    # endpoints are known to use - and on v2 it now receives a bare path.
+    next_step, shape = extract_next_step(data)
     return {
         "utility_account_number": sa.get("utility_account_number"),
         "document_available": bool(sa.get("url")),
-        "next_step_url": (data or {}).get("next_step"),
+        "next_step": next_step,
+        # Legacy alias kept so callers written against v1 keep working. Same
+        # value, whichever spelling and whichever version Perch answered with.
+        "next_step_url": next_step,
+        "response_shape": shape,
         "raw": data or {},
     }
 
@@ -313,9 +372,12 @@ def normalize_self_attestation_accept_response(data: dict) -> dict:
 
     Perch returns {"self_attestation": "<message>", "next_step": ".../contracts"}.
     """
+    next_step, shape = extract_next_step(data)
     return {
         "message": (data or {}).get("self_attestation"),
-        "next_step_url": (data or {}).get("next_step"),
+        "next_step": next_step,
+        "next_step_url": next_step,   # legacy alias, same value
+        "response_shape": shape,
         "raw": data or {},
     }
 
@@ -350,7 +412,7 @@ def normalize_contracts_response(data: dict) -> dict:
     over touching `raw` unless you are actually performing the download.
     """
     data = data or {}
-    next_step = data.get("next_step") or data.get("next_step_url")
+    next_step, _shape = extract_next_step(data)
     raw_contracts = data.get("contract_urls")
     if not isinstance(raw_contracts, list):
         raw_contracts = []
@@ -380,8 +442,7 @@ def normalize_contracts_response(data: dict) -> dict:
         "contracts": safe,
         "contract_count": len(safe),
         "next_step": next_step,
-        "response_shape": "documented" if "next_step" in data else (
-            "staging_alias" if "next_step_url" in data else "no_next_step"),
+        "response_shape": _shape,
         "contract_urls_present": "contract_urls" in data,
         "raw": data,
     }
@@ -563,7 +624,7 @@ def normalize_status_response(data: dict) -> dict:
     /lmi/proof_docs and /contracts.
     """
     data = data or {}
-    next_step = data.get("next_step") or data.get("next_step_url")
+    next_step, _shape = extract_next_step(data)
     completed_steps = data.get("completed_steps")
     remaining_steps = data.get("remaining_steps")
     return {
@@ -572,8 +633,7 @@ def normalize_status_response(data: dict) -> dict:
         # Only a literal True counts as complete - never coerce a truthy value.
         "completed": data.get("completed") is True,
         "next_step": next_step,
-        "response_shape": "documented" if "next_step" in data else (
-            "staging_alias" if "next_step_url" in data else "no_next_step"),
+        "response_shape": _shape,
         "raw": data,
     }
 
@@ -581,11 +641,10 @@ def normalize_status_response(data: dict) -> dict:
 def normalize_proof_docs_response(data: dict) -> dict:
     """Normalize proof-doc success response while preserving the raw body."""
     data = data or {}
-    next_step = data.get("next_step") or data.get("next_step_url")
+    next_step, _shape = extract_next_step(data)
     return {
         "next_step": next_step,
-        "response_shape": "documented" if "next_step" in data else (
-            "staging_alias" if "next_step_url" in data else "no_next_step"),
+        "response_shape": _shape,
         "raw": data,
     }
 
@@ -600,11 +659,10 @@ def normalize_enroll_response(data: dict) -> dict:
         LMI self-attest    -> /lmi/self_attestation
     """
     data = data or {}
-    next_step = data.get("next_step") or data.get("next_step_url")
+    next_step, _shape = extract_next_step(data)
     return {
         "next_step": next_step,
-        "response_shape": "documented" if "next_step" in data else (
-            "staging_alias" if "next_step_url" in data else "no_next_step"),
+        "response_shape": _shape,
         "raw": data,
     }
 
@@ -776,18 +834,285 @@ def attach_response_diagnostics(exc, resp):
     return exc
 
 
+# The v2 error codes the spec defines, plus the shape they all share:
+# lower_snake_case, no spaces, no punctuation. Matching the SHAPE rather than
+# a fixed list means a code Perch adds later is still recognised as a code;
+# matching a list alone would let a new one through into a rep's face.
+_V2_ERROR_CODES = frozenset({
+    "bad_request", "unauthorized", "forbidden", "not_found", "conflict",
+    "unprocessable_entity", "too_many_requests", "internal_server_error",
+    "service_unavailable",
+})
+
+
+def _looks_like_machine_code(value):
+    """True when `error` is a code rather than a sentence.
+
+    A v1 `error` holds prose - "24112 is not valid for the given utility" -
+    which has spaces and usually punctuation. A v2 `error` is a token like
+    `unprocessable_entity`. Anything with whitespace is prose; anything that
+    is a short lower_snake_case word is a code.
+    """
+    if not isinstance(value, str):
+        return False
+    token = value.strip()
+    if not token or any(ch.isspace() for ch in token):
+        return False
+    if token in _V2_ERROR_CODES:
+        return True
+    # Shape test for codes not in the published list yet.
+    return (len(token) <= 48
+            and token == token.lower()
+            and all(ch.isalnum() or ch == "_" for ch in token)
+            and "_" in token)
+
+
+# What to say when a machine code arrives with NO human message beside it.
+# v2 is not obliged to send `message`, and a bare {"error": "not_found"} would
+# otherwise put the token itself in front of a rep.
+_V2_CODE_PROSE = {
+    "bad_request": "Perch could not read the request.",
+    "unauthorized": "Perch did not accept the credentials for this request.",
+    "forbidden": "Perch declined this request for this partner account.",
+    "not_found": "Perch has no record matching this request.",
+    # Deliberately "competing" and not "conflicting": the suite asserts that no
+    # code token appears in its own prose, and "conflicting" contains
+    # "conflict". A real word collision would blunt that assertion for every
+    # other code too.
+    "conflict": "Perch already has a competing record for this request.",
+    "unprocessable_entity": "Perch rejected the details on this request.",
+    "too_many_requests": "Perch is rate-limiting requests right now.",
+    "internal_server_error": "Perch had an internal error handling this request.",
+    "service_unavailable": "Perch is temporarily unavailable.",
+}
+
+
+def _code_prose(token):
+    """A sentence for a code that came with no message.
+
+    A code Perch adds later has no entry here, so it is softened into words
+    rather than printed as an identifier: `lmi_docs_required` reads as
+    "Perch rejected this request (lmi docs required)." Not elegant, but it is
+    a sentence, and no rep is left staring at a JSON token. The raw code is
+    still in the attached body for the audit record either way."""
+    token = (token or "").strip()
+    known = _V2_CODE_PROSE.get(token)
+    if known:
+        return known
+    words = token.replace("_", " ").strip()
+    return f"Perch rejected this request ({words})." if words else ""
+
+
+# ─────────────── Field-level 422 errors, in plain language ───────────────
+#
+# E3. Perch's ValidationErrorsResponse carries, per field, a machine `code`
+# and a `message` written for an integrator rather than for a rep. Both are
+# a problem in front of a salesperson:
+#
+#   code     `capacity_unavailable`, `required`, `invalid`, `not_found` -
+#            internal tokens, exactly what C3 ruled out for Perch's own
+#            wording and what E1 removed from the other two envelopes.
+#   message  "Contact Perch Energy and fetch capacity using the /capacity
+#            endpoint" is an instruction to US, not to the rep. So is "Fetch
+#            the available savings percents using the /v2/enrollments/capacity
+#            endpoint". A rep cannot act on either, and reading a partner's
+#            endpoint names to a customer on the phone is worse than useless.
+#
+# So a known (field, code) pair is rewritten into a sentence a rep can act on,
+# and the raw body is still attached by attach_response_diagnostics() for the
+# audit record. An UNKNOWN pair falls back to Perch's own message with the
+# code dropped and any endpoint instruction trimmed - new validations keep
+# working without a release, and still never print a token.
+#
+# Keys are (field, code). A field with no code-specific entry falls through to
+# (field, None), then to the generic path.
+_FIELD_ERROR_TEXT = {
+    ("savings_percent", "required"):
+        "Choose the savings rate for this customer before submitting.",
+    ("savings_percent", "invalid"):
+        "That savings rate is not available for this customer. "
+        "Re-check availability and choose one of the rates shown.",
+    ("county", "not_found"):
+        "That county isn't recognized for this state. Please check the "
+        "selected county and try again.",
+    ("customer_type", "capacity_unavailable"):
+        "The selected savings program no longer has capacity for this "
+        "address. Re-check availability and choose from what is offered.",
+    # Perch sends both of the above AND the multi-account refusal below under
+    # the SAME code. See _FIELD_ERROR_BY_MESSAGE.
+    ("customer_type", "invalid"):
+        "The selected savings program isn't valid for this enrollment. "
+        "Re-check availability and choose again.",
+    ("zip_code", "not_in_service_area"):
+        "This ZIP code is outside the service area for the selected utility.",
+    ("utility_name", "invalid"):
+        "That utility is not valid for this enrollment.",
+    ("email_address", "already_exists"):
+        "An enrollment already exists for this email address.",
+    ("phone_number", "invalid_format"):
+        "Enter a 10-digit phone number with no country code.",
+}
+
+# ONE CODE, TWO MEANINGS. Perch returns `capacity_unavailable` on
+# customer_type both when the program genuinely has no capacity AND when an
+# LMI enrollment carries more than one utility account - which is not a
+# capacity problem at all and has a completely different fix. The code cannot
+# tell them apart, so these match on a distinctive fragment of the message and
+# are checked BEFORE the (field, code) table.
+#
+# Matching on message text is ordinarily a bad idea, and it is used here only
+# because the alternative is telling a rep to re-check availability over a
+# problem that has nothing to do with availability. A wording change on
+# Perch's side costs the specific sentence and falls back to the generic one.
+_FIELD_ERROR_BY_MESSAGE = (
+    ("only one utility account",
+     "The income-qualified program allows only one utility account per "
+     "enrollment. Remove the extra account, or choose the standard "
+     "residential program."),
+)
+
+# A sentence per CODE, for a field with no entry of its own. This is the tier
+# that keeps a message like "is required for Business customer type" - which
+# is Perch's wording, and is the word "required" doing double duty as both the
+# code and the prose - from being echoed at a rep as a sentence fragment
+# hanging off a label. `{label}` is the rep-facing field name.
+_CODE_DEFAULT_TEXT = {
+    "required": "{label} is required for this enrollment.",
+    "invalid": "{label} is not valid for this enrollment.",
+    "invalid_format": "{label} is not in the format this enrollment needs.",
+    "invalid_characters": "{label} contains characters that are not allowed.",
+    "not_found": "{label} was not recognised.",
+    "empty": "{label} cannot be blank.",
+    "duplicate": "{label} was supplied more than once.",
+    "already_exists": "{label} is already in use on another enrollment.",
+    "blocklisted": "{label} cannot be used for this enrollment.",
+    "missing_file": "{label} is missing its file.",
+    "invalid_file_type": "{label} must be a PDF.",
+    "file_too_large": "{label} is too large to upload.",
+    "too_many_files": "{label} has too many files attached.",
+    "too_many_accounts": "{label} has more accounts than this program allows.",
+    "not_in_service_area": "{label} is outside the service area.",
+}
+
+# Field names as a rep would say them. Used for the fallback path, so even an
+# unmapped error reads as words rather than as a JSON key.
+_FIELD_LABELS = {
+    "savings_percent": "Savings rate",
+    "county": "County",
+    "customer_type": "Savings program",
+    "utility_name": "Utility",
+    "zip_code": "ZIP code",
+    "email_address": "Email address",
+    "phone_number": "Phone number",
+    "utility_accounts": "Utility account",
+    "business_name": "Business name",
+    "business_title": "Business title",
+    "business_phone": "Business phone",
+    "home_address": "Home address",
+    "billing_address": "Billing address",
+}
+
+# Perch's integrator-facing instructions, stripped from any message that
+# reaches a rep. Matched case-insensitively from the first occurrence to the
+# end of the sentence.
+_INTEGRATOR_INSTRUCTIONS = (
+    "contact perch energy",
+    "fetch the available savings percents",
+    "fetch capacity using",
+    "using the /",
+)
+
+
+def _field_label(field):
+    """A rep-facing name for a Perch field key."""
+    key = str(field or "").strip()
+    known = _FIELD_LABELS.get(key)
+    if known:
+        return known
+    # Strip any array indexing - `utility_accounts[0][meter_numbers][1]` is
+    # "Utility account" to a rep, not a path expression.
+    base = key.split("[")[0]
+    known = _FIELD_LABELS.get(base)
+    if known:
+        return known
+    words = base.replace("_", " ").strip()
+    return (words[:1].upper() + words[1:]) if words else "This enrollment"
+
+
+def _strip_integrator_instructions(text):
+    """Remove the parts of a Perch message addressed to the integrator."""
+    cleaned = str(text or "").strip()
+    lowered = cleaned.lower()
+    cut = len(cleaned)
+    for marker in _INTEGRATOR_INSTRUCTIONS:
+        idx = lowered.find(marker)
+        if idx != -1:
+            cut = min(cut, idx)
+    cleaned = cleaned[:cut].strip()
+    # A message that was ONLY an instruction leaves nothing; the caller
+    # substitutes a generic sentence rather than printing an empty string.
+    return cleaned.rstrip(" .,;:").strip()
+
+
+def _field_error_text(item):
+    """One field-level 422 error, as a rep should read it.
+
+    Never prints the machine code. Never prints Perch's endpoint names.
+    """
+    field = item.get("field") or item.get("name") or ""
+    code = (item.get("code") or "").strip()
+    raw_message = item.get("message") or item.get("detail") or ""
+    acct = item.get("utility_account_number")
+
+    lowered_message = str(raw_message).lower()
+    text = next((sentence for marker, sentence in _FIELD_ERROR_BY_MESSAGE
+                 if marker in lowered_message), None)
+
+    if not text:
+        text = (_FIELD_ERROR_TEXT.get((field, code))
+                or _FIELD_ERROR_TEXT.get((field, None)))
+
+    label = _field_label(field)
+
+    if not text and code in _CODE_DEFAULT_TEXT:
+        # A code UBS knows, on a field it has no specific wording for.
+        text = _CODE_DEFAULT_TEXT[code].format(label=label)
+
+    if not text:
+        # Neither mapped: Perch's own wording, cleaned. "must be 10 digits"
+        # becomes "Phone number: must be 10 digits." - a sentence fragment,
+        # but a readable one, and it carries no token. This is the tier a
+        # validation Perch adds tomorrow lands in, which is why it exists.
+        cleaned = _strip_integrator_instructions(raw_message)
+        if cleaned:
+            text = f"{label}: {cleaned}."
+        else:
+            text = f"{label} was not accepted. Re-check it and try again."
+
+    if acct:
+        # Which account, when Perch scopes an error to one of several. The
+        # number itself is what a rep looks up, so it stays.
+        text += f" (account {acct})"
+    return text
+
+
 def _msg(resp):
     """Formats a Perch error body into a readable message.
 
-    Perch uses TWO error envelopes, both now observed live:
+    Perch uses THREE error envelopes, all now observed live:
 
-      1. ErrorResponse            {"error": "...", "message": "..."}
-      2. ValidationErrorsResponse {"errors": [{"field","code","message"}, ...]}
+      1. v1 ErrorResponse         {"error": "<human sentence>"}
+      2. v2 ErrorResponse         {"error": "<machine_code>",
+                                   "message": "<human sentence>"}
+      3. ValidationErrorsResponse {"errors": [{"field","code","message"}, ...]}
 
-    The original implementation only handled (1), so a real /enroll 422 in
-    envelope (2) rendered as the useless string "None: None". Both are handled
-    now. The full response is still attached to the exception by
-    attach_response_diagnostics() regardless of shape.
+    (1) and (2) are the SAME JSON shape meaning different things; see the
+    comment at the error/message branch below. The original implementation
+    only handled (1), so a real /enroll 422 in envelope (3) rendered as the
+    useless string "None: None". All three are handled now. The full response
+    is still attached to the exception by attach_response_diagnostics()
+    regardless of shape, so nothing dropped from the text is lost to the audit
+    record.
     """
     try:
         body = resp.json()
@@ -802,24 +1127,46 @@ def _msg(resp):
                 if not isinstance(item, dict):
                     parts.append(str(item))
                     continue
-                field = item.get("field") or item.get("name") or "(no field)"
-                code = item.get("code")
-                message = item.get("message") or item.get("detail") or ""
-                # Include the utility account number when Perch scopes an error
-                # to one account, so a multi-account failure is attributable.
-                acct = item.get("utility_account_number")
-                seg = f"{field}"
-                if code:
-                    seg += f" [{code}]"
-                if message:
-                    seg += f": {message}"
-                if acct:
-                    seg += f" (utility_account_number={acct})"
-                parts.append(seg)
+                parts.append(_field_error_text(item))
             return "; ".join(parts)
 
         if body.get("error") is not None or body.get("message") is not None:
-            return f"{body.get('error')}: {body.get('message')}"
+            # Join only the parts that are actually present.
+            # This used to be an unconditional f"{error}: {message}", which
+            # rendered a body carrying only `error` as
+            #     "24112 is not valid for the given utility: None"
+            # The trailing ": None" is this formatter printing an absent
+            # field, but it reads exactly like a null value WE sent - and it
+            # caused a real capacity rejection to be misread as "the utility
+            # slug never reached the request".
+            #
+            # E1 - THE SAME ENVELOPE MEANS TWO DIFFERENT THINGS.
+            #
+            #   v1: {"error": "24112 is not valid for the given utility"}
+            #       `error` IS the human sentence. There is no `message`.
+            #   v2: {"error": "unprocessable_entity",
+            #        "message": "Email is not valid"}
+            #       `error` is a MACHINE CODE and `message` is the sentence.
+            #
+            # Joining both, as this did, produced "unprocessable_entity: Email
+            # is not valid" on v2 - an internal token in front of a rep, which
+            # is exactly what C3 ruled out for Perch's own wording. So when a
+            # machine code sits beside a human message, the message wins and
+            # the code is dropped from the text. The code is not lost: the full
+            # body is still attached by attach_response_diagnostics() for the
+            # audit record and the logs.
+            # A bare {"error": "<code>"} with no message gets a sentence too -
+            # v2 is not obliged to send `message`, and the token alone would
+            # land in front of a rep unaltered.
+            error_val = body.get("error")
+            message_val = body.get("message")
+            if _looks_like_machine_code(error_val):
+                if message_val is not None:
+                    return str(message_val)
+                return _code_prose(error_val)
+            parts = [str(body[k]) for k in ("error", "message")
+                     if body.get(k) is not None]
+            return ": ".join(parts)
 
     return (resp.text or "")[:200]
 
@@ -837,6 +1184,22 @@ PATH_CONTRACTS = "/contracts"
 PATH_STATUS = "/status"          # Milestone 6
 PATH_CONTRACTS_ACCEPT = "/contracts/accept"
 PATH_MARKETS_CAPACITY = "/capacity"   # relative to the MARKETS base URL
+
+# Market-rules path suffixes, also relative to the MARKETS base URL.
+#
+# Spec, "Market-Specific Rules": "Rules that differ by state or utility -
+# utility slugs, account formats, proof document types, self-attestation
+# options, counties and income limits - are not listed in this document. Fetch
+# them from the GET /markets/* endpoints."
+#
+# So these are the ONLY sanctioned source for per-market values. Nothing here
+# or downstream hardcodes a utility slug, an account-number pattern or a
+# county name.
+PATH_MARKETS_UTILITIES = "/utilities"
+PATH_MARKETS_UTILITY_ACCOUNT_FIELDS = "/utility_account_fields"
+PATH_MARKETS_COUNTIES = "/counties"
+PATH_MARKETS_COUNTY_INCOME_LIMITS = "/counties/income_limits"
+PATH_MARKETS_SELF_ATTESTATION_OPTIONS = "/self_attestation_options"
 
 # NEW YAML: "Expires 1 hour after issuance (see `expires_at` on the token
 # response)". The previous spec said 30 minutes; the engineering call predated
@@ -924,71 +1287,6 @@ class PerchClient(ABC):
         """
         raise PerchNotImplementedError("Not implemented by this client.")
 
-    def submit_self_attestation(self, enrollment_token: str, entry: dict) -> dict:
-        """POST /lmi/self_attestation - JSON, exactly the documented fields."""
-        requests = self._requests()
-        url = f"{self.enrollment_base_url}{PATH_LMI_SELF_ATTESTATION}"
-        headers = {ENROLLMENT_TOKEN_HEADER: enrollment_token,
-                   "Content-Type": "application/json"}
-        # The wrapper key is required by SubmitSelfAttestationRequest. `entry` is
-        # built by the adapter from documented fields only - nothing extra is
-        # added here.
-        payload = {"self_attestation": entry}
-        try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout)
-        except Exception as e:
-            raise PerchUnavailableError(f"Could not reach Perch at {url}: {e}") from e
-
-        if resp.status_code == 403:
-            raise attach_response_diagnostics(PerchTokenExpiredError(
-                "Perch returned 403 on /lmi/self_attestation - the enrollment token is "
-                "expired or invalid."), resp)
-        if resp.status_code == 422:
-            raise attach_response_diagnostics(PerchValidationError(
-                f"Perch rejected the self-attestation (422): {_msg(resp)}"), resp)
-        if resp.status_code >= 500:
-            raise attach_response_diagnostics(PerchUnavailableError(
-                f"Perch {PATH_LMI_SELF_ATTESTATION} returned {resp.status_code}."), resp)
-        if resp.status_code >= 400:
-            raise attach_response_diagnostics(PerchValidationError(
-                f"Perch rejected the self-attestation: {_msg(resp)}"), resp)
-        return normalize_self_attestation_response(
-            parse_json_response(resp, PATH_LMI_SELF_ATTESTATION))
-
-    def accept_self_attestation(self, enrollment_token: str, metadata: dict) -> dict:
-        """POST /lmi/self_attestation/accept - documented metadata only.
-
-        Returns 202 (not 200) on success.
-        """
-        requests = self._requests()
-        url = f"{self.enrollment_base_url}{PATH_LMI_SELF_ATTESTATION_ACCEPT}"
-        headers = {ENROLLMENT_TOKEN_HEADER: enrollment_token,
-                   "Content-Type": "application/json"}
-        payload = {"self_attestation": metadata}
-        try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout)
-        except Exception as e:
-            raise PerchUnavailableError(f"Could not reach Perch at {url}: {e}") from e
-
-        if resp.status_code == 403:
-            raise attach_response_diagnostics(PerchTokenExpiredError(
-                "Perch returned 403 on /lmi/self_attestation/accept - the enrollment "
-                "token is expired or invalid."), resp)
-        if resp.status_code == 422:
-            raise attach_response_diagnostics(PerchValidationError(
-                f"Perch rejected the self-attestation acceptance (422): {_msg(resp)}"), resp)
-        if resp.status_code >= 500:
-            raise attach_response_diagnostics(PerchUnavailableError(
-                f"Perch {PATH_LMI_SELF_ATTESTATION_ACCEPT} returned {resp.status_code}."), resp)
-        if resp.status_code >= 400:
-            raise attach_response_diagnostics(PerchValidationError(
-                f"Perch rejected the self-attestation acceptance: {_msg(resp)}"), resp)
-        # State-changing and non-idempotent, like /enroll: an unreadable sub-400
-        # means acceptance MAY have landed. Never retried blindly.
-        return normalize_self_attestation_accept_response(
-            parse_json_response(resp, PATH_LMI_SELF_ATTESTATION_ACCEPT,
-                                ambiguous_on_failure=True))
-
     def generate_contracts(self, enrollment_token: str) -> dict:
         """POST /contracts - generate personalised contract documents.
 
@@ -1018,6 +1316,35 @@ class PerchClient(ABC):
         HMAC-authenticated, signed over the canonical query string."""
         raise PerchNotImplementedError("Not implemented by this client.")
 
+    # ─────────────── Market rules (HMAC, pre-enrollment, read-only) ───────────────
+    # Not part of the enrollment flow: no X-Enrollment-Token, no session, no
+    # side effects. Each returns Perch's parsed body verbatim - interpretation
+    # belongs to the caller, not here.
+
+    def get_market_utilities(self, state: str) -> dict:
+        """GET /markets/utilities?state= -> {"state", "utilities": [slug, ...]}"""
+        raise PerchNotImplementedError("Not implemented by this client.")
+
+    def get_market_utility_account_fields(self, utility_slug: str) -> dict:
+        """GET /markets/utility_account_fields?utility= ->
+        {"utility_name", "fields": [{field_type, field_name, help_text, patterns}]}"""
+        raise PerchNotImplementedError("Not implemented by this client.")
+
+    def get_market_counties(self, state: str) -> dict:
+        """GET /markets/counties?state= -> {"state", "counties": [name, ...]}"""
+        raise PerchNotImplementedError("Not implemented by this client.")
+
+    def get_market_county_income_limits(self, state: str, county: str) -> dict:
+        """GET /markets/counties/income_limits?county=&state= ->
+        {"state", "county", "income_limits": [{house_occupancy, household_income}]}"""
+        raise PerchNotImplementedError("Not implemented by this client.")
+
+    def get_market_self_attestation_options(self, state: str) -> dict:
+        """GET /markets/self_attestation_options?state= ->
+        {"state", "source_types", "required_source_types", "single_source_type",
+         "lmi_programs", "programs", "status"}"""
+        raise PerchNotImplementedError("Not implemented by this client.")
+
 
 class PerchHTTPClient(PerchClient):
     """Real Perch API client, written to the published contract.
@@ -1031,9 +1358,19 @@ class PerchHTTPClient(PerchClient):
 
     mode = "live"
 
-    def __init__(self, enrollment_base_url, markets_base_url, api_key, secret_key="", timeout=20):
+    def __init__(self, enrollment_base_url, markets_base_url, api_key, secret_key="",
+                 timeout=20, markets_capacity_base_url=None, api_version="v1"):
         self.enrollment_base_url = (enrollment_base_url or "").rstrip("/")
         self.markets_base_url = (markets_base_url or "").rstrip("/")
+        # Market CAPACITY moves to /v2/markets in v2 while the other market
+        # lookups stay on /v1/markets, so it gets its own base. Defaults to the
+        # lookup base, which is exactly the v1 arrangement - an existing caller
+        # that passes neither new argument behaves as it always did.
+        self.markets_capacity_base_url = (
+            markets_capacity_base_url or markets_base_url or "").rstrip("/")
+        # Recorded for diagnostics and for the audit trail. The client does not
+        # branch on it: the base URLs already carry the version.
+        self.api_version = (api_version or "v1").strip().lower()
         self.api_key = api_key
         self.secret_key = secret_key
         self.timeout = timeout
@@ -1114,7 +1451,11 @@ class PerchHTTPClient(PerchClient):
             {"zip_code": zip_code, "utility_name": utility_slug})
         # The signed query string must be sent verbatim - letting the client
         # library re-encode params could reorder them and break the signature.
-        url = f"{self.markets_base_url}{PATH_MARKETS_CAPACITY}?{qs}"
+        #
+        # E1: the CAPACITY base, not the lookup base. In v1 they are the same
+        # string; in v2 capacity lives under /v2/markets while utilities,
+        # counties and the rest stay under /v1/markets.
+        url = f"{self.markets_capacity_base_url}{PATH_MARKETS_CAPACITY}?{qs}"
         try:
             resp = requests.get(url, headers=headers, timeout=self.timeout)
         except Exception as e:
@@ -1124,6 +1465,104 @@ class PerchHTTPClient(PerchClient):
                 f"No open capacity for {utility_slug} in ZIP {zip_code}.")
         self._raise_for_hmac_status(resp, PATH_MARKETS_CAPACITY)
         return parse_json_response(resp, PATH_MARKETS_CAPACITY)
+
+    # ─────────────── Market rules (HMAC, pre-enrollment, read-only) ───────────────
+
+    def _get_market(self, path, params):
+        """One signed GET against the MARKETS base URL.
+
+        Shared by every market-rules endpoint so the signing, transport and
+        status handling exist in exactly one place.
+
+        Deliberately NOT used by get_market_capacity above: that method predates
+        this helper, is on the NY path, and is left byte-for-byte alone. It
+        picks up the raw-signing correction for free, because both go through
+        hmac_auth.sign_query_request.
+
+        404 is handled here rather than in _raise_for_hmac_status, which is
+        shared with /token and /refresh_token and must not change. On the market
+        endpoints 404 means "no such state, county or utility" - a validation
+        problem, not an auth one - so it must not surface as PerchAuthError.
+        """
+        requests = self._requests()
+        headers, qs = hmac_auth.sign_query_request(self.api_key, self.secret_key, params)
+        # The signature covers the RAW canonical string; qs is the encoded form
+        # to transmit. It must be appended verbatim - re-encoding or reordering
+        # invalidates the signature.
+        url = f"{self.markets_base_url}{path}?{qs}"
+        try:
+            resp = requests.get(url, headers=headers, timeout=self.timeout)
+        except Exception as e:
+            raise PerchUnavailableError(f"Could not reach Perch at {url}: {e}") from e
+        if resp.status_code == 404:
+            raise PerchValidationError(
+                f"Perch has no market data matching that request on {path}: {_msg(resp)}")
+        self._raise_for_hmac_status(resp, path)
+        return parse_json_response(resp, path)
+
+    def get_market_utilities(self, state: str) -> dict:
+        """GET /markets/utilities?state= - the utility slugs for a state.
+
+        The returned slug is the ONLY sanctioned source for `utility_name`.
+        Confirmed against staging 2026-10-25 that state=VA returns the Dominion
+        slug. That value is deliberately not written down anywhere in this
+        codebase - it is read from here at runtime, and a test asserts no
+        production source contains it as a literal.
+        """
+        return self._get_market(PATH_MARKETS_UTILITIES, {"state": state})
+
+    def get_market_utility_account_fields(self, utility_slug: str) -> dict:
+        """GET /markets/utility_account_fields?utility= - required fields and
+        the regex patterns each value must match.
+
+        Spec: `fields` always starts with account_number, followed by
+        meter_number and secondary_account_identifier only where the utility
+        requires them. "A value is valid when it matches any one of the field's
+        patterns. An empty patterns list means the field has no format rule."
+        account_number patterns match case-insensitively, the others
+        case-sensitively.
+        """
+        return self._get_market(PATH_MARKETS_UTILITY_ACCOUNT_FIELDS,
+                                {"utility": utility_slug})
+
+    def get_market_counties(self, state: str) -> dict:
+        """GET /markets/counties?state= - county names for a state, verbatim.
+
+        Names are returned as Perch stores them and are used as-is. Virginia's
+        list mixes ordinary counties with independent cities, and the latter are
+        spelled with a lowercase 'city' suffix instead of 'County'. Never
+        normalize, title-case or re-suffix them: the string Perch returns is the
+        string Perch validates against.
+        """
+        return self._get_market(PATH_MARKETS_COUNTIES, {"state": state})
+
+    def get_market_county_income_limits(self, state: str, county: str) -> dict:
+        """GET /markets/counties/income_limits?county=&state= - the household
+        income limit for each household size (1-8) in a county.
+
+        `county` sorts before `state` in the signed string, and the county value
+        is signed RAW - a space stays a space. This is the call that proved the
+        signing fix: raw -> 200, urlencode -> 401.
+        """
+        return self._get_market(PATH_MARKETS_COUNTY_INCOME_LIMITS,
+                                {"state": state, "county": county})
+
+    def get_market_self_attestation_options(self, state: str) -> dict:
+        """GET /markets/self_attestation_options?state= - what to send in the
+        self_attestation payload for a state.
+
+        The `status` array is the authority on whether a `status` key is sent at
+        all. Spec: "when not empty, send one of these values as status;
+        otherwise do not send status."
+
+        Confirmed against staging 2026-10-25:
+            NY -> status ["accepted", "rejected"], lmi_programs "none"
+            VA -> status [],                       lmi_programs "optional"
+
+        A state not configured for self-attestation returns 422, which
+        _raise_for_hmac_status surfaces as PerchValidationError.
+        """
+        return self._get_market(PATH_MARKETS_SELF_ATTESTATION_OPTIONS, {"state": state})
 
     @staticmethod
     def _raise_for_hmac_status(resp, path):
@@ -1175,7 +1614,7 @@ class PerchHTTPClient(PerchClient):
                 "Perch token response contained neither 'enrollment_token' (documented) "
                 f"nor 'token' (observed staging). Received keys: {sorted(data.keys())}")
 
-        next_step = data.get("next_step") or data.get("next_step_url")
+        next_step, _shape = extract_next_step(data)
 
         return {
             "enrollment_token": token,
@@ -1278,6 +1717,71 @@ class PerchHTTPClient(PerchClient):
                 f"Perch rejected the proof documents: {_msg(resp)}"), resp)
         return normalize_proof_docs_response(
             parse_json_response(resp, PATH_LMI_PROOF_DOCS))
+
+    def submit_self_attestation(self, enrollment_token: str, entry: dict) -> dict:
+        """POST /lmi/self_attestation - JSON, exactly the documented fields."""
+        requests = self._requests()
+        url = f"{self.enrollment_base_url}{PATH_LMI_SELF_ATTESTATION}"
+        headers = {ENROLLMENT_TOKEN_HEADER: enrollment_token,
+                   "Content-Type": "application/json"}
+        # The wrapper key is required by SubmitSelfAttestationRequest. `entry` is
+        # built by the adapter from documented fields only - nothing extra is
+        # added here.
+        payload = {"self_attestation": entry}
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout)
+        except Exception as e:
+            raise PerchUnavailableError(f"Could not reach Perch at {url}: {e}") from e
+
+        if resp.status_code == 403:
+            raise attach_response_diagnostics(PerchTokenExpiredError(
+                "Perch returned 403 on /lmi/self_attestation - the enrollment token is "
+                "expired or invalid."), resp)
+        if resp.status_code == 422:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the self-attestation (422): {_msg(resp)}"), resp)
+        if resp.status_code >= 500:
+            raise attach_response_diagnostics(PerchUnavailableError(
+                f"Perch {PATH_LMI_SELF_ATTESTATION} returned {resp.status_code}."), resp)
+        if resp.status_code >= 400:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the self-attestation: {_msg(resp)}"), resp)
+        return normalize_self_attestation_response(
+            parse_json_response(resp, PATH_LMI_SELF_ATTESTATION))
+
+    def accept_self_attestation(self, enrollment_token: str, metadata: dict) -> dict:
+        """POST /lmi/self_attestation/accept - documented metadata only.
+
+        Returns 202 (not 200) on success.
+        """
+        requests = self._requests()
+        url = f"{self.enrollment_base_url}{PATH_LMI_SELF_ATTESTATION_ACCEPT}"
+        headers = {ENROLLMENT_TOKEN_HEADER: enrollment_token,
+                   "Content-Type": "application/json"}
+        payload = {"self_attestation": metadata}
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout)
+        except Exception as e:
+            raise PerchUnavailableError(f"Could not reach Perch at {url}: {e}") from e
+
+        if resp.status_code == 403:
+            raise attach_response_diagnostics(PerchTokenExpiredError(
+                "Perch returned 403 on /lmi/self_attestation/accept - the enrollment "
+                "token is expired or invalid."), resp)
+        if resp.status_code == 422:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the self-attestation acceptance (422): {_msg(resp)}"), resp)
+        if resp.status_code >= 500:
+            raise attach_response_diagnostics(PerchUnavailableError(
+                f"Perch {PATH_LMI_SELF_ATTESTATION_ACCEPT} returned {resp.status_code}."), resp)
+        if resp.status_code >= 400:
+            raise attach_response_diagnostics(PerchValidationError(
+                f"Perch rejected the self-attestation acceptance: {_msg(resp)}"), resp)
+        # State-changing and non-idempotent, like /enroll: an unreadable sub-400
+        # means acceptance MAY have landed. Never retried blindly.
+        return normalize_self_attestation_accept_response(
+            parse_json_response(resp, PATH_LMI_SELF_ATTESTATION_ACCEPT,
+                                ambiguous_on_failure=True))
 
     def generate_contracts(self, enrollment_token: str) -> dict:
         """POST /contracts - no request body, X-Enrollment-Token auth only.

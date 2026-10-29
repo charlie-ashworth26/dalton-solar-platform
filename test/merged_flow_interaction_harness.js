@@ -23,7 +23,12 @@ const R=[]; const check=(l,c)=>{R.push({l,ok:!!c});console.log(`  [${c?'PASS':'F
 function mk(id){return {id,innerHTML:'',textContent:'',value:'',disabled:false,checked:false,
   style:{},dataset:{},className:'',classList:{_s:new Set(),add(c){this._s.add(c);},
     remove(c){this._s.delete(c);},toggle(){},contains(c){return this._s.has(c);}},
-  setAttribute(){},getAttribute:()=>null,appendChild(){},insertBefore(){},removeChild(){},
+  // removeAttribute belongs beside setAttribute: an element stub that can only
+  // ever GAIN attributes is not modelling an element. C3 clearing a stale field
+  // error - setFieldError(..., '') drops aria-invalid - called it, and this
+  // stub threw on a method every real element has.
+  setAttribute(){},getAttribute:()=>null,removeAttribute(){},
+  appendChild(){},insertBefore(){},removeChild(){},
   firstChild:null,focus(){this.focused=true;},click(){},addEventListener(){},
   removeEventListener(){},querySelector:()=>null,querySelectorAll:()=>[],offsetWidth:0};}
 

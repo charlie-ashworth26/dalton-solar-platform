@@ -1,0 +1,35 @@
+-- The savings rate the rep chose, when Perch offers more than one (E3).
+--
+-- WHY A COLUMN
+--
+-- Perch v2 can offer SEVERAL savings rates for one customer type, and
+-- POST /enroll then REQUIRES one: "Optional when only one rate applies,
+-- required when more than one does." A missing value returns 422 on
+-- savings_percent with code `required`.
+--
+-- So the rate is a third thing the rep decides before enrolling, alongside the
+-- program (008) and the county (014), and it has to survive exactly what those
+-- survive: leaving the screen, navigating back, reloading, and resuming a
+-- draft tomorrow. Same reasoning, same shape, same nullable single column.
+--
+-- WHAT THIS VALUE IS
+--
+-- A number, stored as REAL, that was one of the `savings_percents` Perch
+-- published for the selected customer_type and county at the time it was
+-- chosen. It is validated against the stored capacity model on the way in and
+-- AGAIN at enroll time, so a rate that was valid when picked and is not valid
+-- now cannot reach Perch.
+--
+-- NULL means "not chosen", which is the correct and common state:
+--   * the program offers exactly one rate   -> nothing to choose; the adapter
+--     sends that one rate without storing it, because storing a value the rep
+--     never picked would make the record claim a decision nobody made
+--   * the program publishes no rate at all  -> there is nothing to send
+--   * v1                                    -> v1 ignores savings_percent
+--
+-- ── ADDITIVE ONLY. NO BACKFILL. ──────────────────────────────────────────
+--
+-- One nullable column. No UPDATE, no DELETE, no rebuild. Every existing
+-- enrollment keeps NULL, which is accurate for all of them: nothing offered a
+-- rate choice before this release, so no rep ever made one.
+ALTER TABLE enrollments ADD COLUMN selected_savings_percent REAL;

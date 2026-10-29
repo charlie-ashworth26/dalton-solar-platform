@@ -81,4 +81,35 @@ def seed_legacy_projects():
 
 
 if __name__ == "__main__":
+    # SEEDING IS DESTRUCTIVE: seed() calls init_db(reset=True), which erases
+    # the database it is pointed at. Run against a real installation, that is
+    # every enrollment and every sales record.
+    #
+    # db.assert_reset_allowed() refuses that by default, so this script asks
+    # for the decision in the one place where a human is present to make it.
+    # The confirmation is scoped to this process; it never leaks into a test
+    # run, a server, or a later command.
+    import argparse
+
+    import db as _db
+
+    parser = argparse.ArgumentParser(
+        description="Create the test users and reference rows.")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="erase the application database and re-seed it from scratch")
+    args = parser.parse_args()
+
+    if _db.is_application_database(_db.DB_PATH) and not args.force:
+        print("Refusing to seed: this would ERASE the application database at")
+        print(f"  {_db.DB_PATH}")
+        print("including every enrollment, customer and sales record it holds.")
+        print("")
+        print("  * Re-run with --force if that is genuinely what you want.")
+        print("  * Or point DALTON_DB_PATH at a scratch file and seed that.")
+        raise SystemExit(1)
+
+    if args.force:
+        os.environ[_db.RESET_OPT_IN_ENV] = "1"
+
     seed()

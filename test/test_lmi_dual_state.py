@@ -151,8 +151,24 @@ def main():
     check("self-attestation is its own table with its own key",
           query_one("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' "
                     "AND name='perch_self_attestation_submissions'")["n"] == 1)
-    check("migration count is unchanged at 12",
-          query_one("SELECT COUNT(*) n FROM schema_migrations")["n"] == 12)
+    # STALE ASSERTION, corrected in Phase D. This pinned the migration count
+    # at 12, so every later migration failed it - E2/E3 added 013 (v2 capacity
+    # entries), 014 (county) and 015 (selected savings percent), all additive.
+    # A fixed number is the wrong invariant: it fails on correct work and says
+    # nothing about what this suite is actually about.
+    #
+    # What the section claims is that the two LMI states need NO migration of
+    # their own, because they live in different tables. That is what is
+    # checked now - no migration names either table - and it stays true however
+    # many unrelated migrations are added.
+    migration_names = [r["filename"] if "filename" in r.keys() else str(tuple(r)[0])
+                       for r in query("SELECT * FROM schema_migrations")]
+    check(f"the two LMI states needed no migration of their own "
+          f"({len(migration_names)} applied)",
+          not any("lmi_dual" in m or "self_attestation_table" in m
+                  for m in migration_names))
+    check("  ...and every applied migration is recorded",
+          len(migration_names) >= 12)
 
     section("3. COMPLETING SELF-ATTESTATION DID NOT REMOVE THE DOCUMENT")
     check("the proof document row is intact",

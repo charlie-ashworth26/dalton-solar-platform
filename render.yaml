@@ -30,6 +30,19 @@ services:
         value: /var/data/dalton_solar.db
       - key: DALTON_DATA_DIR
         value: /var/data
+      # Backups. NOTE: a Render service gets ONE persistent disk, so this
+      # is the SAME disk as the database. That covers a bad migration or a
+      # wrong DELETE; it does NOT survive losing the disk, which is why the
+      # backup command passes --allow-same-disk deliberately rather than
+      # the tool assuming it.
+      #
+      # A Render DISK ATTACHES TO ONE SERVICE, so a separate cron service
+      # cannot mount this one and cannot back it up. The backup runs as a
+      # one-off Job against THIS service, on an external schedule.
+      # Production must also ship backups off-host.
+      # Both are set out in BACKUP_AND_RECOVERY.md.
+      - key: DALTON_BACKUP_DIR
+        value: /var/data/backups
       - key: DALTON_TRUSTED_PROXY_COUNT
         value: "1"
       - key: DALTON_LOG_LEVEL

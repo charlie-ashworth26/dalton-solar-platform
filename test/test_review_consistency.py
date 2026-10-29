@@ -17,6 +17,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _ubs_test_db  # noqa: F401  - throwaway database; see test/_ubs_test_db.py
 os.environ.setdefault("PERCH_API_MODE", "mock")
 
 from app import app
@@ -148,8 +149,21 @@ def main():
 
     check("formatProgramType takes the authoritative type",
           "function formatProgramType(programSavings, selectedType)" in JS)
-    check("  ...and no longer infers LMI purely from basis",
-          "if(t === 'LMI') return 'Income-eligible (LMI)';" in JS)
+    # STALE ASSERTION, corrected in Phase D. This pinned the literal
+    #     if(t === 'LMI') return 'Income-eligible (LMI)';
+    # which E2 generalised to isLmiCustomerType(t) when LMI_IRA arrived - one
+    # predicate covering both income-qualified types instead of a comparison
+    # that silently missed the new one. The product is correct and MORE correct
+    # than the line this used to require; only the assertion was out of date.
+    #
+    # The intent - the label comes from the AUTHORITATIVE type, with `basis`
+    # as a last resort rather than the primary signal - is what is checked now.
+    check("  ...and recognises both income-qualified types, not just LMI",
+          "if(isLmiCustomerType(t)) return 'Income-eligible (LMI)';" in JS
+          and "if(t === 'LMI_IRA') return 'Income-eligible (IRA)';" in JS)
+    check("  ...deciding on the explicit type BEFORE falling back to basis",
+          JS.index("if(isLmiCustomerType(t)) return 'Income-eligible (LMI)';")
+          < JS.index("programSavings.basis === 'lmi'"))
 
     check("live enrollments refresh the persisted detail before Review",
           "function refreshEnrollmentDetail(" in JS
@@ -171,7 +185,18 @@ def main():
     check("  ...invoked on resume", "rehydrateDocumentsFromDetail(e);" in JS)
     check("  ...restoring the document id, not a fake File",
           "persisted: true" in JS and "size: null" in JS)
-    check("  ...for the utility bill", "state.bill.documentId = first.id;" in JS)
+    # STALE ASSERTION, corrected in Phase D. This pinned
+    #     state.bill.documentId = first.id;
+    # which the document-removal fix replaced with a shared restore() helper -
+    # the bill and proof branches were identical apart from the pointer, and
+    # duplicating them is how the two drifted apart in the first place. The
+    # pointer is still restored from the first stored document; it is now done
+    # once for both categories.
+    check("  ...for the utility bill, via the shared restorer",
+          "restore('utility_bill', byCat.utility_bill, state.bill);" in JS
+          and "pointer.documentId = rows[0].id;" in JS)
+    check("  ...and for the proof document the same way",
+          "restore('lmi_document', byCat.lmi_document, state.lmi);" in JS)
     check("no plaintext password is ever persisted or restored",
           "state.customer.password = detail" not in JS
           and "password" not in JS.split("function rehydrateDocumentsFromDetail")[1][:900])

@@ -46,10 +46,12 @@ def main():
     section("ISSUE 1 — /contracts is called ONLY when Perch says so")
     check("routing is driven by Perch's next_step_key",
           "if(perchContext.nextStepKey === 'contracts')" in JS)
+    # D-2: both messages kept their meaning and lost the vendor name.
     check("  ...an unrecognised next step STOPS the flow",
-          "Perch returned a next step we do not recognize" in JS)
+          "could not be advanced automatically" in JS and "It has not changed" in JS)
     check("  ...and proof_docs must report contracts before we continue",
-          "Perch accepted the proof document but returned an unexpected next step" in JS)
+          "The proof document was accepted, but this enrollment could not be "
+          "advanced automatically" in JS)
 
     section("ISSUE 1 — retry touches ONLY /contracts")
     lmi = JS[JS.index("async function submitLmi"):]
@@ -105,8 +107,9 @@ def main():
           ".pdf'" not in ROUTES and 'send_file' not in ROUTES)
 
     section("PROTECTED + latent fix")
-    check("openAgreementDoc is untouched and still surfaces the error",
-          "Could not open that document: " in JS)
+    check("openAgreementDoc still surfaces the error",
+          "That document could not be opened. " in JS
+          and "userMessage(err, 'Try again in a moment.')" in JS)
     check("one acknowledgement checkbox", JS.count('id="agr-ack-check"') == 1)
     check("latent backStep 3 removed (step 3 no longer exists)",
           "generateContractsAndOpenAgreement(origin === 'lmi' ? 4 : 2)" in JS)

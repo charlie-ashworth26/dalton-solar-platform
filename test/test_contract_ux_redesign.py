@@ -9,6 +9,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _ubs_test_db  # noqa: F401  - throwaway database; see test/_ubs_test_db.py
 os.environ.setdefault("PERCH_API_MODE", "mock")
 
 from app import app
@@ -327,7 +328,16 @@ def main():
     check("keyboard focus is visible", ".agr-link:focus-visible" in CSS
           and ".agr-close:focus-visible" in CSS)
     check("agreement links are real anchors", 'class="agr-link"' in JS)
-    check("mobile becomes a full-screen viewer", "@media (max-width:820px)" in CSS)
+    # RE-PINNED (Phase C3): this asserted the literal "@media
+    # (max-width:820px)". C3 consolidated thirteen scattered breakpoints into
+    # the four the brief specifies (430/599/899/1199), so the agreement
+    # viewer's band became 899px and this failed although the behaviour it
+    # names was untouched. The behaviour IS the rule below - the modal gives
+    # up its width, height cap and corners and fills the screen - so that is
+    # what is asserted now, rather than the number of the band holding it.
+    check("mobile becomes a full-screen viewer",
+          ".agr-modal{width:100%;height:100%;max-height:none;border-radius:0;}"
+          in CSS.replace(" ", "").replace("\r", "").replace("\n", ""))
     check("mobile stacks the detail list", ".agr-details{grid-template-columns:1fr" in CSS.replace(" ", "")
           or "grid-template-columns:1fr" in CSS)
     check("mobile avoids horizontal scrolling", "flex-direction:column" in CSS)

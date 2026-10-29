@@ -39,7 +39,7 @@
             </div>
           </div>
           <button class="ubs-submit" id="login-submit-btn" onclick="doLogin()">Continue</button>
-          <p class="ubs-error" id="login-error" style="display:none;"></p>
+          <p class="alert alert-error" id="login-error" style="display:none;"></p>
           <div class="ubs-footer">Utility Bill Savings</div>
         </div>
       </section>
@@ -60,22 +60,53 @@
 <div class="screen" id="screen-customer-portal">
   <div class="customer-wrap">
     <div class="customer-top"><div class="brand-mark"><span class="brand-badge">UBS</span>Utility Bill Savings</div></div>
-    <div class="card">
+    <div class="card" id="portal-card">
       <p class="card-eyebrow">Welcome back</p>
       <h2 id="portal-hello">Hi there</h2>
       <p class="lead">Here's where your enrollment stands.</p>
-      <div class="review-block">
+      <!-- C5: what the customer is actually enrolled in.
+           This block held one hardcoded line - Status: "Awaiting your
+           signature" - while /api/auth/customer-me was already returning the
+           utility, the service address, the savings and the real workflow
+           status. loadCustomerAgreement() even fetched them, then wrote them
+           into #portal-project, an element that does not exist, so every one
+           of them was dropped. Each row below is filled from that response
+           and hidden when the value is absent; nothing here is invented. -->
+      <div class="review-block" id="portal-summary">
         <div class="review-head">Your agreement</div>
-        <div class="review-line"><span class="rl-label">Status</span><span class="rl-val"><span class="badge badge-gold">Awaiting your signature</span></span></div>
+        <div class="review-line" id="portal-row-utility" hidden><span class="rl-label">Electric utility</span><span class="rl-val" id="portal-utility"></span></div>
+        <div class="review-line" id="portal-row-address" hidden><span class="rl-label">Service address</span><span class="rl-val" id="portal-address"></span></div>
+        <div class="review-line"><span class="rl-label">Status</span><span class="rl-val" id="portal-status"></span></div>
       </div>
       <button class="btn btn-primary btn-full btn-lg" id="portal-open-btn" onclick="openCustomerContracts()">Review &amp; sign agreement</button>
-        <p class="helper" id="portal-error" style="display:none;color:var(--danger);margin-top:12px;"></p>
+        <p class="alert alert-error" id="portal-error" style="display:none;"></p>
     </div>
   </div>
 </div>
 
 <div class="app-shell" id="app-shell">
-  <div class="sidebar">
+  <!-- MOBILE TOP BAR (C3). Below 900px the sidebar becomes a drawer and this
+       takes its place. It is in the document at every width and hidden by CSS
+       above the breakpoint, so there is no second code path to keep in sync. -->
+  <header class="topbar" id="topbar">
+    <button type="button" class="topbar-menu" id="nav-toggle"
+            aria-controls="app-nav" aria-expanded="false" aria-label="Open menu"
+            onclick="toggleNav()">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+    </button>
+    <div class="topbar-brand"><span class="brand-badge">UBS</span>Utility Bill Savings</div>
+    <div class="topbar-avatar" id="topbar-avatar" aria-hidden="true">C</div>
+  </header>
+  <!-- The scrim closes the drawer and keeps the page behind it from being
+       interacted with while it is open. -->
+  <div class="nav-scrim" id="nav-scrim" onclick="closeNav()" hidden></div>
+
+  <!-- ONE navigation, not two. Below 900px this same element slides in as the
+       drawer, so syncAdminNav() and the per-link permission toggles keep
+       working exactly as they did - there is no mobile copy of the nav that
+       could drift out of permission with this one. -->
+  <nav class="sidebar" id="app-nav" aria-label="Main">
     <div class="sidebar-brand"><div class="brand-mark"><span class="brand-badge">UBS</span>Utility Bill Savings</div></div>
     <div class="sidebar-profile">
       <div class="sidebar-avatar" id="rep-avatar">C</div>
@@ -109,7 +140,7 @@
       <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
       Logout
     </div>
-  </div>
+  </nav>
 
   <div class="main-area">
     <div class="view active" id="view-dashboard">
@@ -119,7 +150,7 @@
       </div>
       <div class="stat-grid" id="dash-stats"></div>
       <div class="section-title">Recent customers <a onclick="showView('customers')">View all →</a></div>
-      <div class="table-wrap"><table class="data-table">
+      <div class="table-wrap"><table class="data-table enr-table">
         <thead><tr><th>Customer</th><th>Enrollment</th><th>Status</th><th>Utility</th><th>Added</th><th>Last modified</th></tr></thead>
         <tbody id="dash-recent-body"></tbody>
       </table></div>
@@ -135,55 +166,76 @@
 
       </div>
 
-      <div class="card" style="margin-bottom:18px;">
+      <!-- C4: THE LIST COMES FIRST.
+           The create form used to open this page: six full-width fields,
+           ~630px of it, so the thing an admin actually comes here for - the
+           reps - started below the fold. Adding a rep is occasional; reading
+           and acting on the list is why the screen exists. The form keeps
+           every field, id, handler and validation it had; it is now a
+           disclosure beneath the list rather than the first thing on it. -->
+      <div class="card">
 
-        <h2 style="font-size:16px;margin:0 0 12px;">Add a rep</h2>
+        <div class="rep-list-head">
 
-        <div class="field"><label for="rep-new-name">Full name</label>
+          <h2>Reps</h2>
 
-          <input id="rep-new-name" type="text" placeholder="Jane Rivera"></div>
-
-        <div class="field"><label for="rep-new-email">Email</label>
-
-          <input id="rep-new-email" type="email" placeholder="jane@daltonsolar.com"></div>
-
-        <div class="field"><label for="rep-new-pass">Initial password</label>
-
-          <span class="pw-wrap"><input id="rep-new-pass" type="password" placeholder="At least 10 characters"><button type="button" class="pw-eye" id="rep-new-pass-eye" aria-label="Show password" aria-pressed="false" onclick="togglePasswordVisibility('rep-new-pass','rep-new-pass-eye')">&#128065;</button></span></div>
-
-        <div class="field"><label for="rep-new-code">Rep code (optional — auto-generated if blank)</label>
-
-          <input id="rep-new-code" type="text" placeholder="REP-001"></div>
-
-        <div class="field"><label for="rep-new-phone">Phone (optional)</label>
-
-          <input id="rep-new-phone" type="text" placeholder="518-555-0100"></div>
-
-        <div class="field"><label for="rep-new-team">Team (optional)</label>
-
-          <input id="rep-new-team" type="text" placeholder="Capital District"></div>
-
-        <p class="helper" id="rep-form-error" style="display:none;color:var(--danger);margin-top:10px;"></p>
-
-        <p class="helper" id="rep-form-ok" style="display:none;margin-top:10px;"></p>
-
-        <div class="wizard-actions" style="margin-top:12px;">
-
-          <button class="btn btn-primary" id="rep-create-btn" onclick="createRep()">Add rep</button>
+          <span class="table-count" id="rep-count"></span>
 
         </div>
 
-      </div>
-
-      <div class="card">
-
-        <h2 style="font-size:16px;margin:0 0 12px;">Reps</h2>
-
-        <p class="helper" id="rep-list-error" style="display:none;color:var(--danger);"></p>
+        <p class="alert alert-error" id="rep-list-error" style="display:none;"></p>
 
         <div id="reps-table"><p class="helper">Loading reps…</p></div>
 
       </div>
+
+      <details class="rep-new" id="rep-new">
+
+        <summary class="rep-new-toggle"><span class="rep-new-plus" aria-hidden="true">+</span>Add a rep</summary>
+
+        <div class="rep-new-body">
+
+          <div class="rep-new-grid">
+
+            <div class="field"><label for="rep-new-name">Full name</label>
+
+              <input id="rep-new-name" type="text" placeholder="Jane Rivera"></div>
+
+            <div class="field"><label for="rep-new-email">Email</label>
+
+              <input id="rep-new-email" type="email" placeholder="jane@daltonsolar.com"></div>
+
+            <div class="field"><label for="rep-new-pass">Initial password</label>
+
+              <span class="pw-wrap"><input id="rep-new-pass" type="password" placeholder="At least 10 characters"><button type="button" class="pw-eye" id="rep-new-pass-eye" aria-label="Show password" aria-pressed="false" onclick="togglePasswordVisibility('rep-new-pass','rep-new-pass-eye')">&#128065;</button></span></div>
+
+            <div class="field"><label for="rep-new-code">Rep code <em>optional — auto-generated if blank</em></label>
+
+              <input id="rep-new-code" type="text" placeholder="REP-001"></div>
+
+            <div class="field"><label for="rep-new-phone">Phone <em>optional</em></label>
+
+              <input id="rep-new-phone" type="text" placeholder="518-555-0100"></div>
+
+            <div class="field"><label for="rep-new-team">Team <em>optional</em></label>
+
+              <input id="rep-new-team" type="text" placeholder="Capital District"></div>
+
+          </div>
+
+          <p class="alert alert-error" id="rep-form-error" style="display:none;"></p>
+
+          <p class="helper" id="rep-form-ok" style="display:none;margin-top:10px;"></p>
+
+          <div class="wizard-actions" style="margin-top:12px;">
+
+            <button class="btn btn-primary" id="rep-create-btn" onclick="createRep()">Add rep</button>
+
+          </div>
+
+        </div>
+
+      </details>
 
     </div>
 
@@ -202,7 +254,7 @@
 
       </div>
 
-      <p class="helper" id="sales-report-error" style="display:none;color:var(--danger);margin-bottom:12px;"></p>
+      <p class="alert alert-error" id="sales-report-error" style="display:none;"></p>
 
       <div class="card">
 
@@ -218,7 +270,8 @@
         <div><h1>Customers</h1><div class="sub">Every enrollment you've started, in progress, or verified.</div></div>
         <input class="search-input" placeholder="Search customers…" oninput="renderCustomers(this.value)">
       </div>
-      <div class="table-wrap"><table class="data-table">
+      <p class="table-count" id="customers-count"></p>
+      <div class="table-wrap"><table class="data-table enr-table">
         <thead><tr><th>Customer</th><th>Enrollment</th><th>Status</th><th>Utility</th><th>Added</th><th>Last modified</th></tr></thead>
         <tbody id="customers-body"></tbody>
       </table></div>
@@ -241,6 +294,14 @@
                  GET /api/perch/enrollments/:id/workflow. Adding a new enrollment step
                  is a BACKEND change (register a step builder in services/perch/workflow.py)
                  - no markup is added here. -->
+            <!-- AVAILABILITY RECOVERY NOTICE. Not a step field, so it sits
+                 OUTSIDE #workflow-root: renderWorkflowStep() owns that
+                 container's contents and would overwrite anything placed
+                 inside it. Shown only when the rep was sent back here because
+                 capacity has to be re-checked, so they are told why instead of
+                 arriving on a step they did not ask for. -->
+            <div id="availability-rerun-banner" class="wf-rerun-banner"
+                 style="display:none;" role="status"></div>
             <div id="workflow-root"></div>
           </div>
 
@@ -274,7 +335,7 @@
                 <div class="util-chip" id="util-chip" hidden></div>
               </div>
               <div id="program-options" class="prog-wrap"></div>
-              <p class="hint" id="program-error" style="display:none;"></p>
+              <p class="alert alert-error" id="program-error" style="display:none;"></p>
             </section>
 
             <!-- 2 · CUSTOMER ACCESS -->
@@ -286,25 +347,41 @@
                 <div class="fd"><label class="lbl" for="c-pass">Password</label><span class="pw-wrap"><input type="password" id="c-pass" autocomplete="new-password"><button type="button" class="pw-eye" id="c-pass-eye" aria-label="Show password" aria-pressed="false" onclick="togglePasswordVisibility('c-pass','c-pass-eye')">&#128065;</button></span></div>
                 <div class="fd"><label class="lbl" for="c-pass-confirm">Confirm password</label><span class="pw-wrap"><input type="password" id="c-pass-confirm" autocomplete="new-password"><button type="button" class="pw-eye" id="c-pass-confirm-eye" aria-label="Show password" aria-pressed="false" onclick="togglePasswordVisibility('c-pass-confirm','c-pass-confirm-eye')">&#128065;</button></span></div>
               </div>
-              <p class="hint" id="contact-submit-error" style="display:none;"></p>
+              <!-- Shown when the customer already HAS a portal password. The
+                   value is never sent to the browser - the backend reports only
+                   that one exists - so this says so in words instead of
+                   presenting two empty boxes that read as unfinished work. -->
+              <p class="helper" id="c-pass-set-note" style="display:none;"></p>
+              <p class="alert alert-error" id="contact-submit-error" style="display:none;"></p>
             </section>
 
             <!-- 3 · UTILITY BILL -->
             <section class="sec">
               <div class="sec-head"><div><h2>Utility bill</h2><p>Upload the bill and we'll read the account details.</p></div></div>
-              <div class="upload" id="bill-dropzone" onclick="document.getElementById('bill-file').click()"
-                   ondragover="dzDragOver(event,'bill-dropzone')" ondragleave="dzDragLeave(event,'bill-dropzone')" ondrop="dzDrop(event,'bill-dropzone',handleBillUpload)">
-                <div>
-                  <svg class="up-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                  <strong>Drop the bill here, or browse</strong>
-                  <small>PDF, JPG or PNG &middot; up to 4MB<br>Multiple pages supported</small>
+              <!-- C4: the drop target and everything it produces sit side by
+                   side. The chips, extraction output and prefill note used to
+                   stack underneath, pushing the account fields down by their
+                   own height the moment a bill was attached. Same elements,
+                   same ids, same writers - only the column changed. -->
+              <div class="bill-grid">
+                <div class="bill-drop">
+                  <div class="upload" id="bill-dropzone" onclick="document.getElementById('bill-file').click()"
+                       ondragover="dzDragOver(event,'bill-dropzone')" ondragleave="dzDragLeave(event,'bill-dropzone')" ondrop="dzDrop(event,'bill-dropzone',handleBillUpload)">
+                    <div>
+                      <svg class="up-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                      <strong>Drop the bill here, or browse</strong>
+                      <small>PDF, JPG or PNG &middot; up to 4MB<br>Multiple pages supported</small>
+                    </div>
+                  </div>
+                  <input type="file" id="bill-file" multiple accept=".pdf,.jpg,.jpeg,.png,.heic" onchange="handleBillUpload(this.files)">
+                </div>
+                <div class="bill-side">
+                  <div id="bill-file-chip"></div>
+                  <div id="bill-fileset"></div>
+                  <div id="ocr-container"></div>
+                  <p class="helper" id="bill-prefill-scope"></p>
                 </div>
               </div>
-              <input type="file" id="bill-file" multiple accept=".pdf,.jpg,.jpeg,.png,.heic" onchange="handleBillUpload(this.files)">
-              <div id="bill-file-chip"></div>
-              <div id="bill-fileset"></div>
-              <div id="ocr-container"></div>
-              <p class="helper" id="bill-prefill-scope"></p>
             </section>
 
             <!-- 4 · REVIEW ACCOUNT DETAILS -->
@@ -313,43 +390,65 @@
               <div class="fields">
                 <div class="fd"><label class="lbl" for="c-first">First name</label><input type="text" id="c-first" autocomplete="given-name" oninput="checkBillReady()"></div>
                 <div class="fd"><label class="lbl" for="c-last">Last name</label><input type="text" id="c-last" autocomplete="family-name" oninput="checkBillReady()"></div>
-                <div class="fd full"><label class="lbl" for="c-acct">Utility account number</label><input type="text" id="c-acct" class="mono-field" inputmode="numeric" oninput="checkBillReady()"><span class="fld-h" id="acct-rule-help"></span></div>
+                <!-- C4: no longer "full". A ten-digit account number in a
+                     1064px box was the widest field on the screen for the
+                     shortest value on it; it now shares the row with the two
+                     name fields, which is where a rep reads it off the bill. -->
+                <div class="fd"><label class="lbl" for="c-acct">Utility account number</label><input type="text" id="c-acct" class="mono-field" inputmode="numeric" oninput="checkBillReady()"><span class="fld-h" id="acct-rule-help"></span></div>
                 <!-- POD ID: utility-specific. Shown ONLY when the backend rule
                      sets requires_pod_id (configureBillUtilityRules). Not in the
                      mockup, deliberately preserved. -->
                 <div class="fd full" id="pod-id-field" style="display:none;"><label class="lbl" for="c-pod">POD ID</label><input type="text" id="c-pod" class="mono-field" oninput="checkBillReady()"><span class="fld-h" id="pod-rule-help"></span></div>
+                <!-- METER NUMBER: utility-specific, same pattern as POD ID
+                     above. Shown ONLY when the market rules Perch publishes
+                     for the selected utility list a meter_number field
+                     (Dominion does; no NY utility in this funnel does), so it
+                     is hidden for every existing NY enrollment. -->
+                <div class="fd full" id="meter-number-field" style="display:none;"><label class="lbl" for="c-meter">Meter number</label><input type="text" id="c-meter" class="mono-field" inputmode="numeric" oninput="checkBillReady()"><span class="fld-h" id="meter-rule-help"></span></div>
               </div>
               <div class="address">
                 <div class="fd street"><label class="lbl" for="a-street">Street address</label><input type="text" id="a-street" autocomplete="address-line1" oninput="syncBillingFromService(); checkBillReady()"></div>
-                <div class="fd"><label class="lbl" for="a-city">City</label><input type="text" id="a-city" autocomplete="address-level2" oninput="syncBillingFromService(); checkBillReady()"></div>
-                <div class="fd"><label class="lbl" for="a-state">State</label><select id="a-state" onchange="syncBillingFromService(); checkBillReady()"><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY" selected>NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select></div>
-                <div class="fd"><label class="lbl" for="a-zip">ZIP</label><input type="text" id="a-zip" class="mono-field" inputmode="numeric" maxlength="5" oninput="syncBillingFromService(); checkBillReady()"></div>
-                <div class="fd" id="a-unit-wrap"><label class="lbl" for="a-unit">Unit / Apt <em>optional</em></label><input type="text" id="a-unit" oninput="syncBillingFromService()"></div>
+                <div class="fd unit" id="a-unit-wrap"><label class="lbl" for="a-unit">Unit / Apt <em>optional</em></label><input type="text" id="a-unit" oninput="syncBillingFromService()"></div>
+                <div class="fd city"><label class="lbl" for="a-city">City</label><input type="text" id="a-city" autocomplete="address-level2" oninput="syncBillingFromService(); checkBillReady()"></div>
+                <div class="fd state"><label class="lbl" for="a-state">State</label><select id="a-state" onchange="syncBillingFromService(); checkBillReady()"><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY" selected>NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select></div>
+                <div class="fd zip"><label class="lbl" for="a-zip">ZIP</label><input type="text" id="a-zip" class="mono-field" inputmode="numeric" maxlength="5" oninput="syncBillingFromService(); checkBillReady()"></div>
               </div>
               <label class="same"><input type="checkbox" id="billing-same" checked onchange="toggleBillingAddress()"> Billing address is the same as the service address</label>
               <div id="billing-address-fields" style="display:none;">
                 <div class="address">
                   <div class="fd street"><label class="lbl" for="b-street">Billing street address</label><input type="text" id="b-street"></div>
-                  <div class="fd"><label class="lbl" for="b-city">City</label><input type="text" id="b-city"></div>
-                  <div class="fd"><label class="lbl" for="b-state">State</label><select id="b-state"><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY" selected>NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select></div>
-                  <div class="fd"><label class="lbl" for="b-zip">ZIP</label><input type="text" id="b-zip" class="mono-field" inputmode="numeric" maxlength="5"></div>
-                  <div class="fd"><label class="lbl" for="b-unit">Unit / Apt <em>optional</em></label><input type="text" id="b-unit"></div>
+                  <div class="fd unit"><label class="lbl" for="b-unit">Unit / Apt <em>optional</em></label><input type="text" id="b-unit"></div>
+                  <div class="fd city"><label class="lbl" for="b-city">City</label><input type="text" id="b-city"></div>
+                  <div class="fd state"><label class="lbl" for="b-state">State</label><select id="b-state"><option value="AL">AL</option><option value="AK">AK</option><option value="AZ">AZ</option><option value="AR">AR</option><option value="CA">CA</option><option value="CO">CO</option><option value="CT">CT</option><option value="DE">DE</option><option value="DC">DC</option><option value="FL">FL</option><option value="GA">GA</option><option value="HI">HI</option><option value="ID">ID</option><option value="IL">IL</option><option value="IN">IN</option><option value="IA">IA</option><option value="KS">KS</option><option value="KY">KY</option><option value="LA">LA</option><option value="ME">ME</option><option value="MD">MD</option><option value="MA">MA</option><option value="MI">MI</option><option value="MN">MN</option><option value="MS">MS</option><option value="MO">MO</option><option value="MT">MT</option><option value="NE">NE</option><option value="NV">NV</option><option value="NH">NH</option><option value="NJ">NJ</option><option value="NM">NM</option><option value="NY" selected>NY</option><option value="NC">NC</option><option value="ND">ND</option><option value="OH">OH</option><option value="OK">OK</option><option value="OR">OR</option><option value="PA">PA</option><option value="RI">RI</option><option value="SC">SC</option><option value="SD">SD</option><option value="TN">TN</option><option value="TX">TX</option><option value="UT">UT</option><option value="VT">VT</option><option value="VA">VA</option><option value="WA">WA</option><option value="WV">WV</option><option value="WI">WI</option><option value="WY">WY</option></select></div>
+                  <div class="fd zip"><label class="lbl" for="b-zip">ZIP</label><input type="text" id="b-zip" class="mono-field" inputmode="numeric" maxlength="5"></div>
                 </div>
               </div>
             </section>
 
             <div id="bill-requirements" class="req" style="display:none;"></div>
-            <p class="hint" id="bill-submit-error" style="display:none;"></p>
+            <p class="alert alert-error" id="bill-submit-error" style="display:none;"></p>
             <div class="actions">
-              <button class="btn btn-ghost" onclick="backFromCustomer()">Back</button>
+              <!-- Back returns to Availability (so the rep can change ZIP or
+                   utility); Save & Exit returns to the dashboard. BOTH save, and
+                   so does the sidebar nav and the browser - Save & Exit is a
+                   clearer label, never the only safe way out. -->
+              <!-- C4: Back and Save & Exit are grouped because they are both
+                   ways OUT of this step. Spread evenly across the row they
+                   read as three peers with Save & Exit stranded in the middle;
+                   grouped, the primary stands alone on the right. -->
+              <div class="actions-left">
+                <button class="btn btn-secondary" onclick="backFromCustomer()">Back</button>
+                <button class="btn btn-secondary" id="btn-bill-save-exit"
+                        onclick="saveAndExit()">Save &amp; Exit</button>
+              </div>
               <button class="btn btn-primary" id="btn-bill-next" onclick="submitBill()" disabled>Continue &rarr;</button>
             </div>
           </div>
 <div class="screen wizard-step" id="step-lmi">
             <div class="card">
               <p class="card-eyebrow">New enrollment</p>
-              <h2 id="lmi-title">LMI documentation</h2>
-              <p class="lead" id="lmi-lead">Qualify the customer for the low-income adder — by document, by income self-attestation, or mark it N/A.</p>
+              <h2 id="lmi-title">Eligibility</h2>
+              <p class="lead" id="lmi-lead">Confirm whether this household qualifies for the low-income discount — with a qualifying document, by income, or not applicable.</p>
               <!-- SELF-ATTESTATION. Shown only when Perch returns /lmi/self_attestation.
                    Mirrors the official NY_self_attestation_form.pdf: household size, the
                    threshold for that size, and above/below. Exact income is never asked,
@@ -361,8 +460,15 @@
                   <div class="row2">
                     <div class="field"><label for="sa-occupancy">People living in the home</label>
                       <select id="sa-occupancy" onchange="onSelfAttestationOccupancy()"></select></div>
+                    <!-- E3.1: when the enrollment was submitted with a
+                         county, this control shows that county and is
+                         disabled - the income limit has to be checked for the
+                         county the customer was actually enrolled under. The
+                         helper line below explains why it cannot be changed,
+                         and stays hidden for every other enrollment. -->
                     <div class="field"><label for="sa-county">County</label>
-                      <select id="sa-county" onchange="onSelfAttestationCounty()"></select></div>
+                      <select id="sa-county" onchange="onSelfAttestationCounty()"></select>
+                      <p class="helper" id="sa-county-help" style="display:none;"></p></div>
                   </div>
                   <div id="sa-threshold-wrap" class="sa-threshold" style="display:none;">
                     <span class="sa-cap" id="sa-caption"></span>
@@ -373,13 +479,23 @@
                     <button type="button" class="sa-opt" data-choice="below" onclick="selectSelfAttestationChoice('below')">Annual household income is <strong>at or below</strong> this level</button>
                     <button type="button" class="sa-opt" data-choice="above" onclick="selectSelfAttestationChoice('above')">Annual household income is <strong>above</strong> this level</button>
                   </div>
-                  <p class="helper" id="sa-error" style="display:none;color:var(--danger);"></p>
-                  <div class="wizard-actions"><button class="btn btn-ghost" onclick="backFromLmi()">Back</button>
+                  <p class="alert alert-error" id="sa-error" style="display:none;"></p>
+                  <div class="wizard-actions"><button class="btn btn-secondary" onclick="backFromLmi()">Back</button>
                     <button class="btn btn-primary" id="sa-submit" onclick="submitSelfAttestation()" disabled>Prepare self-attestation</button></div>
                 </div>
                 <div id="sa-sent" style="display:none;">
                   <p class="lead">Eligibility recorded. Continuing to the agreements.</p>
-                  <div class="wizard-actions"><button class="btn btn-ghost" onclick="backToDashboard()">Back to dashboard</button></div>
+                  <div class="wizard-actions"><button class="btn btn-secondary" onclick="backToDashboard()">Back to dashboard</button></div>
+                </div>
+                <!-- TERMINAL: does not qualify. Shown only in a market with no
+                     `status` field and no non-LMI fallback, when the household
+                     is above the published limit. Perch was never called. The
+                     ONLY action offered is leaving - deliberately no continue,
+                     no retry and no contracts control, and the backend refuses
+                     contracts for this enrollment independently. -->
+                <div id="sa-not-qualified" style="display:none;">
+                  <p class="lead" id="sa-not-qualified-text"></p>
+                  <div class="wizard-actions"><button class="btn btn-secondary" onclick="backToDashboard()">Back to dashboard</button></div>
                 </div>
               </div>
               <div id="lmi-proof-panel">
@@ -395,6 +511,7 @@
                      different LMI action is the one Perch currently authorises.
                      Filled by renderLmiSections(); empty and hidden otherwise. -->
                 <p class="helper" id="lmi-doc-hint" style="display:none;margin-bottom:14px;"></p>
+                <div class="row2">
                 <div class="field">
                   <label for="lmi-doctype">Qualifying program</label>
                   <!-- Qualifying PROGRAM. The option VALUE is the authoritative Perch
@@ -412,15 +529,24 @@
                     <option value="proof_doc_free_reduced_school_lunch_letter">Free / reduced school lunch</option>
                   </select>
                 </div>
+                  <div class="field"><label>Document format</label><select id="lmi-format" onchange="checkLmiReady()"><option value="">Select format</option><option value="letter">Letter</option><option value="card">Card</option><option value="account_statement">Account statement</option><option value="utility_bill">Utility bill</option><option value="other">Other</option><option value="unknown">Unknown</option></select></div>
+                </div>
                 <div class="row2">
                   <div class="field"><label>Name on document</label><input type="text" id="lmi-name-on-doc" oninput="checkLmiReady()"></div>
                   <div class="field"><label>Relationship</label><select id="lmi-relationship" onchange="checkLmiReady()"><option value="self">Self</option><option value="other">Other</option><option value="unknown">Unknown</option></select></div>
                 </div>
-                <div class="field"><label>Document format</label><select id="lmi-format" onchange="checkLmiReady()"><option value="">Select format</option><option value="letter">Letter</option><option value="card">Card</option><option value="account_statement">Account statement</option><option value="utility_bill">Utility bill</option><option value="other">Other</option><option value="unknown">Unknown</option></select></div>
-                <div class="dropzone" id="lmi-dropzone" onclick="document.getElementById('lmi-file').click()"
+                <!-- C5: the SAME drop target as the utility bill. This was a
+                     .dropzone - no icon, different border, different padding,
+                     different copy shape - while the bill used .upload. One
+                     product, two upload components, for the same act. The id
+                     and every handler are unchanged. -->
+                <div class="upload" id="lmi-dropzone" onclick="document.getElementById('lmi-file').click()"
                      ondragover="dzDragOver(event,'lmi-dropzone')" ondragleave="dzDragLeave(event,'lmi-dropzone')" ondrop="dzDrop(event,'lmi-dropzone',handleLmiUpload)">
-                  <div class="dz-title">Drag LMI documentation here, or click to browse</div>
-                  <div class="dz-sub">PDF, JPG, or PNG · up to 4MB</div>
+                  <div>
+                    <svg class="up-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <strong>Drop the document here, or browse</strong>
+                    <small>PDF, JPG or PNG &middot; up to 4MB<br>Multiple pages supported</small>
+                  </div>
                 </div>
                 <input type="file" id="lmi-file" multiple accept=".pdf,.jpg,.jpeg,.png,.heic" onchange="handleLmiUpload(this.files)">
                 <div id="lmi-file-chip"></div>
@@ -452,7 +578,7 @@
                 </div>
               </div>
               </div><!-- /lmi-proof-panel -->
-              <p class="helper" id="lmi-submit-error" style="display:none;color:var(--danger);margin-top:8px;"></p><div class="wizard-actions"><button class="btn btn-ghost" onclick="backFromLmi()">Back</button><button class="btn btn-primary" id="btn-lmi-next" onclick="submitLmi()" disabled>Continue</button></div>
+              <p class="alert alert-error" id="lmi-submit-error" style="display:none;"></p><div class="wizard-actions"><button class="btn btn-secondary" onclick="backFromLmi()">Back</button><button class="btn btn-primary" id="btn-lmi-next" onclick="submitLmi()" disabled>Continue</button></div>
             </div>
           </div>
 
@@ -464,9 +590,9 @@
           <div class="screen wizard-step agr-page" id="step-agreement">
             <header class="page-head">
               <div>
-                <div class="eyebrow">Final step</div>
-                <h1>Review &amp; finish</h1>
-                <p class="subtitle">Confirm the enrollment details, then review and accept the agreements.</p>
+                <div class="eyebrow" id="agr-eyebrow">Final step</div>
+                <h1 id="agr-title">Review &amp; finish</h1>
+                <p class="subtitle" id="agr-subtitle">Confirm the enrollment details, then review and accept the agreements.</p>
               </div>
               <div class="complete-pill" id="agr-ready-pill" hidden>&#10003; Ready to complete</div>
             </header>
@@ -505,10 +631,16 @@
               <div class="agreement-wrap">
                 <div class="agreement-heading">
                   <div>
-                    <h2>Agreements</h2>
-                    <p>Review each document, then confirm to complete the enrollment.</p>
+                    <h2 id="agr-section-title">Agreements</h2>
+                    <p id="agr-section-sub">Review each document, then confirm to complete the enrollment.</p>
                   </div>
-                  <div class="final-label">Final step</div>
+                  <!-- C4: the "Final step" chip that sat here is gone. The
+                       page already opens with a "Final step" eyebrow, and the
+                       card below it carried a third - three labels for one
+                       fact. The element is kept, empty and hidden, because
+                       applyFinalStepFraming() and the read-only harness both
+                       address it by id; nothing renders it any more. -->
+                  <div class="final-label" id="agr-final-label" hidden></div>
                 </div>
                 <!-- PROTECTED: the acknowledgement, its links, the single
                      checkbox and Agree &amp; finish are rendered here verbatim
@@ -519,8 +651,11 @@
               </div>
             </section>
 
-            <div class="agr-foot">
-              <button class="btn btn-ghost" onclick="backFromAgreement()">Back</button>
+            <!-- Hidden for a read-only enrollment by applyFinalStepFraming():
+                 Back leads into the locked editable steps, and the read-only
+                 card renders its own "Back to dashboard". -->
+            <div class="agr-foot" id="agr-foot">
+              <button class="btn btn-secondary" onclick="backFromAgreement()">Back</button>
             </div>
           </div>
         </div>
@@ -563,7 +698,7 @@
       <p class="helper">Opening the document…</p>
     </div>
     <div class="agr-foot">
-      <p class="agr-note err" id="agr-error" style="display:none;"></p>
+      <p class="alert alert-error" id="agr-error" style="display:none;"></p>
       <div class="agr-actions">
         <button type="button" class="btn btn-primary" onclick="closeAgreements()">Done reading</button>
       </div>
@@ -581,9 +716,9 @@
     </div>
     <div class="cee-modal-body" id="admin-modal-body"></div>
     <div class="cee-modal-foot">
-      <p class="helper" id="admin-modal-error" style="display:none;color:var(--danger);"></p>
+      <p class="alert alert-error" id="admin-modal-error" style="display:none;"></p>
       <div class="cee-modal-actions">
-        <button type="button" class="btn btn-ghost" onclick="closeAdminModal()">Cancel</button>
+        <button type="button" class="btn btn-secondary" onclick="closeAdminModal()">Cancel</button>
         <button type="button" class="btn btn-primary" id="admin-modal-save"
                 onclick="submitAdminModal()">Save</button>
       </div>

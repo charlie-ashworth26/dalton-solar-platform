@@ -119,6 +119,12 @@ def customer_me():
     step_key = wf["current_step_key"] if wf else None
     project = query_one("SELECT * FROM projects WHERE id = ?", (enrollment["project_id"],)) \
         if enrollment["project_id"] else None
+    address = query_one("SELECT * FROM service_addresses WHERE id = ?",
+                        (enrollment["service_address_id"],)) \
+        if enrollment["service_address_id"] else None
+    utility = query_one("SELECT * FROM utility_accounts WHERE id = ?",
+                        (enrollment["utility_account_id"],)) \
+        if enrollment["utility_account_id"] else None
 
     return jsonify({
         "enrollment_id": enrollment["id"],
@@ -131,11 +137,97 @@ def customer_me():
         # Savings comes from the SAME persisted-Perch resolver the rep view uses,
         # so a customer can never be shown a different (or invented) figure.
         "program_savings": _customer_program_savings(enrollment_id),
+        # ── FIELDS THE CUSTOMER VIEW ALREADY READ BUT NEVER RECEIVED ────────
+        #
+        # openCustomerContracts() builds its summary from me.utility_name,
+        # me.service_address and me.project_name, and renders a completed
+        # customer's agreement list from
+        # (me.workflow_last_response || {}).contracts. None of the four were
+        # serialized, so every row the customer saw was blank and a completed
+        # customer was shown an agreement card listing NO agreements. The data
+        # was all persisted; it simply never left here.
+        #
+        # utility_name goes through the ONE shared resolver, so the customer
+        # can never be shown the raw Perch slug.
+        "utility_name": _customer_utility_name(enrollment, utility),
+        "service_address": _format_service_address(address),
+        "project_name": project["name"] if project else None,
         "workflow_step_key": step_key,
         "workflow_step_label": perch_workflow.step_label(step_key) if step_key else None,
         "workflow_is_terminal": perch_workflow.is_terminal(step_key),
         "workflow_is_blocked": perch_workflow.is_blocked(step_key),
+        # WHEN UBS recorded this status - same field, same meaning and the same
+        # honest label as the rep detail payload.
+        "workflow_updated_at": wf["updated_at"] if wf else None,
+        # CONTRACT NAMES ONLY. The rep payload returns the whole persisted
+        # workflow response; a customer gets the single key their own view
+        # consumes and nothing else. No document URL is persisted anywhere, so
+        # none can leak through here.
+        "workflow_last_response": {"contracts": _persisted_contract_names(wf)},
     })
+
+
+def _format_service_address(address):
+    """"street, unit, city, ST zip" from the persisted row, or None.
+
+    The STATE comes FROM THE ROW. It is never defaulted to NY - a Virginia
+    customer must not be shown a New York address.
+    """
+    if not address:
+        return None
+    a = dict(address)
+    line = ", ".join([p for p in (a.get("street"), a.get("unit"), a.get("city")) if p])
+    tail = " ".join([p for p in (a.get("state"), a.get("zip")) if p])
+    return ", ".join([p for p in (line, tail) if p]) or None
+
+
+def _customer_utility_name(enrollment, utility):
+    """The published utility name for this customer's enrollment, or None.
+
+    ONE DISPLAY-NAME SYSTEM: delegates to the same resolver the rep-facing
+    payload uses. enrollments.utility_name holds the slug chosen at
+    Availability and exists from the first step; utility_accounts only exists
+    once the bill step has run, so it is the fallback, not the source.
+    """
+    from services.perch import utilities
+
+    slug = enrollment["utility_name"] if "utility_name" in enrollment.keys() else None
+    if not slug and utility:
+        slug = utility["utility_name"]
+    if not slug:
+        return None
+    try:
+        return utilities.display_name_for_slug(slug)
+    except Exception:
+        return slug
+
+
+def _persisted_contract_names(wf):
+    """The contract metadata UBS already persisted, or []. Never a URL.
+
+    Perch issues time-limited document URLs and UBS deliberately stores none,
+    so this can only ever carry names - which is exactly what the read-only
+    agreement list renders.
+    """
+    import json as _json
+
+    if not wf or not wf["last_response_json"]:
+        return []
+    try:
+        body = _json.loads(wf["last_response_json"]) or {}
+    except Exception:
+        return []
+    if not isinstance(body, dict):
+        return []
+    out = []
+    for c in (body.get("contracts") or []):
+        if isinstance(c, dict):
+            name = c.get("contract_name") or c.get("name")
+            if name:
+                out.append({"contract_name": name})
+        elif c:
+            out.append({"contract_name": str(c)})
+    return out
 
 
 @bp.route("/me/profile", methods=["PATCH"])

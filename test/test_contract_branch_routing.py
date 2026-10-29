@@ -19,6 +19,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _ubs_test_db  # noqa: F401  - throwaway database; see test/_ubs_test_db.py
 os.environ.setdefault("PERCH_API_MODE", "mock")
 
 from app import app
@@ -71,8 +72,18 @@ def main():
           'payload["customer_type"] = chosen' in src)
 
     adapter_src = inspect.getsource(adapter.create_enrollment)
+    # E2: the validator is now handed the parsed CapacityModel rather than the
+    # flat project_details dict, so a v2 capacity response is checked against
+    # what v2 actually returned. Same validator, same rep-requested type - that
+    # is what this pins - and the model is read from the STORED capacity check,
+    # which is what makes it a re-validation rather than a trusted client value.
+    # E2.1 added the county: the enroll path validates against the same
+    # county the rep was shown the options under, so UBS cannot refuse its own
+    # screen. Still the same validator, still the rep's requested type, still
+    # read from the STORED capacity check - that is what this pins.
     check("the adapter re-validates it against capacity",
-          "resolve_customer_type(details, requested=requested_type)" in adapter_src)
+          "resolve_customer_type(\n        model, requested=requested_type, county=county)" in adapter_src
+          and "capacity_model_for(capacity)" in adapter_src)
     check("  ...and the RESOLVED value is what is sent",
           'payload["customer_type"] = customer_type' in adapter_src)
     check("  ...via the multipart builder",
@@ -158,8 +169,9 @@ def main():
           '"enrollment_id": enrollment_id,' in src.split("_contract_review_tokens[token]")[1][:200])
     check("  ...and to one contract index",
           '"contract_index": index,' in src.split("_contract_review_tokens[token]")[1][:200])
+    # D-2: the same refusal, without naming the vendor to the rep.
     check("  ...an out-of-range index is refused",
-          "That contract is not in the current Perch review packet" in src)
+          "That agreement is not in the current review packet" in src)
     check("review tokens are single-use", "_contract_review_tokens.pop" in src)
     check("  ...and expire", "expires_at" in src)
     check("contract responses are never cached by the browser",
@@ -254,12 +266,24 @@ def main():
     check("one Agree & finish button", JS.count('id="agr-agree-btn"') == 1)
 
     section("MOCK COVERAGE — stated honestly")
+    from services.perch import mock_client as _mock
     mock_src = open(os.path.join(ROOT, "services", "perch", "mock_client.py"),
                     encoding="utf-8").read()
     check("the mock implements token + capacity", "def check_capacity" in mock_src)
-    check("  ...but NOT enroll", "def create_enrollment" not in mock_src)
+    # E3 added an /enroll model to the mock so the v2 payload rules
+    # (customer_type, county, savings_percent) can be exercised offline. It is
+    # OPT-IN and OFF BY DEFAULT, which is what keeps this suite's premise
+    # true: with the flag down, /enroll still raises "not implemented", and
+    # the suites that read that as "UBS validation passed" are unaffected.
+    check("  ...and now models enroll, but only behind a flag",
+          "def create_enrollment" in mock_src
+          and "enforce_enroll_contract = False" in mock_src
+          and "if not PerchMockClient.enforce_enroll_contract:" in mock_src)
+    check("  ...which is DOWN by default",
+          _mock.PerchMockClient.enforce_enroll_contract is False)
     check("  ...and NOT contracts", "def generate_contracts" not in mock_src)
-    # So the contract SET comparison is only possible against real staging.
+    # So the contract SET comparison is still only possible against real
+    # staging: the mock models the enroll CONTRACT, not Perch's documents.
 
     print(f"\n{'='*72}\nCONTRACT BRANCH ROUTING - ALL CHECKS PASSED\n{'='*72}")
 

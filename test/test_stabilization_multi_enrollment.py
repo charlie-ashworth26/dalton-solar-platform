@@ -13,6 +13,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _ubs_test_db  # noqa: F401  - throwaway database; see test/_ubs_test_db.py
 os.environ.setdefault("PERCH_API_MODE", "mock")
 
 from app import app
@@ -263,8 +264,10 @@ def main():
                         or "disabled=false" in body_.replace(" ", "")
                         or "updateAgreeButton()" in body_)
             check(f"{name}: disabling a control has a recovery path", recovers)
-        shows_error = ("style.display='block'" in body_.replace(" ", "")
-                       or "style.display = 'block'" in body_)
+        flat = body_.replace(" ", "")
+        shows_error = ("style.display='block'" in flat
+                       or "style.display=''" in flat
+                       or "renderAlert(" in flat)
         check(f"{name}: failures surface a visible error", shows_error)
 
     section("AMBIGUOUS ACCEPTANCE - deliberately NOT retryable")

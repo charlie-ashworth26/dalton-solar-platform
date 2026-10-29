@@ -1,0 +1,38 @@
+-- The customer's county, captured on the Availability step (E2.1).
+--
+-- WHY A COLUMN AND NOT A JS VARIABLE
+--
+-- Perch v2 can restrict solar capacity to named counties. When the restricted
+-- entries offer something the unrestricted ones do not, which program a
+-- customer can be enrolled in DEPENDS on their county - so the county has to
+-- be chosen before the program choice can honestly be presented, and it has to
+-- survive what every other wizard answer survives: leaving the screen,
+-- navigating back, reloading, and resuming a draft tomorrow.
+--
+-- That is the same reasoning as 008_program_selection, and the same shape:
+-- one nullable TEXT column on enrollments, written by one endpoint, read by
+-- the capacity filter.
+--
+-- WHAT THIS VALUE IS, AND IS NOT
+--
+-- It is the county the rep selected from Perch's own controlled list for the
+-- state (GET /markets/counties), stored in PERCH'S SPELLING. Virginia mixes
+-- counties with independent cities spelled with a lowercase "city" suffix and
+-- Perch validates against the exact string it gave us, so the value is stored
+-- as Perch wrote it and never normalized.
+--
+-- It is NOT yet sent anywhere. As of E2.1 it filters capacity inside UBS only;
+-- POST /enroll carries no `county` field and the self-attestation payload is
+-- unchanged. Sending it is E3. The column exists now because the filtering
+-- needs it now, not because the enroll payload is about to change.
+--
+-- ── ADDITIVE ONLY. NO BACKFILL. ──────────────────────────────────────────
+--
+-- One nullable column, no UPDATE, no DELETE, no rebuild. Every existing
+-- enrollment keeps service_county NULL, which reads as "not asked" - and for
+-- all of them it genuinely was not, because nothing asked until now. NULL is
+-- also the correct value for the common case going forward: a location whose
+-- capacity is entirely unrestricted never shows the field, so the column stays
+-- empty for those enrollments rather than being filled in with a county
+-- nobody needed and no one verified.
+ALTER TABLE enrollments ADD COLUMN service_county TEXT;

@@ -9,6 +9,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _ubs_test_db  # noqa: F401  - throwaway database; see test/_ubs_test_db.py
 os.environ.setdefault("PERCH_API_MODE", "mock")
 
 from app import app
@@ -255,8 +256,10 @@ def main():
     check("  ...proof requirement mentioned once", both_txt.count("proof") <= 1)
 
     none_txt = texts({})
+    # D-2: was "Perch returned no available program for this ZIP and utility."
     check("no capacity -> clean no-availability message",
-          "no available program" in none_txt)
+          "no program is available for this zip and utility" in none_txt)
+    check("  ...naming no vendor", "perch" not in none_txt)
     check("  ...and promises nothing", "may still" not in none_txt)
 
     check("proof warning only when LMI is actually offered",
@@ -331,7 +334,8 @@ def main():
     # ═══════════════════════════════════════════════════════
     section("7. B1 / B2 / PHASE A PRESERVED")
     css = open(os.path.join(ROOT, "static", "css", "app.css"), encoding="utf-8").read()
-    check("B2 tokens", "Clean Energy Enrollment — design tokens" in css)
+    check("B2 tokens", all(t in css for t in
+                           ("--brand:", "--ink:", "--radius:", "--s1:", "--ease:")))
     check("B2 motion system", "prefers-reduced-motion" in css)
     check("B2 mobile table cards", "attr(data-label)" in css)
     check("B2 loading states", "cee-spinner" in css)
@@ -355,10 +359,22 @@ def main():
               os.path.join(ROOT, "services", "perch", "client.py"), encoding="utf-8").read())
     with app.app_context():
         # 008_program_selection was added for the dual-program persistence fix -
-        # the rep's explicit choice had nowhere durable to live. Nothing else
-        # since. See test_program_persistence.py.
-        check("migration count is 12 (012_enrollment_discard added)", query_one(
-            "SELECT COUNT(*) n FROM schema_migrations")["n"] == 12)
+        # the rep's explicit choice had nowhere durable to live.
+        # 013_v2_capacity_entries was added for Perch API v2 (E2): the v2
+        # capacity response is an array of entries with county restrictions and
+        # savings ARRAYS, and the v1 flat columns cannot hold it. Additive -
+        # two nullable columns, no backfill. See test_program_persistence.py.
+        # 014_capacity_county was added for E2.1: Perch v2 can restrict
+        # capacity to named counties, so the customer's county has to be
+        # captured and has to survive a reload like every other wizard answer.
+        # Additive - one nullable column, no backfill.
+        # 015_selected_savings_percent was added for E3: Perch v2 can offer
+        # several savings rates for one program and REQUIRES one at /enroll,
+        # so the rep's choice has to survive a reload like the program and
+        # the county do. Additive - one nullable column, no backfill.
+        check("migration count is 15 (015_selected_savings_percent added)",
+              query_one(
+                  "SELECT COUNT(*) n FROM schema_migrations")["n"] == 15)
 
     # ═══════════════════════════════════════════════════════
     section("2d. REAL STAGING RESPONSES — savings pinned to the right field")

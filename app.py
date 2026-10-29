@@ -16,6 +16,7 @@ from routes import auth_routes, enrollment_routes, document_routes, agreement_ro
 from routes import signing_routes, qa_routes, developer_routes, submission_routes
 from routes import access_routes
 from routes import report_routes, project_routes, perch_routes
+from routes import market_routes
 
 
 def create_app():
@@ -44,6 +45,9 @@ def create_app():
     app.register_blueprint(project_routes.bp)
     app.register_blueprint(perch_routes.bp)
     app.register_blueprint(admin_routes.bp)
+    # Read-only market rules (/api/markets/*). Additive: no existing blueprint,
+    # route or URL changes, and nothing on the NY enrollment path calls it.
+    app.register_blueprint(market_routes.bp)
 
     _configure_logging(app)
     _configure_proxy(app)
@@ -60,6 +64,32 @@ def create_app():
 
     @app.route("/", methods=["GET"])
     def index():
+        return render_template("index.html")
+
+    # ── Deep links into the single-page app ──────────────────────────────
+    #
+    # UBS is one page. Until now it was also one URL, so the browser Back
+    # button left the application entirely, a refresh always returned the rep
+    # to the dashboard, and an enrollment could not be linked to or reopened
+    # from history.
+    #
+    # These paths serve the SAME page; the browser-side router reads
+    # window.location and restores the right view. Listing them explicitly
+    # rather than adding a catch-all keeps /api/*, /access, /sign/<token> and
+    # the static mounts behaving exactly as they do now - a catch-all would
+    # shadow a mistyped API path and answer it with HTML.
+    #
+    # NO AUTHORIZATION HAPPENS HERE. This hands out the application shell,
+    # which is public; every piece of data it then requests is authenticated
+    # and authorized by its own API route, and an enrollment the rep may not
+    # see still answers 403/404 exactly as before.
+    @app.route("/dashboard", methods=["GET"])
+    @app.route("/enrollments", methods=["GET"])
+    @app.route("/enrollments/<int:enrollment_id>", methods=["GET"])
+    @app.route("/customers", methods=["GET"])
+    @app.route("/reps", methods=["GET"])
+    @app.route("/sales-report", methods=["GET"])
+    def app_route(enrollment_id=None):
         return render_template("index.html")
 
     @app.route("/api/health", methods=["GET"])

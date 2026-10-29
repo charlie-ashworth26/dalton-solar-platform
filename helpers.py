@@ -38,6 +38,29 @@ def mask_account_number(acct: str) -> str:
     return "*" * (len(digits) - 4) + digits[-4:]
 
 
+#: The character mask_account_number() pads with. A real utility account
+#: number never contains it, which is what makes a mask recognisable.
+MASK_CHARACTER = "*"
+
+
+def looks_masked(value) -> bool:
+    """True when `value` is a DISPLAY MASK this application produced.
+
+    WHY THIS EXISTS. mask_account_number() is applied when an enrollment is
+    serialised for a sales_rep, so the rep-facing detail payload carries
+    "******7890" rather than the account number. The wizard hydrates its form
+    from that payload, which put the mask into the editable account field -
+    and the next save read the field back and wrote the MASK OVER THE REAL
+    ACCOUNT NUMBER. Save & Exit, reopen, Continue was enough to destroy it.
+
+    A display artefact must never be accepted as data. The check is on the
+    mask character rather than on a length or a pattern, so it cannot be
+    fooled by an account number that happens to be the same length, and it
+    stays correct if the masking rule changes.
+    """
+    return MASK_CHARACTER in str(value or "")
+
+
 def next_enrollment_code():
     year = datetime.now().year
     row = query_one(

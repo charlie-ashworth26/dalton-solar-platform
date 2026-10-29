@@ -44,7 +44,7 @@ def _clean(text: str) -> str:
 STREET_SUFFIXES = r"(?:ST|AVE|RD|DR|LN|BLVD|WAY|CT|PL|CIR|HWY|ROAD|STREET|AVENUE|DRIVE|LANE)\.?"
 
 
-def parse_utility_bill(raw_text: str) -> dict:
+def parse_utility_bill(raw_text: str, utility_hint: str = None) -> dict:
     """Returns a dict of {field: {"value": ..., "confidence": 0-1}} plus a flat
     'fields' view for convenience. Confidence is a simple heuristic (regex hit = 0.9,
     with small penalties for ambiguity) — swap in a real model's confidence in production."""
@@ -113,16 +113,48 @@ def parse_utility_bill(raw_text: str) -> dict:
     if m:
         set_field("existing_cs_credits", f"{m.group(1)}: {m.group(2)}", 0.6)
 
+    # ── OTHER UTILITIES ──────────────────────────────────────────────────
+    #
+    # Everything above is the National Grid layout and is UNCHANGED. Its
+    # anchors ("SERVICE FOR", "ACCOUNT NUMBER") appear on no other bill in
+    # this programme, which is the whole reason NYSEG, RG&E and Dominion
+    # extracted nothing: not a failure to read the page, but nothing looking
+    # for their labels.
+    #
+    # bill_parsers returns {} unless it both recognises the utility AND holds
+    # an extractor for it, so a National Grid bill reaches here and leaves
+    # with exactly the fields it had before. Identifiers it offers have
+    # already passed the utility's own validation; anything that failed is
+    # absent, so a bad read can never arrive as a filled field.
+    try:
+        from services import bill_parsers
+        parsed = bill_parsers.parse_bill(t, utility_hint=utility_hint)
+        for field, value in (parsed.get("fields") or {}).items():
+            # Confidence is kept in the existing shape for existing readers.
+            # It is NOT a measurement here any more than it is above.
+            set_field(field, value, 0.9)
+        if parsed.get("utility"):
+            set_field("utility", parsed["utility"], 0.9)
+        # Reported so a caller can tell the rep WHICH fields still need
+        # typing. Field names only - never a value.
+        if parsed.get("rejected"):
+            result["_rejected_fields"] = {"value": sorted(parsed["rejected"]),
+                                          "confidence": 1.0}
+        if parsed.get("ambiguous"):
+            result["_ambiguous_fields"] = {"value": sorted(parsed["ambiguous"]),
+                                           "confidence": 1.0}
+    except Exception:
+        # Extraction is an assist. A parser fault must never cost the rep the
+        # upload, and the National Grid fields gathered above still stand.
+        pass
+
     return result
 
 
-def amount_to_bracket(amount):
-    if amount is None:
-        return None
-    if amount < 75:
-        return "Less than $75"
-    if amount < 150:
-        return "$75 - $149"
-    if amount < 250:
-        return "$150 - $249"
-    return "$250+"
+# amount_to_bracket() lived here. It was never called: bill amount is not part
+# of the NY or VA workflow, no rep field collects it, the bill-validation
+# missing-field list in routes/document_routes.py does not include it, and no
+# Perch payload carries an amount. The amount_due extraction above is LEFT
+# ALONE deliberately - it only writes into documents.extracted_data_json, a
+# JSON blob that nothing requires and nothing shows a rep, so removing it would
+# change stored extraction output for no benefit.

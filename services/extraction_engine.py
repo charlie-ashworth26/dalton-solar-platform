@@ -28,6 +28,7 @@ number: tesseract's real per-word confidence from image_to_data. pdfplumber has
 no confidence concept, so text-PDF extraction reports None rather than a
 fabricated score.
 """
+import inspect
 import os
 import shutil
 import subprocess
@@ -190,10 +191,39 @@ class DocumentExtractor:
 
     name = "abstract"
 
-    def extract(self, file_paths, category="utility_bill"):
+    def extract(self, file_paths, category="utility_bill", utility_hint=None):
         """file_paths: ordered list forming ONE logical document set.
+        `utility_hint` is the slug the enrollment is for, used only when the
+        document does not identify its own utility.
         Must return an ExtractionResult and must never raise."""
         raise NotImplementedError
+
+
+def extract_with_hint(extractor, file_paths, category="utility_bill",
+                      utility_hint=None):
+    """Call a provider's extract(), passing the utility hint ONLY if it takes one.
+
+    THE REASON THIS IS NOT JUST A KEYWORD ARGUMENT
+
+        This boundary was published as extract(file_paths, category), and a
+        provider written against it - including the one in the ingestion
+        suite - defines exactly that signature. Adding a required keyword to
+        every call would break those providers at the first upload, which is
+        precisely the kind of change the hint was never meant to be: it is an
+        optional aid for a document that does not name its own utility, not a
+        new term of the contract.
+    """
+    try:
+        params = inspect.signature(extractor.extract).parameters
+        accepts = ("utility_hint" in params
+                   or any(p.kind == inspect.Parameter.VAR_KEYWORD
+                          for p in params.values()))
+    except (TypeError, ValueError):       # builtins and other odd callables
+        accepts = False
+    if accepts and utility_hint:
+        return extractor.extract(file_paths, category=category,
+                                 utility_hint=utility_hint)
+    return extractor.extract(file_paths, category=category)
 
 
 class LocalExtractor(DocumentExtractor):
@@ -201,7 +231,7 @@ class LocalExtractor(DocumentExtractor):
 
     name = "local"
 
-    def extract(self, file_paths, category="utility_bill"):
+    def extract(self, file_paths, category="utility_bill", utility_hint=None):
         paths = [p for p in (file_paths or []) if p]
         if not paths:
             return ExtractionResult(ExtractionStatus.UNSUPPORTED, provider=self.name,
@@ -236,7 +266,8 @@ class LocalExtractor(DocumentExtractor):
         if category == "utility_bill":
             try:
                 from services import extraction as legacy
-                parsed = legacy.parse_utility_bill(combined)
+                parsed = legacy.parse_utility_bill(combined,
+                                                   utility_hint=utility_hint)
                 # Keep only values; the legacy per-field "confidence" numbers are
                 # hand-tuned constants, not measurements, so they are not surfaced.
                 fields = {k: v.get("value") for k, v in parsed.items()

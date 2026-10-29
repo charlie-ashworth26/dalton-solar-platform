@@ -16,6 +16,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _ubs_test_db  # noqa: F401  - throwaway database; see test/_ubs_test_db.py
 os.environ.setdefault("PERCH_API_MODE", "mock")
 
 from app import app
@@ -163,10 +164,20 @@ def main():
           report("?lmi=true")["enrollments_started"] <= after_failed["enrollments_started"])
     rep_src = open(os.path.join(ROOT, "routes", "report_routes.py"),
                    encoding="utf-8").read()
+    # The discard filter is still seeded exactly once and still inherited by
+    # every count. Its column is now TABLE-QUALIFIED: this one clause is reused
+    # by a query that joins signing_sessions to enrollments, and an unqualified
+    # column there made the date filter ambiguous (a 500 on any date range).
+    # Qualifying every filter column was the fix, so the seed string changed
+    # spelling while the property this check exists for did not.
+    SEED = 'filters_sql = ["enrollments.discarded_at IS NULL"]'
     check("the filter is seeded once, not bolted onto each query",
-          rep_src.count('filters_sql = ["discarded_at IS NULL"]') == 1)
+          rep_src.count(SEED) == 1)
     check("  ...so every count inherits it",
-          "discarded_at" not in rep_src.split('filters_sql = ["discarded_at IS NULL"]')[1])
+          "discarded_at" not in rep_src.split(SEED)[1])
+    check("  ...and it is qualified, so reusing the clause in a join is safe",
+          "enrollments.discarded_at" in rep_src
+          and '"discarded_at IS NULL"' not in rep_src)
 
     # ═══════════════════════════════════════════════════════
     section("4. A NORMAL ENROLLMENT STILL WORKS AFTERWARDS")
@@ -189,7 +200,7 @@ def main():
     # the wizard resets on a confirmed discard and preserves its id otherwise -
     # is in test/capacity_discard_reset_harness.js, which executes
     # submitCapacity() against both responses.
-    tail = JS.split("formErr.textContent = err.message;")[1][:1400]
+    tail = JS.split("formErr.textContent = userMessage(err);")[1][:1400]
     check("the wizard reset is gated on the server-confirmed discard",
           "err.body.enrollment_discarded === true" in tail)
     check("  ...and drops the stale enrollment id inside that gate",

@@ -15,6 +15,78 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #                    disk, because the container filesystem is wiped on deploy.
 DB_PATH = os.environ.get("DALTON_DB_PATH") or os.path.join(BASE_DIR, "dalton_solar.db")
 
+# ─────────────────────── DESTRUCTIVE-RESET PROTECTION ───────────────────────
+#
+# THE INCIDENT THIS PREVENTS. init_db(reset=True) deletes the database file and
+# its WAL sidecars outright. Test suites call it to get a clean fixture, and a
+# suite that forgets to repoint DB_PATH first deletes the REAL application
+# database instead - the one holding live enrollment and sales records. That is
+# not hypothetical: a full `pytest` run did exactly this during the Phase C
+# work, and 27 of the 34 suites that reset were relying on nothing but habit.
+#
+# APP_DB_PATH is captured HERE, at import, before any test module can reassign
+# DB_PATH. It is therefore a stable record of "the database this installation
+# actually serves", and the guard below compares against it rather than against
+# whatever DB_PATH happens to point at by the time a reset is attempted.
+APP_DB_PATH = DB_PATH
+
+#: Set to "1" to permit a destructive reset of the APPLICATION database. It is
+#: deliberately awkward: a human typing it is making a decision, which is the
+#: only context in which erasing real records is legitimate. It has NO effect
+#: on a scratch/temp database (those never needed permission) and NO effect on
+#: a server deployment (see _looks_like_server_deployment).
+RESET_OPT_IN_ENV = "UBS_ALLOW_DB_RESET"
+
+#: Environment markers set by hosting platforms. Their presence means this
+#: process is serving, not developing, and no opt-in can unlock a reset.
+_SERVER_ENV_MARKERS = ("RENDER", "RENDER_SERVICE_ID", "RENDER_INSTANCE_ID",
+                       "DYNO", "KUBERNETES_SERVICE_HOST", "WEBSITE_INSTANCE_ID")
+
+
+class DatabaseResetRefused(RuntimeError):
+    """Raised instead of deleting a database that holds real records."""
+
+
+def _looks_like_server_deployment():
+    return any(os.environ.get(v) for v in _SERVER_ENV_MARKERS)
+
+
+def is_application_database(path):
+    """True when `path` is the database this installation serves."""
+    try:
+        return os.path.realpath(os.path.abspath(path)) == \
+               os.path.realpath(os.path.abspath(APP_DB_PATH))
+    except Exception:
+        # FAIL CLOSED. If the comparison itself cannot be made, treat the
+        # target as the real database rather than assuming it is scratch.
+        return True
+
+
+def assert_reset_allowed(path):
+    """Permit a destructive reset, or refuse with an explanation.
+
+    FAIL-CLOSED by construction: the only path that returns quietly is one
+    proved NOT to be the application database, or an explicit human opt-in on a
+    developer machine. Everything else raises.
+    """
+    target = os.path.abspath(path)
+    if not is_application_database(target):
+        return                      # scratch or temp file: nothing real to lose
+    if _looks_like_server_deployment():
+        raise DatabaseResetRefused(
+            f"Refusing to reset the application database at {target}: this "
+            "process is running on a hosting platform. A destructive reset is "
+            "never performed on a deployed service.")
+    if os.environ.get(RESET_OPT_IN_ENV) == "1":
+        return                      # a human asked for this, on their own machine
+    raise DatabaseResetRefused(
+        f"Refusing to erase the application database at {target}.\n"
+        "This file holds live enrollment and sales records.\n"
+        "  * Tests must point db.DB_PATH at a temporary file first - "
+        "import test/_ubs_test_db.py, which does it for you.\n"
+        f"  * To reset your own development database on purpose, set "
+        f"{RESET_OPT_IN_ENV}=1 for that one command.")
+
 # Several coworkers share one Gunicorn worker with 4 threads, so multiple
 # threads hit SQLite concurrently.
 #   WAL         readers do not block the writer (default DELETE mode blocks both)
@@ -59,6 +131,14 @@ def close_db(exception=None):
         del _local.conn
 
 
+def _has_schema(conn):
+    """True when this database already carries the application's tables."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+        "AND name='enrollments'").fetchone()
+    return bool(row and row[0])
+
+
 def init_db(reset=False):
     """Create the database from schema_sqlite.sql, then apply any pending
     migrations from db/migrations/. If reset=True, drop and recreate first."""
@@ -81,6 +161,10 @@ def init_db(reset=False):
     close_db()
 
     if reset:
+        # THE GUARD COMES FIRST, before anything is unlinked. It raises rather
+        # than returning a value, so there is no path on which a refusal is
+        # ignored and the deletion below runs anyway.
+        assert_reset_allowed(DB_PATH)
         # WAL mode keeps committed pages in a SIDECAR file. Deleting only the
         # .db leaves dalton_solar.db-wal behind, and SQLite REPLAYS it on the
         # next connect - resurrecting rows the reset was supposed to remove.
@@ -93,10 +177,21 @@ def init_db(reset=False):
     os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     _configure_connection(conn)
-    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
-        conn.executescript(f.read())
-    conn.commit()
-    conn.close()
+    # EXISTING DATA IS NEVER RE-SCHEMA'D.
+    #
+    # schema_sqlite.sql is 18 bare CREATE TABLE statements, so running it over
+    # a populated database raises partway through ("table already exists"),
+    # leaving the script half-applied. Detecting the populated case and going
+    # straight to migrations makes startup idempotent AND data-preserving: an
+    # installation with real enrollments receives new migrations and keeps
+    # every row it had.
+    if _has_schema(conn):
+        conn.close()
+    else:
+        with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
+            conn.executescript(f.read())
+        conn.commit()
+        conn.close()
     # Migrations are additive and idempotent — safe on both a fresh database
     # and an existing one with real enrollment data.
     from db.migrate import run_migrations

@@ -15,10 +15,27 @@ from urllib.parse import urlparse
 
 from db import query_one, execute
 from services.perch import adapter, utilities
+from services.perch import capacity as cap_module
 
-# ─────────────── next_step URL -> our step key ───────────────
-# Matched on PATH SUFFIX so a staging host or base-URL change doesn't break it.
+# ─────────────── next_step -> our step key ───────────────
+#
+# TWO SHAPES, ONE MAP (E1).
+#
+#   v1 sends a full URL:  https://host/affiliate_partners/v1/enrollments/enroll
+#   v2 sends a bare path: /enroll
+#
+# Both are matched on PATH SUFFIX, so a staging host, a base-URL change or the
+# version segment can all move without touching this table. The v1 suffixes
+# carry `/enrollments/`, the v2 suffixes do not; listing both means one UBS
+# instance can talk to either version - which it must during a migration,
+# where a resumed enrollment still holds a v1 URL while new calls return v2
+# paths.
+#
+# Longest suffix wins. Without that, `/contracts/accept` could match the
+# `/contracts` entry and send an enrollment back a step; the order a dict
+# literal happens to be written in must not decide that.
 NEXT_STEP_PATH_MAP = {
+    # ── v1: full URLs, whose path contains /enrollments/ ──
     "/enrollments/enroll": "enroll",
     "/enrollments/capacity": "service_area",
     "/enrollments/lmi/proof_docs": "proof_docs",
@@ -27,20 +44,56 @@ NEXT_STEP_PATH_MAP = {
     "/enrollments/contracts": "contracts",
     "/enrollments/contracts/accept": "contracts_accept",
     "/enrollments/status": "status",
+    # ── v2: bare paths, exactly as the v2 spec documents them ──
+    "/enroll": "enroll",
+    "/capacity": "service_area",
+    "/lmi/proof_docs": "proof_docs",
+    "/lmi/self_attestation": "self_attestation",
+    "/lmi/self_attestation/accept": "self_attestation_accept",
+    "/contracts": "contracts",
+    "/contracts/accept": "contracts_accept",
+    "/status": "status",
 }
 
+# Checked longest-first so a more specific path always beats a prefix of
+# itself. Computed once rather than relying on dict insertion order.
+_NEXT_STEP_SUFFIXES = sorted(NEXT_STEP_PATH_MAP, key=len, reverse=True)
 
-def resolve_next_step_key(next_step_url):
-    """Maps a Perch next_step URL to a step key.
+
+def resolve_next_step_key(next_step):
+    """Maps a Perch next_step - v1 full URL or v2 bare path - to a step key.
+
     Returns (step_key, recognized). recognized=False means Perch pointed us
-    somewhere we have not implemented - that must be visible, not silent."""
-    if not next_step_url:
+    somewhere we have not implemented - that must be visible, not silent.
+
+    Perch's next_step remains AUTHORITATIVE. This translates it; it never
+    invents one, and an unrecognized value is reported rather than defaulted.
+    """
+    if not next_step:
         return None, True
-    path = urlparse(next_step_url).path or ""
-    for suffix, key in NEXT_STEP_PATH_MAP.items():
+    # urlparse handles both shapes: a bare path comes back unchanged, a full
+    # URL loses its scheme, host and query.
+    path = urlparse(str(next_step)).path or ""
+    # A trailing slash is not a different step.
+    path = path.rstrip("/") or path
+    for suffix in _NEXT_STEP_SUFFIXES:
         if path.endswith(suffix):
-            return key, True
+            return NEXT_STEP_PATH_MAP[suffix], True
     return None, False
+
+
+def resolve_next_step(result):
+    """The same resolution, taken straight from a normalized Perch result.
+
+    Routes call this instead of reaching for a key themselves: whether a
+    response carried `next_step` (documented on v1, and the only spelling on
+    v2) or `next_step_url` (the v1 staging alias) is the client's business,
+    not theirs. Returns (step_key, recognized, raw_next_step).
+    """
+    result = result or {}
+    raw = result.get("next_step") or result.get("next_step_url")
+    key, recognized = resolve_next_step_key(raw)
+    return key, recognized, raw
 
 
 # ─────────────── Workflow state persistence ───────────────
@@ -48,6 +101,40 @@ def resolve_next_step_key(next_step_url):
 def get_state(enrollment_id):
     row = query_one("SELECT * FROM perch_workflow_state WHERE enrollment_id = ?", (enrollment_id,))
     return dict(row) if row else None
+
+
+def last_response_dict(state):
+    """The last step response as a DICT, or {} when it is not one.
+
+    perch_workflow_state.last_response_json holds whatever the most recent
+    step returned, and from E2 that is not always a JSON object: the capacity
+    step stores Perch's `project_details`, which on v2 is an ARRAY. Every
+    caller then wants a field out of it, and `.get()` on a list raises
+    AttributeError - which is how a v2 capacity check turned the whole
+    enrollment list into a 500. The response was fine; the reader assumed a
+    shape.
+
+    So the shape check lives here rather than at each call site. A non-object
+    payload is "no fields to read", which is exactly what a caller asking for
+    `customer_type` or `contracts` should get from a capacity array.
+
+    Accepts a state row/dict (what get_state returns) or None.
+    """
+    if not state:
+        return {}
+    # Works for a sqlite3.Row (IndexError on a missing column) and for a plain
+    # dict (KeyError), without caring which one the caller had.
+    try:
+        raw = state["last_response_json"]
+    except (KeyError, IndexError, TypeError):
+        return {}
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def set_state(enrollment_id, step_key, next_step_url=None, recognized=True, last_response=None):
@@ -98,11 +185,19 @@ def _step_service_area(enrollment, last_check):
                 "required": True,
                 "placeholder": "customer@example.com",
                 "value": enrollment.get("perch_token_email") or "",
-                "help": "Used to start and securely resume this enrollment.",
+                # No help line. "Used to start and securely resume this
+                # enrollment" restated what the label already says and added
+                # a line of grey text above every other field on the step.
+                # The label and the placeholder carry it.
                 "validation": {"pattern": r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
                                 "message": "Enter a valid email address."},
             },
             {
+                # Presentation hint only (C5): a five-digit ZIP and the
+                # utility picker share one row instead of each taking the full
+                # width of the card. Same family as "placeholder" and "mono" -
+                # it says how the field looks, never what it means.
+                "width": "half",
                 "name": "zip_code",
                 "label": "ZIP code",
                 "type": "text",
@@ -115,6 +210,7 @@ def _step_service_area(enrollment, last_check):
                 "validation": {"pattern": r"^\d{5}$", "message": "ZIP code must be exactly 5 digits."},
             },
             {
+                "width": "half",
                 "name": "utility_name",
                 "label": "Utility",
                 "type": "select",
@@ -141,29 +237,188 @@ def _step_service_area(enrollment, last_check):
     }
 
 
-def _capacity_panels(check):
-    """Renders the documented project_details. Every value shown here comes
-    straight from Perch - none of it is computed locally."""
-    d = check.get("project_details") or {}
-    segments = [
-        ("Residential", d.get("residential_capacity_available")),
-        ("Small commercial", d.get("small_commercial_capacity_available")),
-        ("Income qualified (LMI)", d.get("lmi_capacity_available")),
-    ]
+def _capacity_model(check):
+    """The capacity model behind a check dict, whichever version produced it."""
+    return adapter.capacity_model_for(check or {})
+
+
+def _selected_county(enrollment):
+    """The county already chosen for this enrollment, or None."""
+    if not enrollment:
+        return None
+    try:
+        value = enrollment["service_county"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return (value or "").strip() or None
+
+
+def county_field_required(check):
+    """Does this capacity need the rep to say which county the customer is in?
+
+    PUBLIC, because the ROUTES layer asks it before fetching the county list.
+    services/perch/workflow.py must not import the markets layer - that
+    boundary is pinned by test_market_rules_service.py and exists so the
+    enrollment state machine cannot start depending on market lookups - so
+    this module decides WHETHER the question applies and the routes layer,
+    which may reach markets, supplies the answers.
+    """
+    return adapter.county_decides_options(_capacity_model(check))
+
+
+COUNTY_FIELD_NAME = "county"
+
+
+def _county_field(enrollment, check):
+    """(field descriptor or None, blocks_continue).
+
+    The field appears ONLY when the county decides what can be offered here.
+    For every location with no county restrictions - which is every v1
+    location and most v2 ones - this returns (None, False) and the
+    Availability step is byte-identical to what it was.
+
+    The descriptor leaves `options` EMPTY. They are Perch's controlled county
+    list for the state, which only the routes layer may fetch; it fills them
+    in through fill_county_options() below. A field that reaches the client
+    still empty is rendered read-only with an explanation rather than as a
+    dropdown with nothing in it.
+    """
+    if not county_field_required(check):
+        return None, False
+
+    selected = _selected_county(enrollment)
+    return ({
+        "name": COUNTY_FIELD_NAME,
+        "label": "County",
+        "type": "select",
+        "required": True,
+        "placeholder": "Select the customer's county",
+        "value": selected or "",
+        "options": [],
+        "help": "Some solar capacity here is limited to particular counties, "
+                "so the programs available depend on where the customer lives.",
+    }, not selected)
+
+
+def fill_county_options(descriptor, options, source=None):
+    """Put the markets layer's county list into the step's County field.
+
+    Called by the routes layer, which is the only layer allowed to reach
+    markets. A no-op for a step that has no County field, so a caller never
+    has to check first.
+
+    With no options the field becomes read-only and says so: the question
+    applies but cannot be answered, and a dropdown with nothing in it would
+    look like a bug rather than an outage.
+    """
+    step = (descriptor or {}).get("step") or {}
+    for field in step.get("fields") or []:
+        if field.get("name") != COUNTY_FIELD_NAME:
+            continue
+        if options:
+            field["options"] = [{"value": c, "label": c} for c in options]
+            if source == "fallback_db":
+                field["help"] = (field.get("help") or "") + \
+                    " (Showing the local county list; Perch was unreachable.)"
+        else:
+            field["readonly"] = True
+            field["placeholder"] = "County list unavailable"
+            field["help"] = ("Some capacity here is limited to particular "
+                             "counties, but the county list could not be "
+                             "loaded. Re-check availability to try again.")
+            if field.get("value"):
+                field["options"] = [{"value": field["value"],
+                                     "label": field["value"]}]
+    return descriptor
+
+
+def _capacity_panels(check, county=None, awaiting_county=False):
+    """Renders what Perch returned for this location. Every value shown here
+    comes straight from the capacity response - none of it is computed locally.
+
+    E2: driven by the normalized entry model rather than the v1 flat fields, so
+    one renderer serves both API versions.
+
+    E2.1: the rows are the UBS PROGRAMS, not Perch's capacity types. Listing
+    capacity types meant showing "Residential" and "Residential (mass market)"
+    as separate rows, which is Perch's internal distinction and not a choice
+    the rep has - they enrol a residential customer either way. One row per
+    program, named exactly as the program cards name it.
+
+    `county`, when given, narrows availability to what THAT customer can
+    actually get: the unrestricted entries plus the ones listing their county.
+
+    `awaiting_county` is the state in between - the county decides here and
+    has not been answered. The segments still show what the LOCATION has, so
+    the screen does not read as "nothing available" while the rep is being
+    asked where the customer lives, but the RATES are withheld: a figure that
+    exists only in two counties is not a figure to put in front of a rep
+    before anyone has said which county this is.
+    """
+    model = _capacity_model(check)
+
+    # One row per SELECTABLE program. Business is absent for the same reason
+    # it is not selectable - UBS cannot enrol it - and listing a capacity a
+    # rep cannot use as "Available" would be an invitation to a dead end.
+    #
+    # E4: the SAME list available_programs() offers, so a program a market may
+    # not sell cannot appear here as "Available" after the cards have stopped
+    # offering it - which is exactly what Virginia did until this shared the
+    # one source.
+    segments = []
+    for customer_type in adapter.offerable_customer_types(
+            getattr(model, "market_state", None)):
+        if customer_type == adapter.CUSTOMER_TYPE_BUSINESS:
+            continue
+        rule = adapter.PROGRAM_RULES[customer_type]
+        available = any(model.has_capacity(t, county=county)
+                        for t in rule["capacity_types"])
+        # The IRA row appears only when it is genuinely in play. On v1 it is
+        # always unavailable - v1 cannot express it - and a permanent
+        # "Residential LMI (IRA): Not available" row on every NY screen would
+        # be noise reporting a limitation of the API version, not of the
+        # location.
+        if customer_type == adapter.CUSTOMER_TYPE_LMI_IRA and not available:
+            continue
+        segments.append((rule["label"], available))
+
     return [
         {
             "type": "capacity_summary",
-            "title": f"{check.get('utility_display_name') or check.get('utility_slug')} - ZIP {check.get('zip_code')}",
+            # NEVER the raw slug. The capacity card is the most prominent
+            # place a utility name appears, and it read
+            # "dominion-energy-va - ZIP 22401" for any market outside the local
+            # NY table. The stored display name is used when present, and the
+            # shared resolver derives a clean one otherwise - the slug itself
+            # is a last resort that should now be unreachable.
+            "title": f"{_utility_label(check)} - ZIP {check.get('zip_code')}",
             "segments": [{"label": lbl, "available": bool(av)} for lbl, av in segments],
-            "metrics": [
-                {"label": "Residential / commercial savings",
-                 "value": _pct(d.get("savings_percent_for_residential_and_commercial_customers"))},
-                {"label": "Income-qualified savings",
-                 "value": _pct(d.get("savings_percent_for_lmi_customers"))},
-            ],
-            "notices": _capacity_notices(d),
+            # E2: a metric per PROGRAM, from the program mapping, so the rate
+            # shown beside a program is the rate that program would enroll at.
+            # A program offering several rates renders them all rather than
+            # collapsing to one number Perch never promised.
+            "metrics": ([] if awaiting_county else [
+                {"label": f"{p['label']} savings",
+                 "value": _pct_list(p["savings_percents"])}
+                for p in adapter.available_programs(model, county=county)
+            ]),
+            "notices": _capacity_notices(model, county=county),
         }
     ]
+
+
+def _pct_list(values):
+    """One rate, several rates, or none - as text.
+
+    v1 always produced at most one rate, so a single value renders exactly as
+    _pct() rendered it before E2 and every existing screen is unchanged.
+    """
+    values = list(values or [])
+    if not values:
+        return "-"
+    if len(values) == 1:
+        return _pct(values[0])
+    return ", ".join(_pct(v) for v in values)
 
 
 def _pct(v):
@@ -174,45 +429,53 @@ def _pct(v):
     return f"{int(v)}%" if float(v) == int(v) else f"{v}%"
 
 
-def _capacity_notices(d):
+def _capacity_notices(model_or_details, county=None):
     """Copy that matches the ACTUAL capacity response.
 
-    The previous version fired on lmi_capacity_available is False and said
+    An older version fired on lmi_capacity_available is False and said
     "Residential capacity may still be available" WITHOUT checking whether
     residential was available - so a screen showing Residential: Not available
-    still claimed it might be. Every branch below is now derived from the flags
-    that were really returned.
+    still claimed it might be. Every branch below is derived from what was
+    really returned.
 
-    Standard residential is available when EITHER residential_capacity_available
-    or small_commercial_capacity_available is set: Perch confirmed that small
-    CS = resi in this NY funnel.
+    E2: driven by the program mapping rather than raw flags, so it stays
+    correct on both API versions and says nothing about a capacity type the rep
+    cannot enroll. Accepts either a CapacityModel or a flat project_details
+    dict, because older callers pass the latter.
+
+    E2.1: `county`, when given, narrows the programs these notices describe to
+    what that customer can actually get, so the copy matches the cards.
     """
-    d = d or {}
+    model = (model_or_details
+             if isinstance(model_or_details, cap_module.CapacityModel)
+             else cap_module.parse(model_or_details))
+
     notices = []
+    programs = adapter.available_programs(model, county=county)
+    offered = {p["customer_type"] for p in programs}
+    residential = adapter.CUSTOMER_TYPE_RESIDENTIAL in offered
+    lmi_family = [p for p in programs if adapter.is_lmi_customer_type(
+        p["customer_type"])]
 
-    residential = bool(d.get("residential_capacity_available")
-                       or d.get("small_commercial_capacity_available"))
-    lmi = bool(d.get("lmi_capacity_available"))
-
-    # Only mention proof documents when an LMI program is actually on offer -
-    # otherwise it warns about a branch this enrollment cannot take.
-    if lmi and d.get("proof_documents_required"):
+    # Only mention proof documents when a program that needs them is actually
+    # on offer - otherwise it warns about a branch this enrollment cannot take.
+    if any(p["lmi_required"] for p in lmi_family):
         notices.append({
             "tone": "warn",
             "text": "The income-qualified program requires proof of participation. "
                     "The exact documents are confirmed once the customer is enrolled.",
         })
 
-    if residential and lmi:
+    if residential and lmi_family:
         # Both available: the program cards carry the detail, so say nothing.
         pass
-    elif residential and not lmi:
+    elif residential and not lmi_family:
         notices.append({
             "tone": "info",
             "text": "Standard residential capacity is available here. The "
                     "income-qualified program is not available at this location.",
         })
-    elif lmi and not residential:
+    elif lmi_family and not residential:
         notices.append({
             "tone": "info",
             "text": "Only the income-qualified program is available at this location.",
@@ -220,8 +483,22 @@ def _capacity_notices(d):
     else:
         notices.append({
             "tone": "warn",
-            "text": "Perch returned no available program for this ZIP and utility.",
+            "text": "No program is available for this ZIP and utility.",
         })
+
+    # County restrictions are REPORTED. E2.1 collects the county when it
+    # decides the options (the County field above), but UBS still does not
+    # SEND it to Perch until E3 - so this keeps the screen honest rather than
+    # letting it imply a guarantee Perch has not given. Once a county has been
+    # chosen the notice is no longer useful: the cards already reflect it.
+    if model.has_county_restrictions() and not county:
+        notices.append({
+            "tone": "info",
+            "text": "Some capacity at this location is limited to particular "
+                    "counties. Final eligibility is confirmed by Perch when the "
+                    "customer is enrolled.",
+        })
+
     return notices
 
 
@@ -245,14 +522,38 @@ def _step_capacity_result(enrollment, check):
         action = {"label": "Continue", "operation": "advance", "enabled": False,
                   "disabled_reason": "No further step is implemented yet."}
 
+    # E2.1: the County field. A NORMAL CONDITIONAL FIELD on the step that is
+    # already here - not a new screen, not a new step, and not shown at all
+    # unless the answer changes what this location can offer. The renderer
+    # already draws `select` fields, so this needs no new UI machinery and
+    # inherits the step's existing look.
+    #
+    # Continue is held while the question is outstanding, for the same reason
+    # the programs list is withheld: the set of valid programs is not decided
+    # yet, so moving on would carry an undecided state forward.
+    county_field, county_blocks = _county_field(enrollment, check)
+    if county_blocks and action.get("enabled"):
+        action = dict(action, enabled=False,
+                      disabled_reason="Select the customer's county to see "
+                                      "the available savings programs.")
+
     return {
         "key": "capacity_result",
         "eyebrow": "New enrollment",
         "title": "Capacity confirmed",
-        "subtitle": "These rates apply to this enrollment.",
-        "fields": [],
+        # "These rates apply to this enrollment" is not TRUE while the county
+        # is outstanding: a rate that exists only in two counties is not yet
+        # known to apply to this customer. The subtitle says what is actually
+        # the case until it is answered.
+        "subtitle": ("Some capacity here depends on the customer's county. "
+                     "Select it to see the rates that apply."
+                     if county_blocks
+                     else "These rates apply to this enrollment."),
+        "fields": ([county_field] if county_field else []),
         "uploads": [],
-        "panels": _capacity_panels(check),
+        "panels": _capacity_panels(check,
+                                   county=_selected_county(enrollment),
+                                   awaiting_county=county_blocks),
         "perch_next_step": {
             "url": check.get("next_step_url"),
             "recognized": recognized,
@@ -268,19 +569,20 @@ def _step_no_capacity(enrollment, check):
         "key": "no_capacity",
         "eyebrow": "New enrollment",
         "title": "No capacity available",
-        "subtitle": check.get("message")
-                    or f"Perch has no open project capacity for {check.get('utility_display_name')} "
-                       f"in ZIP {check.get('zip_code')}.",
+        # D-2: what the rep needs is the utility and the ZIP, not who told us.
+        # check["message"] comes from upstream, so it is NOT used as rep-facing
+        # copy - it is diagnostic and is recorded with the capacity check.
+        "subtitle": f"There is no open project capacity for "
+                    f"{_utility_label(check)} in ZIP {check.get('zip_code')}.",
         "fields": [],
         "uploads": [],
         "panels": [{
             "type": "notice",
             "tone": "warn",
             "title": "Enrollment cannot proceed",
-            "text": "Perch returned 503 for this utility and ZIP, which means no open solar "
-                    "project capacity. Per Perch's guidance, enrollment must not be submitted "
-                    "until a capacity check succeeds. Capacity changes as projects rotate - "
-                    "it is worth re-checking later.",
+            "text": "This enrollment cannot be submitted until an availability "
+                    "check succeeds for this utility and ZIP. Capacity changes "
+                    "as projects rotate, so it is worth checking again later.",
         }],
         "primary_action": {"label": "Try a different ZIP or utility", "operation": "restart_service_area"},
         "secondary_action": {"label": "Back to dashboard", "operation": "exit"},
@@ -294,6 +596,26 @@ def _step_no_capacity(enrollment, check):
 # Derived from Perch's own next_step vocabulary plus the keys the contract
 # routes set explicitly - NO new state vocabulary is invented here, and
 # enrollments.status is deliberately left alone for QA/reporting.
+def _utility_label(check):
+    """The rep-facing utility name for a capacity record.
+
+    One resolver, shared with the dashboard and the reports: the display name
+    the capacity response carried, else a clean name derived from the slug,
+    else the slug. A rep should never read a slug.
+    """
+    stored = (check or {}).get("utility_display_name")
+    if stored:
+        return stored
+    slug = (check or {}).get("utility_slug")
+    if not slug:
+        return "this utility"
+    try:
+        from services.perch import utilities
+        return utilities.display_name_for_slug(slug)
+    except Exception:
+        return slug
+
+
 STEP_LABELS = {
     "service_area":               "Service area",
     "capacity_result":            "Capacity confirmed",
@@ -307,6 +629,19 @@ STEP_LABELS = {
     "contracts_accept":           "Contracts awaiting acceptance",
     "contracts_accepted":         "Complete",
     "contracts_accept_uncertain": "Needs review",
+    # UBS-INTERNAL, never a Perch next_step.
+    #
+    # Set when the market publishes no `status` values - so Perch has no field
+    # in which "this customer does not qualify" could be expressed - and the
+    # customer answers that their household income is above the published
+    # limit. Perch is never called for such an enrollment, which is precisely
+    # why UBS has to hold the outcome itself.
+    #
+    # Only a market whose self_attestation_options returns `status: []` can
+    # reach this key. New York returns ["accepted", "rejected"], so an NY
+    # enrollment records its answer in that field exactly as before and can
+    # never land here.
+    "lmi_not_qualified":          "Does not qualify for the available program",
     # /status is in NEXT_STEP_PATH_MAP, so _next_key() can return it if Perch
     # ever points there. Labelled so it can never surface as a bare key.
     "enroll_outcome_uncertain":   "Enrollment outcome uncertain - check status",
@@ -316,8 +651,14 @@ STEP_LABELS = {
 
 # Terminal: reopening these must never offer a restart or re-submit path.
 TERMINAL_STEP_KEYS = {"contracts_accepted"}
-# Blocked: reopened read-only pending human reconciliation with Perch.
-BLOCKED_STEP_KEYS = {"contracts_accept_uncertain", "enroll_outcome_uncertain"}
+# Blocked: reopened read-only, with no path onward.
+#
+# The first two are outcomes awaiting human reconciliation WITH Perch.
+# lmi_not_qualified is different in kind: it is a settled local decision, not
+# an uncertainty. It is blocked for the same practical reason - a reopened
+# enrollment must offer no route to self-attestation, contracts or completion.
+BLOCKED_STEP_KEYS = {"contracts_accept_uncertain", "enroll_outcome_uncertain",
+                     "lmi_not_qualified"}
 
 
 def step_label(step_key):

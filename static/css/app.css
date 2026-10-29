@@ -2403,3 +2403,133 @@ img,svg,table{max-width:100%;}
   .data-table .status-pill,.table .status-pill,
   #sales-report-table .status-pill{white-space:normal;}
 }
+/* ═══════════════ SALES SUMMARY (admin, above the Sales Report) ═══════════════
+   Completed-sale counts above the detailed table.
+
+   EVERY CLASS HERE IS PREFIXED ss-. That is not decoration: the first draft
+   used .sum-title, .prog-name and .prog-grid, all three of which already
+   existed - .sum-title belongs to the agreement summary and carries mono,
+   uppercase and wide letter-spacing, which duly leaked into this panel's
+   section heading and rendered it as a label. Prefixing removes the bleed in
+   both directions, so this panel cannot restyle the program selector or the
+   agreement screen either. The modifier classes (.is-on, .is-lead, .is-text,
+   .is-unrecorded) are only ever written compounded onto an ss- class for the
+   same reason.
+
+   Mobile-first: one column by default, gaining columns at the breakpoints the
+   rest of the app uses. The only literal lengths are hairline borders, the bar
+   height, and the bar widths, which are percentages computed from the data -
+   so nothing here can push the page wider than the viewport, the failure this
+   screen is most prone to, sitting above an eight-column table. */
+.ss{margin-bottom:var(--s6);}
+
+.ss-head{display:flex;flex-direction:column;gap:var(--s3);margin-bottom:var(--s4);}
+.ss-title{font-family:var(--font-display);font-weight:var(--w-bold);
+  font-size:var(--t-h2);line-height:var(--lh-h2);color:var(--ink);margin:0;
+  letter-spacing:-0.01em;text-transform:none;}
+.ss-window{font-size:var(--t-sm);color:var(--ink-muted);margin:var(--s1) 0 0;}
+
+/* The range selector. A segmented control rather than three loose buttons:
+   the three are mutually exclusive and should read as one control. */
+.ss-seg{display:inline-flex;align-self:flex-start;background:var(--surface-sunk);
+  border:1px solid var(--border);border-radius:var(--radius);padding:3px;gap:2px;
+  max-width:100%;}
+.ss-seg-btn{appearance:none;border:0;background:transparent;cursor:pointer;
+  font-family:inherit;font-size:var(--t-sm);font-weight:var(--w-semibold);
+  color:var(--ink-muted);padding:var(--s2) var(--s3);border-radius:var(--radius-sm);
+  white-space:nowrap;min-height:36px;transition:background .12s ease,color .12s ease;}
+.ss-seg-btn:hover{color:var(--ink);}
+.ss-seg-btn.is-on{background:var(--surface);color:var(--brand-dark);
+  box-shadow:var(--shadow);}
+.ss-seg-btn:focus-visible{outline:2px solid var(--brand);outline-offset:2px;}
+
+/* Stat cards: one column on a phone, two on a tablet, four on a desktop. */
+.ss-grid{display:grid;grid-template-columns:1fr;gap:var(--s3);margin-bottom:var(--s4);}
+.ss-card{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);padding:var(--s4);min-width:0;
+  transition:transform .12s ease, box-shadow .12s ease;}
+.ss-card:hover{transform:translateY(-2px);box-shadow:var(--shadow);}
+.ss-card.is-lead{border-left:3px solid var(--brand);}
+.ss-k{font-size:var(--t-label);letter-spacing:var(--ls-label);text-transform:uppercase;
+  font-weight:var(--w-bold);color:var(--ink-faint);margin:0 0 var(--s2);}
+.ss-v{font-family:var(--font-display);font-weight:var(--w-black);
+  font-size:var(--t-h1);line-height:var(--lh-h1);color:var(--ink);
+  margin:0;overflow-wrap:anywhere;}
+/* A utility or program name is prose, not a figure: one step down, so a long
+   name wraps to two tidy lines instead of overwhelming its card. */
+.ss-v.is-text{font-size:var(--t-h2);line-height:var(--lh-h2);}
+.ss-sub{font-size:var(--t-sm);color:var(--ink-muted);margin:var(--s1) 0 0;
+  overflow-wrap:anywhere;}
+
+/* The two breakdown panels, stacked: utilities, then the programs those sales
+   used, grouped under the utility they belong to. */
+.ss-panel{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);padding:var(--s4);margin-bottom:var(--s4);}
+.ss-panel-head{display:flex;justify-content:space-between;align-items:baseline;
+  gap:var(--s3);margin:0 0 var(--s4);flex-wrap:wrap;}
+.ss-panel-title{font-family:var(--font-display);font-weight:var(--w-bold);
+  font-size:var(--t-h3);color:var(--ink);margin:0;}
+.ss-panel-note{font-size:var(--t-sm);color:var(--ink-faint);margin:0;}
+
+.ss-util{display:grid;grid-template-columns:1fr auto;gap:var(--s1) var(--s3);
+  align-items:baseline;padding:var(--s3) 0;border-top:1px solid var(--border);}
+.ss-util:first-of-type{border-top:0;padding-top:0;}
+.ss-util-name{font-size:var(--t-body);font-weight:var(--w-semibold);color:var(--ink);
+  min-width:0;overflow-wrap:anywhere;}
+.ss-util-count{font-size:var(--t-body);font-weight:var(--w-bold);color:var(--ink);
+  white-space:nowrap;}
+.ss-util-share{font-weight:var(--w-regular);color:var(--ink-muted);
+  margin-left:var(--s2);}
+.ss-bar{grid-column:1 / -1;height:6px;border-radius:var(--radius-xs);
+  background:var(--surface-sunk);overflow:hidden;}
+.ss-bar-fill{display:block;height:100%;border-radius:var(--radius-xs);
+  background:var(--brand);min-width:2%;}
+
+/* Programs, grouped by the utility whose sales they are.
+   TILES, not columns of a list. With four utilities in three columns a plain
+   column layout orphans the fourth group under a stray rule with half the row
+   empty beside it; as tiles an incomplete last row reads as a tile grid, which
+   is what it is, and the count stays beside the name instead of being pushed
+   to the far edge of a very wide column. */
+.ss-groups{display:grid;grid-template-columns:1fr;gap:var(--s3);}
+.ss-group{background:var(--surface-sunk);border:1px solid var(--border);
+  border-radius:var(--radius-sm);padding:var(--s3) var(--s4);min-width:0;}
+.ss-group-head{font-size:var(--t-label);letter-spacing:var(--ls-label);
+  text-transform:uppercase;font-weight:var(--w-bold);color:var(--ink-faint);
+  margin:0 0 var(--s2);overflow-wrap:anywhere;}
+.ss-line{display:flex;justify-content:space-between;align-items:baseline;
+  gap:var(--s3);padding:var(--s1) 0;min-width:0;}
+.ss-line-name{font-size:var(--t-body);color:var(--ink);min-width:0;
+  overflow-wrap:anywhere;}
+.ss-line-n{font-size:var(--t-body);font-weight:var(--w-semibold);color:var(--ink);
+  white-space:nowrap;}
+/* A sale whose program was never recorded is shown, not hidden - and not
+   dressed up as a program either. */
+.ss-line-name.is-unrecorded,.ss-util-name.is-unrecorded{color:var(--ink-muted);
+  font-style:italic;}
+
+/* An empty range is a real answer, so it gets a composed card rather than a
+   grid of zeroes. */
+.ss-empty{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);padding:var(--s6) var(--s4);text-align:center;}
+.ss-empty-ico{width:28px;height:28px;color:var(--ink-faint);margin:0 auto var(--s3);
+  display:block;}
+.ss-empty-title{font-family:var(--font-display);font-weight:var(--w-bold);
+  font-size:var(--t-h3);color:var(--ink);margin:0 0 var(--s1);}
+.ss-empty-body{font-size:var(--t-sm);color:var(--ink-muted);margin:0;}
+
+.ss-skeleton{font-size:var(--t-sm);color:var(--ink-muted);margin:0;}
+
+@media (min-width:600px){
+  .ss-grid{grid-template-columns:repeat(2,1fr);}
+  .ss-groups{grid-template-columns:repeat(auto-fill,minmax(240px,1fr));}
+}
+
+@media (min-width:900px){
+  .ss-head{flex-direction:row;justify-content:space-between;align-items:flex-end;}
+  .ss-seg{align-self:auto;}
+}
+
+@media (min-width:1200px){
+  .ss-grid{grid-template-columns:repeat(4,1fr);}
+}

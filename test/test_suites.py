@@ -300,6 +300,11 @@ def test_sales_report():
     """Sales reporting totals and the rep-visible breakdown."""
     import test_sales_report as suite
     suite.main()
+
+def test_sales_summary():
+    """Admin Sales Summary: completed sales only, in the business timezone."""
+    import test_sales_summary as suite
+    suite.main()
 
 
 def test_bill_page_integrity():

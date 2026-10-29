@@ -7211,6 +7211,189 @@ function refreshCustomerLinkControl(){
 }
 
 
+/* ═══════════ Admin: sales summary ═══════════
+
+   A small analytics panel above the Sales Report table. It counts COMPLETED
+   SALES ONLY, and it does not decide what that means - /api/admin/sales-summary
+   answers from the workflow's own terminal step, in the business timezone.
+   Nothing here recomputes, re-buckets or re-dates anything the server sent;
+   this file renders it.
+
+   ALL THREE RANGES ARRIVE IN ONE RESPONSE, so Today / This Week / This Month
+   switch with no network call at all - which is what makes the selector feel
+   instant - and the three can never disagree with each other, because they
+   were measured against one clock reading.
+
+   Admin-only: the route enforces it, and a 403 hides the panel outright. */
+
+let salesSummary = null;            // the whole payload, all three ranges
+let salesSummaryRange = 'today';    // which one is on screen
+
+const SUM_RANGES = ['today', 'week', 'month'];
+
+function hideSalesSummary(){
+  const host = document.getElementById('sales-summary');
+  if(host) host.style.display = 'none';
+  salesSummary = null;
+}
+
+async function loadSalesSummary(){
+  const host = document.getElementById('sales-summary');
+  const body = document.getElementById('ss-body');
+  if(!host || !body) return;
+  host.style.display = '';
+  body.innerHTML = '<p class="ss-skeleton">Counting completed sales…</p>';
+  let data;
+  try{
+    data = await apiFetch('/api/admin/sales-summary');
+  }catch(e){
+    // A viewer who may not see this must not see a half-drawn version of it.
+    if(e && e.status === 403){ hideSalesSummary(); return; }
+    // Anything else - including the server telling us its timezone database
+    // is missing - is reported in the panel's own words. Showing counts built
+    // on the wrong day boundary would be worse than showing none.
+    body.innerHTML = '<div class="ss-empty">'
+      + '<p class="ss-empty-title">Summary unavailable</p>'
+      + '<p class="ss-empty-body">' + esc(e && e.message ? e.message :
+          'The completed-sales summary could not be loaded.') + '</p></div>';
+    return;
+  }
+  salesSummary = data;
+  if(SUM_RANGES.indexOf(salesSummaryRange) === -1) salesSummaryRange = 'today';
+  renderSalesSummary();
+}
+
+function setSalesSummaryRange(range){
+  if(SUM_RANGES.indexOf(range) === -1) return;
+  salesSummaryRange = range;
+  renderSalesSummary();
+}
+
+/* The window a range covers, in the words an admin would use. The dates come
+   from the server's own business-timezone boundaries, so what is printed here
+   is the window the counts were actually taken over - not a second opinion
+   formed from the browser's clock, which may be in another timezone entirely. */
+function sumWindowText(view, payload){
+  const w = (view && view.window) || null;
+  if(!w) return '';
+  const day = function(iso){
+    const d = new Date(iso);
+    if(isNaN(d.getTime())) return '';
+    return d.toLocaleDateString(undefined,
+      {weekday:'short', month:'short', day:'numeric'});
+  };
+  const start = day(w.start_local);
+  if(!start) return '';
+  if(view.range === 'today') return 'Completed on ' + start + ', Eastern time.';
+  // The end boundary is the START of the next period, so the last day the
+  // window actually covers is the day before it.
+  const end = new Date(w.end_local);
+  end.setDate(end.getDate() - 1);
+  const label = view.range === 'week'
+    ? 'Week of ' : 'Month of ';
+  return label + start + ' – ' + day(end.toISOString()) + ', Eastern time.';
+}
+
+function sumCard(key, value, sub, isText, lead){
+  return '<div class="ss-card' + (lead ? ' is-lead' : '') + '">'
+    + '<p class="ss-k">' + esc(key) + '</p>'
+    + '<p class="ss-v' + (isText ? ' is-text' : '') + '">' + esc(value) + '</p>'
+    + (sub ? '<p class="ss-sub">' + esc(sub) + '</p>' : '')
+    + '</div>';
+}
+
+function sumPlural(n, one, many){
+  return n + ' ' + (n === 1 ? one : many);
+}
+
+function renderSalesSummary(){
+  const host = document.getElementById('sales-summary');
+  const body = document.getElementById('ss-body');
+  const windowEl = document.getElementById('ss-window');
+  if(!host || !body || !salesSummary) return;
+  const view = (salesSummary.ranges || {})[salesSummaryRange];
+
+  SUM_RANGES.forEach(function(r){
+    const tab = document.getElementById('ss-tab-' + r);
+    if(!tab) return;
+    const on = r === salesSummaryRange;
+    tab.classList.toggle('is-on', on);
+    tab.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+
+  if(!view){ body.innerHTML = ''; return; }
+  if(windowEl) windowEl.textContent = sumWindowText(view, salesSummary);
+
+  // AN EMPTY RANGE IS AN ANSWER. A wall of zeroes reads as a broken panel;
+  // one sentence reads as "nothing yet", which is what it means.
+  if(!view.total){
+    const when = view.range === 'today' ? 'yet today'
+               : (view.range === 'week' ? 'yet this week' : 'yet this month');
+    body.innerHTML = '<div class="ss-empty">'
+      + '<svg class="ss-empty-ico" viewBox="0 0 24 24" fill="none" '
+      + 'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" '
+      + 'stroke-linejoin="round" aria-hidden="true">'
+      + '<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg>'
+      + '<p class="ss-empty-title">No completed sales ' + esc(when) + '</p>'
+      + '<p class="ss-empty-body">Sales appear here once the customer has '
+      + 'accepted their agreement.</p></div>';
+    return;
+  }
+
+  const topUtil = view.top_utility;
+  const topProg = view.top_program;
+  const cards = sumCard('Total completed sales', String(view.total),
+                        view.label, false, true)
+    + sumCard('Utilities active', String(view.utilities_active),
+              view.utilities_active === 1 ? 'utility with a sale'
+                                          : 'utilities with sales')
+    + sumCard('Top utility', topUtil ? topUtil.utility : '—',
+              topUtil ? sumPlural(topUtil.count, 'sale', 'sales')
+                        + ' · ' + topUtil.share + '%' : '', true)
+    + sumCard('Top program', topProg ? topProg.program : '—',
+              topProg ? sumPlural(topProg.count, 'sale', 'sales')
+                        + ' · ' + topProg.share + '%' : '', true);
+
+  const unrecordedUtility = salesSummary.unrecorded_utility_label;
+  const unrecordedProgram = salesSummary.unrecorded_program_label;
+
+  const utilRows = (view.by_utility || []).map(function(u){
+    const odd = u.utility === unrecordedUtility;
+    return '<div class="ss-util">'
+      + '<span class="ss-util-name' + (odd ? ' is-unrecorded' : '') + '">'
+        + esc(u.utility) + '</span>'
+      + '<span class="ss-util-count">' + sumPlural(u.count, 'sale', 'sales')
+        + '<span class="ss-util-share">' + u.share + '%</span></span>'
+      + '<span class="ss-bar"><span class="ss-bar-fill" style="width:'
+        + u.share + '%"></span></span>'
+      + '</div>';
+  }).join('');
+
+  const progGroups = (view.by_utility || []).map(function(u){
+    const lines = (u.programs || []).map(function(p){
+      const odd = p.program === unrecordedProgram;
+      return '<div class="ss-line">'
+        + '<span class="ss-line-name' + (odd ? ' is-unrecorded' : '') + '">'
+          + esc(p.program) + '</span>'
+        + '<span class="ss-line-n">' + p.count + '</span></div>';
+    }).join('');
+    return '<div class="ss-group"><p class="ss-group-head">' + esc(u.utility)
+      + '</p>' + lines + '</div>';
+  }).join('');
+
+  body.innerHTML = '<div class="ss-grid">' + cards + '</div>'
+    + '<div class="ss-panel"><div class="ss-panel-head">'
+      + '<h3 class="ss-panel-title">By utility</h3>'
+      + '<p class="ss-panel-note">' + sumPlural(view.total, 'completed sale',
+          'completed sales') + '</p></div>'
+      + utilRows + '</div>'
+    + '<div class="ss-panel"><div class="ss-panel-head">'
+      + '<h3 class="ss-panel-title">By program</h3>'
+      + '<p class="ss-panel-note">Grouped by the utility they were sold on</p>'
+      + '</div><div class="ss-groups">' + progGroups + '</div></div>';
+}
+
+
 /* ═══════════ Admin: sales report ═══════════
    Admin-only, the same way rep management is: the nav entry is hidden for
    everyone else, and /api/admin/sales-report enforces the role server-side.
@@ -7229,6 +7412,10 @@ async function loadSalesReport(){
   // control back. The button is only ever HIDDEN here - the server still
   // decides who may export, and that check is untouched.
   if(exportBtn) exportBtn.style.display = '';
+  // The summary is a SEPARATE request and is deliberately not awaited: the
+  // detailed table must not wait on it, and if the summary fails the table
+  // still renders. Its own route enforces the same admin check.
+  loadSalesSummary();
   if(!host) return;
   host.innerHTML = '<p class="helper">Loading sales report…</p>';
   let data;
@@ -7249,6 +7436,9 @@ async function loadSalesReport(){
     // expired session itself.
     if(e && e.status === 403){
       if(exportBtn) exportBtn.style.display = 'none';
+      // Nothing of the summary may linger on a screen the viewer is not
+      // entitled to - including from an earlier admin session in this tab.
+      hideSalesSummary();
       renderSalesReportAdminOnly(host);
       return;
     }

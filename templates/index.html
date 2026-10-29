@@ -256,6 +256,33 @@
 
       <p class="alert alert-error" id="sales-report-error" style="display:none;"></p>
 
+      <!-- SALES SUMMARY. Completed sales only, in the business timezone.
+           Additive: the detailed table below is unchanged. Rendered by
+           renderSalesSummary() from /api/admin/sales-summary, which carries
+           all three ranges in one response so the selector switches with no
+           second request. Admin-only by the same route guard as the table. -->
+      <section class="ss" id="sales-summary" style="display:none;"
+               aria-labelledby="ss-heading">
+        <div class="ss-head">
+          <div>
+            <h2 class="ss-title" id="ss-heading">Completed sales</h2>
+            <p class="ss-window" id="ss-window"></p>
+          </div>
+          <div class="ss-seg" role="tablist" aria-label="Time range">
+            <button type="button" class="ss-seg-btn is-on" role="tab" id="ss-tab-today"
+                    aria-selected="true" aria-controls="ss-body"
+                    onclick="setSalesSummaryRange('today')">Today</button>
+            <button type="button" class="ss-seg-btn" role="tab" id="ss-tab-week"
+                    aria-selected="false" aria-controls="ss-body"
+                    onclick="setSalesSummaryRange('week')">This Week</button>
+            <button type="button" class="ss-seg-btn" role="tab" id="ss-tab-month"
+                    aria-selected="false" aria-controls="ss-body"
+                    onclick="setSalesSummaryRange('month')">This Month</button>
+          </div>
+        </div>
+        <div id="ss-body" role="tabpanel" aria-live="polite"></div>
+      </section>
+
       <div class="card">
 
         <div id="sales-report-table"><p class="helper">Loading sales report…</p></div>

@@ -753,8 +753,113 @@ function dashBucketFor(e){
   return key ? 'Needs Attention' : 'In Progress';
 }
 
+/* ═══════════ The dashboard greeting ═══════════
+
+   It used to be the literal string 'Good afternoon, ', so a rep opening UBS at
+   seven in the morning was greeted with the afternoon - and a rep who left the
+   tab open all day was still greeted with it at midnight.
+
+   THE TIME IS THE BROWSER'S, not the server's. The server runs in UTC (and in
+   Eastern for business-day reporting); neither is the hour in front of the
+   person reading the screen, which is the only hour a greeting can be about.
+
+   Hours, per the agreed wording:
+       05:00-11:59  morning
+       12:00-16:59  afternoon
+       17:00-04:59  evening                                                  */
+const GREETING_BANDS = [
+  {from: 5,  until: 12, text: 'Good morning'},
+  {from: 12, until: 17, text: 'Good afternoon'},
+];
+const GREETING_EVENING = 'Good evening';
+
+function greetingForHour(hour){
+  const h = Number(hour);
+  if(!isFinite(h)) return GREETING_EVENING;
+  for(let i = 0; i < GREETING_BANDS.length; i++){
+    const b = GREETING_BANDS[i];
+    if(h >= b.from && h < b.until) return b.text;
+  }
+  return GREETING_EVENING;      // 17:00-23:59 and 00:00-04:59 alike
+}
+
+/* The name, EXACTLY as it was built before: full_name if there is one, else
+   the email, first word either way, and an empty string when nobody is signed
+   in. Lifted into its own function so the greeting change could not disturb
+   it, not because it needed changing. */
+function dashGreetingName(){
+  return currentUser ? (currentUser.full_name || currentUser.email).split(' ')[0] : '';
+}
+
+function applyDashGreeting(){
+  const el = document.getElementById('dash-greeting');
+  if(!el) return;
+  el.textContent = greetingForHour(new Date().getHours()) + ', ' + dashGreetingName();
+}
+
+/* Milliseconds until the next band change, from a given moment.
+
+   Computed as a real instant rather than "an hour from now" so it is right
+   across a DST change, and so the update lands ON the boundary instead of up
+   to an hour late. */
+function msUntilNextGreetingChange(now){
+  const at = function(hour){
+    const d = new Date(now.getTime());
+    d.setHours(hour, 0, 0, 0);
+    return d;
+  };
+  const marks = [at(5), at(12), at(17)];
+  const tomorrow5 = at(5);
+  tomorrow5.setDate(tomorrow5.getDate() + 1);
+  marks.push(tomorrow5);
+  for(let i = 0; i < marks.length; i++){
+    const delta = marks[i].getTime() - now.getTime();
+    if(delta > 0) return delta;
+  }
+  return 60 * 60 * 1000;        // unreachable; an hour is a safe fallback
+}
+
+let greetingTimer = null;
+
+/* Re-greet when the clock crosses a boundary, with no refresh.
+
+   A single timeout to the NEXT boundary, rather than a poll: it fires three
+   times a day instead of once a minute. The visibility listener is the other
+   half of the same job - a laptop that slept through 5pm wakes with a timeout
+   that is overdue rather than fired, and the greeting would otherwise stay
+   wrong until the next boundary. */
+function scheduleGreetingRefresh(){
+  if(greetingTimer){ clearTimeout(greetingTimer); greetingTimer = null; }
+  // A floor, so this can never become a spin. If the boundary maths ever
+  // returned zero or a negative - a clock moved backwards, a leap second, a
+  // bug here - a bare setTimeout(0) chain would re-fire every few
+  // milliseconds for as long as the tab stayed open, which on a dashboard
+  // reps leave open all day is a flat battery rather than a wrong word.
+  const delay = Math.max(1000, msUntilNextGreetingChange(new Date()));
+  // Flipped to false once setTimeout RETURNS. A real timer cannot run its
+  // callback before that; a test double that calls the function immediately
+  // can, and rescheduling from inside such a call recurses until the stack
+  // gives out. Caught by phase_a_state_harness.js, whose setTimeout stub does
+  // exactly that - the greeting still updates there, it just does not chain.
+  let firedSynchronously = true;
+  greetingTimer = setTimeout(function(){
+    greetingTimer = null;
+    applyDashGreeting();
+    if(!firedSynchronously) scheduleGreetingRefresh();
+  }, delay);
+  firedSynchronously = false;
+}
+
+document.addEventListener('visibilitychange', function(){
+  if(document.visibilityState === 'visible'){
+    applyDashGreeting();
+    scheduleGreetingRefresh();
+  }
+});
+
 async function renderDashboard(){
-  document.getElementById('dash-greeting').textContent = 'Good afternoon, ' + (currentUser ? (currentUser.full_name || currentUser.email).split(' ')[0] : '');
+  applyDashGreeting();
+  scheduleGreetingRefresh();
   await loadEnrollments();   // Projects UI removed; Perch assigns projects
 
   document.getElementById('dash-stats').innerHTML = DASH_BUCKETS.map(bucket => {

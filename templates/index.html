@@ -145,7 +145,13 @@
   <div class="main-area">
     <div class="view active" id="view-dashboard">
       <div class="page-head">
-        <div><h1 id="dash-greeting">Good afternoon, Charlie</h1><div class="sub">Here's how your pipeline looks today.</div></div>
+        <!-- The greeting is written by applyDashGreeting() from the BROWSER's clock,
+             which is why no time of day is spelled out here. The markup used to read
+             "Good afternoon, Charlie", and that string outlived every render: anyone
+             grepping for the greeting found a hardcoded afternoon and reasonably
+             concluded that was the bug. renderDashboard() fills this synchronously
+             before the view is painted, so it is never seen empty. -->
+        <div><h1 id="dash-greeting"></h1><div class="sub">Here's how your pipeline looks today.</div></div>
         <button class="btn btn-primary" onclick="startWizardFresh()">+ New enrollment</button>
       </div>
       <div class="stat-grid" id="dash-stats"></div>

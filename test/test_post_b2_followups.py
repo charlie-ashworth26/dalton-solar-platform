@@ -210,8 +210,24 @@ def main():
           available_programs(no_lmi_fig)[0]["savings_percent"] is None)
     adapter_src = open(os.path.join(ROOT, "services", "perch", "adapter.py"),
                        encoding="utf-8").read()
+    # COMMENTS STRIPPED, STRINGS KEPT.
+    #
+    # The property is "no rate is written into the code", and the check read
+    # the file as one blob - so a COMMENT explaining a live case ("the
+    # mass_market entry behind it publishes 5% and 10%") failed it. That
+    # comment is exactly the kind of note this file should carry, and deleting
+    # it to satisfy a substring search would be the wrong way round.
+    #
+    # String literals stay in scope on purpose: a rate hardcoded into a
+    # rep-facing sentence is still a hardcoded rate.
+    import io as _io
+    import tokenize as _tokenize
+    adapter_code = " ".join(
+        tok.string for tok in
+        _tokenize.generate_tokens(_io.StringIO(adapter_src).readline)
+        if tok.type != _tokenize.COMMENT)
     for pct in ("5%", "10%", "20%", "25%"):
-        check(f"no hardcoded {pct} in the adapter", pct not in adapter_src)
+        check(f"no hardcoded {pct} in the adapter's code", pct not in adapter_code)
     check("the mapping is documented with Perch's wording",
           "small cs" in adapter_src.lower() and "25kW" in adapter_src)
 
@@ -307,8 +323,14 @@ def main():
           re.search(r'id="c-email"[^>]*readonly', HTML) is not None)
     check("  ...because Perch keys the session on it",
           "perch_token_email" in adapter_src)
+    # ASSERTED ON THE GUARD, NOT ON ITS WORDING. This matched the sentence
+    # verbatim, so rewording the message - which was necessary, because it
+    # named the partner and was therefore never shown to a rep - read as the
+    # rule being removed. The rule is the comparison against the stored
+    # session email; the sentence is just how it is explained.
     check("  ...and /enroll REJECTS a mismatch",
-          "must match the email used to open this Perch enrollment session" in adapter_src)
+          'payload["email_address"].strip().lower() != token_email.strip().lower()'
+          in adapter_src)
     check("customer login also matches on that email",
           "lower(trim(email))" in open(os.path.join(ROOT, "routes", "auth_routes.py"),
                                        encoding="utf-8").read())
@@ -328,7 +350,7 @@ def main():
     check("the email is still read-only and never re-asked",
           'readonly hidden' in HTML and 'id="c-email" placeholder' not in HTML)
     check("  ...and the Perch-session rule is still enforced by the backend",
-          "must match the email used to open this Perch enrollment session"
+          'payload["email_address"].strip().lower() != token_email.strip().lower()'
           in adapter_src)
 
     # ═══════════════════════════════════════════════════════

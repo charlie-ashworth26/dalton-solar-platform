@@ -305,6 +305,21 @@ def test_sales_summary():
     """Admin Sales Summary: completed sales only, in the business timezone."""
     import test_sales_summary as suite
     suite.main()
+
+def test_or_account_lengths():
+    """Orange & Rockland accepts 10 OR 11 digits, on every layer that asks."""
+    import test_or_account_lengths as suite
+    suite.main()
+
+def test_pod_persistence():
+    """The NYSEG / RG&E POD ID survives every save, reopen and re-upload."""
+    import test_pod_persistence as suite
+    suite.main()
+
+def test_rep_error_mapping():
+    """A rejected enrollment names its cause without naming the partner."""
+    import test_rep_error_mapping as suite
+    suite.main()
 
 
 def test_bill_page_integrity():

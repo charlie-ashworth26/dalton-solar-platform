@@ -1054,29 +1054,48 @@ def _strip_integrator_instructions(text):
     return cleaned.rstrip(" .,;:").strip()
 
 
+def ubs_sentence_for(item):
+    """The UBS-WRITTEN sentence for one field-level error, and how specific it is.
+
+    Returns (text, "pair") for a sentence written for this exact field and
+    code, (text, "code") for one written for the code on any field, and
+    (None, None) when UBS has no wording of its own - which is the point: the
+    caller then knows that anything it could show would be Perch's prose.
+
+    Split out of _field_error_text() so the rep-facing layer can ask the same
+    question without re-implementing these tables or reaching Perch's own
+    wording by accident. _field_error_text() is unchanged in behaviour and
+    still owns the final fallback tier.
+    """
+    field = item.get("field") or item.get("name") or ""
+    code = (item.get("code") or "").strip()
+    raw_message = item.get("message") or item.get("detail") or ""
+
+    lowered_message = str(raw_message).lower()
+    text = next((sentence for marker, sentence in _FIELD_ERROR_BY_MESSAGE
+                 if marker in lowered_message), None)
+    if not text:
+        text = (_FIELD_ERROR_TEXT.get((field, code))
+                or _FIELD_ERROR_TEXT.get((field, None)))
+    if text:
+        return text, "pair"
+
+    if code in _CODE_DEFAULT_TEXT:
+        return _CODE_DEFAULT_TEXT[code].format(label=_field_label(field)), "code"
+    return None, None
+
+
 def _field_error_text(item):
     """One field-level 422 error, as a rep should read it.
 
     Never prints the machine code. Never prints Perch's endpoint names.
     """
     field = item.get("field") or item.get("name") or ""
-    code = (item.get("code") or "").strip()
     raw_message = item.get("message") or item.get("detail") or ""
     acct = item.get("utility_account_number")
 
-    lowered_message = str(raw_message).lower()
-    text = next((sentence for marker, sentence in _FIELD_ERROR_BY_MESSAGE
-                 if marker in lowered_message), None)
-
-    if not text:
-        text = (_FIELD_ERROR_TEXT.get((field, code))
-                or _FIELD_ERROR_TEXT.get((field, None)))
-
+    text, _specificity = ubs_sentence_for(item)
     label = _field_label(field)
-
-    if not text and code in _CODE_DEFAULT_TEXT:
-        # A code UBS knows, on a field it has no specific wording for.
-        text = _CODE_DEFAULT_TEXT[code].format(label=label)
 
     if not text:
         # Neither mapped: Perch's own wording, cleaned. "must be 10 digits"

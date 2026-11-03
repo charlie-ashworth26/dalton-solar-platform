@@ -268,8 +268,26 @@ function framing() {
   };
 }
 
+/* Calls that actually reach the PARTNER.
+ *
+ * This counted every URL under /api/perch/, which was the same thing until
+ * openEnrollment() began loading the utility rules on reopen - the fix for
+ * NYSEG and RG&E POD IDs vanishing, which needed the per-utility rules
+ * present before the POD field could render or be validated.
+ *
+ * /api/perch/utilities is a read of the local perch_utilities reference table
+ * (routes/perch_routes.list_utilities -> services.perch.utilities.all_utilities,
+ * a plain SELECT). It is in the /api/perch/ namespace because it describes
+ * Perch's vocabulary, not because it talks to Perch.
+ *
+ * Excluded by NAME rather than by relaxing the filter, so a capacity, enroll,
+ * contracts or status call appearing on this path still fails the check -
+ * which is the property this assertion exists for. */
+const LOCAL_PERCH_READS = ['/api/perch/utilities'];
+
 function perchCalls() {
-  return fetchLog.filter((f) => f.url.includes('/api/perch/'));
+  return fetchLog.filter((f) => f.url.includes('/api/perch/')
+    && !LOCAL_PERCH_READS.some((local) => f.url.includes(local)));
 }
 
 (async function main() {

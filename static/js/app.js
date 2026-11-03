@@ -2132,6 +2132,41 @@ async function openEnrollment(enrollmentId){
   }
 
   resetWizardState();
+
+  // THE PER-UTILITY RULES, BEFORE ANYTHING READS THEM.
+  //
+  // THE DEFECT THIS FIXES (traced 2026-11-02). loadUtilityRules() was called
+  // from the two places that START an enrollment and from neither that
+  // REOPENS one, so a rep who signed in and pressed Resume - the ordinary way
+  // back into a NYSEG or RG&E enrollment - had an empty utilityRules map.
+  // Everything downstream asks currentUtilityRule(), and with no rule:
+  //
+  //   * configureBillUtilityRules() computes needsPod = false and HIDES the
+  //     POD ID field on a utility that requires one. The rep cannot see the
+  //     value, let alone correct it.
+  //   * podLooksValid() answers true for anything, including "", so
+  //     checkBillReady() stops requiring the POD and Continue goes live
+  //     without it.
+  //   * applyServerBillFields() will not fill a field this utility is not
+  //     asking for, so a re-upload cannot put it back either.
+  //
+  // The value was never missing from the database - it was simply invisible
+  // and unguarded, and the next save that carried an empty field wrote that
+  // emptiness over it. Loading the rules first is the root fix; the omission
+  // guard below and the server-side guard are the belt and braces.
+  //
+  // Awaited, not fired off: hydrateStep() and configureBillUtilityRules() run
+  // a few lines down and both need the answer. It is one cached GET - the
+  // function returns immediately once the map is populated.
+  try{
+    await loadUtilityRules();
+  }catch(err){
+    // A rules outage must not block reopening an enrollment. It does mean the
+    // POD field cannot be trusted to render, so the save path below omits the
+    // field rather than transmitting a blank over a stored value.
+    console.warn('Utility rules unavailable; POD rules not applied this session.');
+  }
+
   // Bind to the EXISTING enrollment. No draft is created.
   currentDraft = {enrollment_id: e.id, enrollment_code: e.enrollment_code};
   currentWorkflow = null;
@@ -2713,9 +2748,23 @@ function buildCustomerProgress(){
   if(acct && slug && haveAddress){
     payload.utility_account = {
       utility_name: slug,
-      secondary_account_identifier: (state.customer.podId || '').trim() || null,
       meter_number: (state.customer.meterNumber || '').trim() || null,
     };
+    // THE POD IS SENT ONLY WHEN THERE IS ONE TO SEND.
+    //
+    // This used to send `|| null` unconditionally, so every background save
+    // from a screen where the POD was empty - including one where the field
+    // was hidden because the utility rules had not loaded - wrote NULL over
+    // the stored identifier. Absent and empty are now different things here,
+    // exactly as they already are for the masked account number: the server
+    // keeps what it holds, and a rep who has not typed a POD cannot erase one
+    // by saving their progress.
+    //
+    // Clearing a POD deliberately is not lost: the explicit Continue handler
+    // sends the field it validated, and the server accepts an empty value
+    // there when the utility does not require one.
+    const podProgress = (state.customer.podId || '').trim();
+    if(podProgress) payload.utility_account.secondary_account_identifier = podProgress;
     // Omitted when it is still the mask we were given: the server then keeps
     // the account number it already holds, which is what the rep meant by not
     // touching the field.
@@ -3114,6 +3163,38 @@ function hydrateStep(n){
 
 function currentUtilityRule(){ return utilityRules[perchContext.utilitySlug] || null; }
 
+/* EVERY account-number length this utility accepts.
+
+   Read from the rule the server publishes, never derived here. Orange &
+   Rockland issues both 10- and 11-digit account numbers, so a single
+   `account_number_length` cannot describe it - and a browser that kept its
+   own idea of the rule would reject what the server accepts, which is the
+   one thing a validation pair must never do. The old single-length field is
+   still read as a fallback, so a cached payload from before this behaves
+   exactly as it did. */
+function acctLengthsFor(rule){
+  if(!rule) return [];
+  if(Array.isArray(rule.account_number_lengths) && rule.account_number_lengths.length){
+    return rule.account_number_lengths.map(Number).filter(function(n){ return n > 0; });
+  }
+  return rule.account_number_length ? [Number(rule.account_number_length)] : [];
+}
+
+/* The same rule in the words a rep reads: "10 digits", "10 or 11 digits". */
+function acctLengthText(rule){
+  if(rule && rule.account_number_description) return rule.account_number_description;
+  const lengths = acctLengthsFor(rule);
+  if(!lengths.length) return '';
+  return lengths.join(' or ') + ' digits';
+}
+
+function acctLengthOk(rule, value){
+  const lengths = acctLengthsFor(rule);
+  const raw = String(value || '').trim();
+  if(!/^\d+$/.test(raw)) return false;
+  return !lengths.length || lengths.indexOf(raw.length) !== -1;
+}
+
 function configureBillUtilityRules(){
   const rule = currentUtilityRule();
   const acct = document.getElementById('c-acct');
@@ -3121,12 +3202,18 @@ function configureBillUtilityRules(){
   const podField = document.getElementById('pod-id-field');
   const podHelp = document.getElementById('pod-rule-help');
   if(!acct || !acctHelp || !podField) return;
-  const expected = rule && rule.account_number_length ? Number(rule.account_number_length) : null;
-  acct.maxLength = expected || 20;
-  acct.placeholder = expected ? ('•'.repeat(Math.min(expected, 12))) : 'Utility account number';
+  const lengths = acctLengthsFor(rule);
+  const longest = lengths.length ? Math.max.apply(null, lengths) : null;
+  // The LONGEST accepted length, so a utility that takes 10 OR 11 digits does
+  // not stop the rep typing the eleventh.
+  acct.maxLength = longest || 20;
+  acct.placeholder = longest ? ('•'.repeat(Math.min(longest, 12))) : 'Utility account number';
   // The LOCAL rule writes this first; refreshAcctHint() below replaces it
   // with the market's own wording once Perch's fields have been fetched.
-  acctHelp.textContent = expected ? ((rule.display_name || 'This utility') + ' uses a ' + expected + '-digit account number.') : '';
+  acctHelp.textContent = lengths.length
+    ? ((rule.display_name || 'This utility') + ' uses a '
+       + acctLengthText(rule).replace(' digits', '-digit') + ' account number.')
+    : '';
   const needsPod = !!(rule && rule.requires_pod_id);
   podField.style.display = needsPod ? 'block' : 'none';
   podHelp.textContent = needsPod && rule.pod_id ? ('Required: ' + rule.pod_id.description + '.') : '';
@@ -3309,15 +3396,13 @@ function checkBillReady(){
   const city = document.getElementById('a-city').value.trim();
   const zip = document.getElementById('a-zip').value.trim();
   const rule = currentUtilityRule();
-  const expected = rule && rule.account_number_length ? Number(rule.account_number_length) : null;
   // AN UNTOUCHED MASKED FIELD IS AN ACCOUNT THAT IS ALREADY SAVED.
   // The rep is shown "******7890" on reopen; the real number is on the server
   // and is not resent. Judging the mask against the digit rule left a reopened
   // enrollment with a dead Continue and the nonsense reason "must be 10 digits
   // - you entered 10" for a field the rep never touched.
   const acctAlreadyStored = isMaskedValue(acct);
-  const acctOk = acctAlreadyStored
-    || (/^\d+$/.test(acct) && (!expected || acct.length === expected));
+  const acctOk = acctAlreadyStored || acctLengthOk(rule, acct);
   const podOk = podLooksValid(rule, document.getElementById('c-pod').value);
   const sameBilling = document.getElementById('billing-same').checked;
   const billingOk = sameBilling || (
@@ -3338,8 +3423,9 @@ function checkBillReady(){
   if(!acct){
     missing.push('Utility account number');
   } else if(!acctOk){
-    missing.push(expected
-      ? ('Account number must be ' + expected + ' digits for ' +
+    const wording = acctLengthText(rule);
+    missing.push(wording
+      ? ('Account number must be ' + wording + ' for ' +
          ((rule && rule.display_name) || 'this utility') + ' — you entered ' + acct.length)
       : 'Account number must contain digits only');
   }
@@ -3385,9 +3471,60 @@ async function uploadDocumentToDalton(file, category){
   return apiFetch('/api/enrollments/' + currentDraft.enrollment_id + '/documents', {method:'POST', body:fd});
 }
 
+/* Put the rep where the fix is.
+
+   The backend names the field a rejected enrollment is about - a UBS input
+   id from a fixed table in services/rep_errors.py, never a partner field
+   name - and until now nothing read it. apiFetch attaches the parsed body to
+   the error, so the id is already in the browser; this is the few lines that
+   use it.
+
+   A file input cannot take a visible focus ring the way a text box can, so
+   the bill and proof-document inputs are scrolled to and their dropzone is
+   marked instead. Anything else gets the same treatment as a client-side
+   validation failure: the .err border, and the cursor in the box.
+
+   Unknown or absent id: nothing happens, and the message alone stands. A
+   guess about which field is wrong would send a rep to correct something
+   that was never broken. */
+const FIELD_ERROR_DROPZONES = {'bill-file': 'bill-dropzone', 'lmi-file': 'lmi-dropzone'};
+
+function clearFieldErrors(){
+  ['c-first','c-last','c-email','c-phone','c-acct','c-pod','c-meter',
+   'a-street','a-unit','a-city','a-zip'].forEach(function(id){
+    const el = document.getElementById(id);
+    if(el) el.classList.remove('err');
+  });
+  Object.keys(FIELD_ERROR_DROPZONES).forEach(function(id){
+    const zone = document.getElementById(FIELD_ERROR_DROPZONES[id]);
+    if(zone) zone.classList.remove('err');
+  });
+}
+
+function highlightServerField(err){
+  const id = err && err.body && err.body.field;
+  if(!id) return false;
+  const el = document.getElementById(id);
+  if(!el) return false;                       // an id this screen does not have
+  const zoneId = FIELD_ERROR_DROPZONES[id];
+  if(zoneId){
+    const zone = document.getElementById(zoneId);
+    if(zone){
+      zone.classList.add('err');
+      if(zone.scrollIntoView) zone.scrollIntoView({block: 'center'});
+    }
+    return true;
+  }
+  el.classList.add('err');
+  if(el.scrollIntoView) el.scrollIntoView({block: 'center'});
+  if(el.focus) el.focus();
+  return true;
+}
+
 async function submitBill(){
   const errEl = document.getElementById('bill-submit-error');
   errEl.style.display='none';
+  clearFieldErrors();
   const btn = document.getElementById('btn-bill-next');
   if(btn.disabled) return;
 
@@ -3453,8 +3590,12 @@ async function submitBill(){
       billing_address:{same_as_service:state.billing.sameAsService,street:state.billing.street,unit:state.billing.unit,city:state.billing.city,state:state.billing.state||state.address.state||'NY',zip:state.billing.zip},
       utility_account:Object.assign(
         {utility_name:perchContext.utilitySlug,
-         secondary_account_identifier:state.customer.podId || null,
          meter_number:state.customer.meterNumber || null},
+        // Same rule as the progress save. An empty POD here means either that
+        // this utility does not use one, or that the field was not on screen
+        // to be filled - neither is an instruction to erase what is stored.
+        (state.customer.podId || '').trim()
+          ? {secondary_account_identifier:(state.customer.podId || '').trim()} : {},
         // Same rule as the progress save: an untouched masked field is not an
         // edit, so it is left out and the stored value stands.
         isMaskedValue(state.customer.acct)
@@ -3471,6 +3612,8 @@ async function submitBill(){
     return;
   }catch(err){
     errEl.textContent=userMessage(err); errEl.style.display='';
+    // ...and show WHICH field, when the backend named one.
+    highlightServerField(err);
   }finally{
     btn.textContent='Continue'; checkBillReady();
   }

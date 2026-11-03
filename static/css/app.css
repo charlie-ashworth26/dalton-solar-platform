@@ -854,6 +854,12 @@ select{appearance:none;cursor:pointer;padding-right:var(--s6);
   background-repeat:no-repeat;background-position:right 13px center;}
 input.err,select.err,input[aria-invalid=true]{border-color:var(--danger);
   box-shadow:var(--focus-ring-danger);}
+/* The same state for the two file dropzones. A file input cannot carry a
+   focus ring, so when the backend names the bill or the proof document as
+   the field to correct, its dropzone is marked instead - otherwise the id
+   comes back, the browser acts on it, and the rep sees nothing. */
+.upload.err{border-color:var(--danger);border-style:solid;
+  box-shadow:var(--focus-ring-danger);}
 .mono-field{font-family:var(--font-mono);letter-spacing:.01em;}
 
 /* A field the OCR filled: brief highlight, never a lock. */

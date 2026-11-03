@@ -576,6 +576,36 @@ def update_enrollment(enrollment_id):
                           details={"fields": masked_fields},
                           ip_address=request.remote_addr)
 
+            # AN EMPTY SECONDARY IDENTIFIER IS NOT AN INSTRUCTION TO ERASE ONE.
+            #
+            # The POD ID is a required identifier for NYSEG and RG&E and the
+            # single hardest field on the screen to re-obtain - it is on the
+            # bill and nowhere else. The browser used to send the key on every
+            # save, blank included, so any save made from a screen where the
+            # field happened to be empty wrote NULL over a stored POD. That is
+            # the same shape as the display mask above: a value the client did
+            # not really have, overwriting one the server did.
+            #
+            # The browser no longer sends a blank, and this is the half that
+            # does not depend on which client is talking to us: when a value is
+            # already stored and the payload carries nothing usable, the stored
+            # value stands. A real edit - any non-empty value - writes normally.
+            stored_acct = query_one(
+                "SELECT * FROM utility_accounts WHERE id = ?",
+                (current["utility_account_id"],))
+            blanked = [
+                k for k in provided_acct
+                if k == "secondary_account_identifier"
+                and not str(u.get(k) or "").strip()
+                and stored_acct and str(stored_acct[k] or "").strip()
+            ]
+            if blanked:
+                provided_acct = [k for k in provided_acct if k not in blanked]
+                audit.log("empty_value_ignored_on_write",
+                          enrollment_id=enrollment_id, user_id=g.current_user["id"],
+                          details={"fields": blanked},
+                          ip_address=request.remote_addr)
+
             if provided_acct:
                 # Column names come from the fixed whitelist above, never from
                 # caller input, so this interpolation cannot inject.

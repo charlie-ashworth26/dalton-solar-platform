@@ -165,7 +165,17 @@ def list_utilities():
                 "display_name": u["display_name"],
                 "requires_pod_id": bool(u["requires_pod_id"]),
                 "pod_id": utilities.pod_id_rule(u["slug"]),
+                # The single length, kept for any existing reader.
                 "account_number_length": u.get("account_number_length"),
+                # EVERY accepted length, and the rep-facing wording for them.
+                # A utility whose published format allows more than one - O&R
+                # accepts 10 or 11 digits - cannot be described by the column
+                # above, and the browser must validate against the same rule
+                # the server enforces rather than a second copy of it.
+                "account_number_lengths": list(
+                    utilities.account_number_lengths(u["slug"])),
+                "account_number_description":
+                    utilities.account_length_description(u["slug"]),
                 "slug_confirmed": bool(u["slug_confirmed"]),
             }
             for u in utilities.all_utilities()
@@ -379,13 +389,40 @@ def _perch_error_response(enrollment_id, operation, exc):
         details=_actor_details({"error": str(exc), "error_class": type(exc).__name__}),
         ip_address=request.remote_addr,
     )
-    return jsonify({
-        "error": rep_errors.for_operation(operation, exc),
+    # NAME THE CAUSE WHEN THE CAUSE IS KNOWN.
+    #
+    # An enrollment rejection used to collapse to one sentence - "Some of the
+    # details were not accepted" - whether UBS could explain it or not. It can
+    # often explain it: from the exception type, from a sentence UBS itself
+    # wrote, or from Perch's structured per-field errors. Those produce a
+    # specific, actionable message; anything else keeps a general one, because
+    # a guess about which field is wrong is worse than admitting we do not
+    # know. Every sentence that can come back is written in rep_errors.py -
+    # none of this forwards partner prose.
+    is_validation = (type(exc).__name__ in
+                     ("PerchValidationError", "PerchNoCapacityError")
+                     or (isinstance(getattr(exc, "http_status", None), int)
+                         and 400 <= exc.http_status < 500
+                         and exc.http_status not in (401, 403, 404, 408, 429)))
+    field = None
+    if is_validation and operation in ("enroll", "capacity", "service_area"):
+        message, field = rep_errors.for_enrollment_failure(exc)
+    else:
+        message = rep_errors.for_operation(operation, exc)
+
+    body = {
+        "error": message,
         # Kept because the browser routes one documented condition on it
         # (PerchEnrollmentInProgressError). It is a class name, not prose, and
         # is never rendered to the rep.
         "perch_error": type(exc).__name__,
-    }), getattr(exc, "http_status", 502)
+    }
+    # WHICH FIELD, when the error named one. This is a UBS input id from a
+    # fixed table, never a partner field name passed through, so the browser
+    # can put the cursor where the fix is.
+    if field:
+        body["field"] = field
+    return jsonify(body), getattr(exc, "http_status", 502)
 
 
 def _next_key(value):

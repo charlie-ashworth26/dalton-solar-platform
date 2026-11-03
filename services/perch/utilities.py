@@ -146,6 +146,77 @@ def select_options():
     ]
 
 
+# ─────────────── Account number formats ───────────────
+#
+# perch_utilities.account_number_length (migration 003) holds ONE length per
+# utility, because every NY format Perch published at the time was a single
+# fixed length. Orange & Rockland now issues both 10- and 11-digit account
+# numbers, and an INTEGER column cannot say "either".
+#
+# WHY THIS IS NOT A MIGRATION. The column is still the rule for every utility
+# that has one length, and is still what is read first. This map records the
+# utilities whose published format accepts MORE than one, and it is additive:
+# a slug that is not in it behaves exactly as before. A schema change would
+# mean a migration on a live sales database to express a fact about two
+# numbers, and would still leave this module as the place every caller asks.
+#
+# THE RULE IS SERVED FROM HERE AND NOWHERE ELSE. Before this, the length was
+# read straight out of the row in three places - the adapter's pre-flight
+# check, the /utilities payload the browser validates against, and the bill
+# parser's own table - so a change had to be made in all three or one side
+# would accept what another rejected. account_number_lengths() is now the one
+# answer, and each of those callers asks it.
+ACCOUNT_LENGTH_EXCEPTIONS = {
+    # Current O&R bills show an 11-digit account number; older ones show 10.
+    # Both are accepted and BOTH ARE SENT AS ENTERED. Nothing here derives a
+    # 10-digit "legacy" number from an 11-digit one, strips a digit, or
+    # otherwise rewrites what the rep read off the bill.
+    "orange-and-rockland": (10, 11),
+}
+
+
+def account_number_lengths(slug):
+    """Every account-number length this utility accepts, shortest first.
+
+    Returns an empty tuple when the utility publishes no length rule, which
+    callers must read as "do not validate locally" - never as "reject".
+    """
+    exception = ACCOUNT_LENGTH_EXCEPTIONS.get(slug)
+    if exception:
+        return tuple(sorted(exception))
+    row = by_slug(slug) or {}
+    one = row.get("account_number_length")
+    return (int(one),) if one else ()
+
+
+def account_length_description(slug):
+    """The rule in the words a rep reads: "10 digits", "10 or 11 digits"."""
+    lengths = account_number_lengths(slug)
+    if not lengths:
+        return None
+    if len(lengths) == 1:
+        return f"{lengths[0]} digits"
+    return " or ".join(str(n) for n in lengths) + " digits"
+
+
+def validate_account_number(slug, value):
+    """Returns an error message, or None when valid / no rule is published.
+
+    The value is checked, never changed. A caller that needs to store or
+    transmit the number uses what the rep entered.
+    """
+    lengths = account_number_lengths(slug)
+    if not lengths:
+        return None
+    raw = str(value or "").strip()
+    if not raw.isdigit() or len(raw) not in lengths:
+        row = by_slug(slug) or {}
+        name = row.get("display_name") or slug
+        return (f"{name} account numbers must be "
+                f"{account_length_description(slug)}.")
+    return None
+
+
 # ─────────────── POD ID (secondary identifier) validation ───────────────
 # Consumed by the existing Dalton bill/account screen before /enroll. The rules
 # are published reference data and belong with the rest of the utility data.

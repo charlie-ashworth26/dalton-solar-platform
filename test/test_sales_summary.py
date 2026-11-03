@@ -152,9 +152,17 @@ def main():
         section("3. ONE SALE TODAY")
         # ════════════════════════════════════════════════════════════════════
         now_et = datetime.now(ET)
+        midnight = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
         noon_today = now_et.replace(hour=12, minute=0, second=0, microsecond=0)
-        # Midday today, unless it is not yet midday - then one minute ago.
-        today_moment = noon_today if noon_today <= now_et else now_et - timedelta(minutes=1)
+        # Midday today, unless it is not yet midday - then a moment ago.
+        #
+        # FLOORED AT ONE SECOND PAST MIDNIGHT. "A minute ago" steps into
+        # YESTERDAY for the first minute of every day, and this suite duly
+        # failed at 00:00:0x - a test that is wrong once a day is worse than
+        # no test, because the one failure anyone sees is the false one.
+        today_moment = max(midnight + timedelta(seconds=1),
+                           noon_today if noon_today <= now_et
+                           else now_et - timedelta(minutes=1))
         make_enrollment("national-grid-ny", "contracts_accepted", today_moment,
                         customer_type="Residential")
         s = summary(c, admin)

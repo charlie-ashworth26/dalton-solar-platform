@@ -782,6 +782,21 @@ SAVINGS_SELECTION_REQUIRED = (
     "this customer before submitting the enrollment.")
 
 
+def _rep_validation_error(message, field=None):
+    """A validation failure whose wording is already fit for a rep.
+
+    UBS writes these itself - they name the utility, the rule and the value -
+    so they are the most useful thing a rep can be shown, and they carry no
+    partner internals by construction. Tagging them means the rep-facing
+    layer can pass them through instead of replacing them with a general
+    sentence, and `field` tells the browser which input to put the cursor in.
+    """
+    exc = PerchValidationError(message)
+    exc.rep_message = message
+    exc.rep_field = field
+    return exc
+
+
 def resolve_savings_percent(details, customer_type, county=None,
                             selected=None):
     """The savings_percent to send to POST /enroll, or None to omit it.
@@ -1080,28 +1095,61 @@ def create_enrollment(enrollment_id, enrollment_payload, user_id=None):
             payload["county"] = county
         if savings_percent is not None:
             payload["savings_percent"] = savings_percent
+        elif savings_reason == "no_rate_published":
+            # SEEN IN PRODUCTION (NYSEG, Residential): the program is offered,
+            # its own savings rates are empty, and the mass_market entry
+            # backing it publishes 5% and 10%. UBS refuses to substitute those
+            # - they are a different entry type's rates and not this program's
+            # - which is correct and is not changing here.
+            #
+            # What WAS wrong is what happened next: the enrollment went to
+            # Perch without a rate, Perch rejected it, and the rep was told
+            # "some of the details were not accepted" about a screen where
+            # every detail they could see was fine. Nothing they could type
+            # would have helped; the program itself is not enrollable.
+            #
+            # So it stops here with the reason, and only here: v2 is the
+            # version that requires the field, no rate is invented, and the
+            # capacity rules themselves are untouched.
+            raise _rep_validation_error(
+                "This savings program is not currently available for "
+                "enrollment - no savings rate is published for it. Please "
+                "choose another available program.",
+                "savings_percent")
     else:
         savings_reason = "v1_ignores_savings_percent"
 
     stored = query_one("SELECT perch_token_email FROM enrollments WHERE id = ?", (enrollment_id,))
     token_email = (stored["perch_token_email"] if stored else None) or ""
     if not payload.get("email_address") or payload["email_address"].strip().lower() != token_email.strip().lower():
-        raise PerchValidationError(
-            "Customer email must match the email used to open this Perch enrollment session.")
+        # Identifiable, fixable, and previously invisible: this sentence named
+        # the partner, so the rep-facing layer correctly refused to show it and
+        # fell back to the general "we couldn't complete the enrollment". The
+        # cause is one a rep can act on, so it is worded for them and tagged
+        # with the field to correct.
+        raise _rep_validation_error(
+            "The customer email on this enrollment no longer matches the one "
+            "it was started with. Reopen the enrollment, or start a new one "
+            "with the correct email address.",
+            "email_address")
 
     accounts = payload.get("utility_accounts") or []
     if len(accounts) != 1:
         raise PerchValidationError("The current Dalton GUI supports exactly one utility account per enrollment.")
     acct = accounts[0]
     utility_row = utilities.by_slug(capacity["utility_slug"]) or {}
-    expected_len = utility_row.get("account_number_length")
     account_number = str(acct.get("utility_account_number") or "").strip()
-    if expected_len and (not account_number.isdigit() or len(account_number) != int(expected_len)):
-        raise PerchValidationError(
-            f"{utility_row.get('display_name') or capacity['utility_slug']} account numbers must be {expected_len} digits.")
+    # ONE RULE, ASKED FOR. This used to read account_number_length off the row
+    # and compare against it, which cannot express a utility that accepts more
+    # than one length - Orange & Rockland issues both 10- and 11-digit numbers.
+    # The number itself is passed through exactly as the rep entered it.
+    account_error = utilities.validate_account_number(
+        capacity["utility_slug"], account_number)
+    if account_error:
+        raise _rep_validation_error(account_error, "utility_account_number")
     pod_error = utilities.validate_pod_id(capacity["utility_slug"], acct.get("secondary_account_identifier"))
     if pod_error:
-        raise PerchValidationError(pod_error)
+        raise _rep_validation_error(pod_error, "secondary_account_identifier")
 
     # MARKET-PUBLISHED FIELD RULES, layered on top of the checks above.
     #
@@ -1128,7 +1176,9 @@ def create_enrollment(enrollment_id, enrollment_payload, user_id=None):
             message = markets.validate_account_value(
                 capacity["utility_slug"], field_type, value)
             if message:
-                raise PerchValidationError(message)
+                # Market wording, already written for a rep and naming the
+                # field it is about, so it is carried as such.
+                raise _rep_validation_error(message, field_type)
     except MarketDataUnavailable:
         pass
 

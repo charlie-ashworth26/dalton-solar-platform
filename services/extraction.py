@@ -44,6 +44,31 @@ def _clean(text: str) -> str:
 STREET_SUFFIXES = r"(?:ST|AVE|RD|DR|LN|BLVD|WAY|CT|PL|CIR|HWY|ROAD|STREET|AVENUE|DRIVE|LANE)\.?"
 
 
+def _published_rules(utility_hint):
+    """The utility's OWN account-number rule, from the reference table.
+
+    bill_parsers deliberately reads no database - it is a pure text module -
+    so it carries default lengths for the layouts it knows. Those defaults are
+    a SECOND COPY of a rule that lives in perch_utilities, and a second copy
+    is how one side comes to accept what another rejects: the day a utility's
+    published format changes, the parser would go on validating against the
+    old length and silently drop a perfectly good account number.
+
+    So the authoritative lengths are passed in. Only the account rule is
+    overridden here; POD and meter rules are unchanged. Returns None - meaning
+    "use your defaults" - when the slug is unknown or the lookup fails, which
+    keeps extraction working even with no database behind it.
+    """
+    if not utility_hint:
+        return None
+    try:
+        from services.perch import utilities
+        lengths = utilities.account_number_lengths(utility_hint)
+    except Exception:
+        return None
+    return {"account_lengths": lengths} if lengths else None
+
+
 def parse_utility_bill(raw_text: str, utility_hint: str = None) -> dict:
     """Returns a dict of {field: {"value": ..., "confidence": 0-1}} plus a flat
     'fields' view for convenience. Confidence is a simple heuristic (regex hit = 0.9,
@@ -128,7 +153,8 @@ def parse_utility_bill(raw_text: str, utility_hint: str = None) -> dict:
     # absent, so a bad read can never arrive as a filled field.
     try:
         from services import bill_parsers
-        parsed = bill_parsers.parse_bill(t, utility_hint=utility_hint)
+        parsed = bill_parsers.parse_bill(t, utility_hint=utility_hint,
+                                         rule_overrides=_published_rules(utility_hint))
         for field, value in (parsed.get("fields") or {}).items():
             # Confidence is kept in the existing shape for existing readers.
             # It is NOT a measurement here any more than it is above.

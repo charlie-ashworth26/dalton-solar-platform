@@ -210,8 +210,19 @@ def main():
     # Business is modeled in adapter.PROGRAM_RULES but stays UNSELECTABLE -
     # POST /enroll requires business fields the wizard never collects - and the
     # second assertion is what keeps it that way.
-    check("selectable set is exactly Residential + LMI + LMI_IRA",
-          set(SELECTABLE_CUSTOMER_TYPES) == {"Residential", "LMI", "LMI_IRA"})
+    # E5: MassMarket joined the selectable set - a UBS PROGRAM key, not a Perch
+    # customer_type. Perch confirmed mass-market capacity is enrollable and may
+    # be returned alongside true residential capacity with a rate of its own,
+    # so a rep must be able to pick it. It goes on the wire as Residential,
+    # which the two assertions after this one pin down.
+    check("selectable set is exactly Residential + MassMarket + LMI + LMI_IRA",
+          set(SELECTABLE_CUSTOMER_TYPES)
+          == {"Residential", "MassMarket", "LMI", "LMI_IRA"})
+    check("  ...and every selectable program maps to a customer_type Perch takes",
+          {adapter.perch_customer_type(t) for t in SELECTABLE_CUSTOMER_TYPES}
+          == {"Residential", "LMI", "LMI_IRA"})
+    check("  ...with MassMarket enrolling as Residential",
+          adapter.perch_customer_type("MassMarket") == "Residential")
     check("  ...and Business is modeled but NOT selectable",
           "Business" in adapter.PROGRAM_RULES
           and adapter.PROGRAM_RULES["Business"]["selectable"] is False
@@ -311,8 +322,11 @@ def main():
           in src)
     check("  ...taking the request from the payload",
           'requested_type = (enrollment_payload or {}).get("customer_type")' in src)
+    # E5: still the resolved type, now translated from the UBS program key to
+    # the Perch customer_type at the one place that builds the payload. The
+    # key resolves the rate; the wire value is what Perch accepts.
     check("the resolved type is what gets sent to Perch",
-          'payload["customer_type"] = customer_type' in src)
+          'payload["customer_type"] = perch_customer_type(customer_type)' in src)
     check("residential reads only the residential savings field",
           "savings_percent_for_residential_and_commercial_customers" in src)
     check("LMI reads only the LMI savings field",

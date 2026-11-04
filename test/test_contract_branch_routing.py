@@ -84,8 +84,18 @@ def main():
     check("the adapter re-validates it against capacity",
           "resolve_customer_type(\n        model, requested=requested_type, county=county)" in adapter_src
           and "capacity_model_for(capacity)" in adapter_src)
+    # E5: the resolved value is still what is sent - translated, at exactly one
+    # place, from the UBS program key into the Perch customer_type. The program
+    # key is what the savings rate was resolved against, so a mass-market
+    # enrollment quotes the mass-market entry's own rate; the wire value is
+    # what Perch accepts. Asserted as the translation call rather than a bare
+    # assignment, because a bare assignment would now send "MassMarket" to
+    # Perch and earn a 422 on customer_type.
     check("  ...and the RESOLVED value is what is sent",
-          'payload["customer_type"] = customer_type' in adapter_src)
+          'payload["customer_type"] = perch_customer_type(customer_type)'
+          in adapter_src)
+    check("  ...translated at exactly one place",
+          adapter_src.count('payload["customer_type"] =') == 1)
     check("  ...via the multipart builder",
           "build_enrollment_multipart(payload)" in adapter_src)
 

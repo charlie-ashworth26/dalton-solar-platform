@@ -404,17 +404,56 @@ def api_call_history(enrollment_id):
 
 # ─────────────── Perch customer_type values ───────────────
 # These are the values POST /enroll accepts. They are Perch's vocabulary, used
-# on the wire and stored in enrollments.selected_customer_type. They are NEVER
-# rendered: PROGRAM_RULES below carries the rep-facing label for each.
+# on the wire. They are NEVER rendered: PROGRAM_RULES below carries the
+# rep-facing label for each.
 CUSTOMER_TYPE_RESIDENTIAL = "Residential"
 CUSTOMER_TYPE_BUSINESS = "Business"
 CUSTOMER_TYPE_LMI = "LMI"
 CUSTOMER_TYPE_LMI_IRA = "LMI_IRA"
 
+# ─────────────── A UBS program key is not always a wire value ───────────────
+#
+# E5. Until now these were the same string: a UBS program WAS a Perch
+# customer_type, stored in enrollments.selected_customer_type and sent verbatim
+# as `customer_type`. Mass market breaks that identity, and it has to.
+#
+# Perch Engineering, 2026-11 Q&A: `mass_market` is a valid enrollable capacity
+# type that backs standard Open customers; a market may return true residential
+# capacity AND mass-market capacity at the same time; and where both carry
+# valid rates, both must remain distinct rather than one hiding the other.
+#
+# But `mass_market` is a CAPACITY type, not a customer_type. POST /enroll takes
+# only the four values above, and the v2 spec's own table maps "residential or
+# mass market" capacity to customer_type `Residential`. So a mass-market
+# enrollment is a distinct UBS PROGRAM that goes out on the wire as
+# `Residential`, carrying its own capacity type and its own savings rate.
+#
+# Hence: a PROGRAM KEY identifies what UBS offered and is what gets selected
+# and stored; `perch_customer_type` is what reaches Perch. For every program
+# but this one the two remain the same string, which is why so little else
+# had to change.
+PROGRAM_MASS_MARKET = "MassMarket"
+
 # What a rep may choose. Business is modeled below but deliberately NOT
 # selectable - see PROGRAM_RULES.
-SELECTABLE_CUSTOMER_TYPES = (CUSTOMER_TYPE_RESIDENTIAL, CUSTOMER_TYPE_LMI,
-                             CUSTOMER_TYPE_LMI_IRA)
+SELECTABLE_CUSTOMER_TYPES = (CUSTOMER_TYPE_RESIDENTIAL, PROGRAM_MASS_MARKET,
+                             CUSTOMER_TYPE_LMI, CUSTOMER_TYPE_LMI_IRA)
+
+
+def perch_customer_type(program_key):
+    """The value POST /enroll takes for a UBS program key.
+
+    The ONE place the program-key -> wire-value translation happens. An unknown
+    key is returned UNCHANGED rather than guessed at, so a key this table does
+    not know fails Perch's own validation loudly instead of being quietly
+    rewritten into something that enrolls.
+    """
+    rule = PROGRAM_RULES.get(program_key)
+    if not rule:
+        rule = next((r for k, r in PROGRAM_RULES.items()
+                     if k.lower() == str(program_key or "").strip().lower()),
+                    None)
+    return rule["perch_customer_type"] if rule else program_key
 
 # The income-qualified family. Asked as a question rather than string-compared
 # at each site, because `== "LMI"` was true for the only LMI type there used to
@@ -459,17 +498,64 @@ PROGRAM_RULES = {
         # Real staging examples: 12401/Central Hudson and 10901/Orange &
         # Rockland both return residential=false with small_commercial=true,
         # and both are residential enrollments.
+        # E5: on the v2 ENTRY shape this is true residential capacity ONLY.
+        # Mass market is its own program below, because v2 prices the two
+        # separately and Perch has confirmed both can be returned at once.
+        #
+        # On the v1 FLAT shape it still covers both, unchanged: v1 publishes a
+        # single combined rate field for residential and commercial customers,
+        # so there is no second rate to distinguish and nothing to choose
+        # between. _capacity_types_for() applies that per response shape.
         "capacity_types": (cap_module.RESIDENTIAL, cap_module.MASS_MARKET),
+        "v2_capacity_types": (cap_module.RESIDENTIAL,),
         "savings_type": cap_module.RESIDENTIAL,
+        "perch_customer_type": CUSTOMER_TYPE_RESIDENTIAL,
         "label": "Residential",
         "description": "Standard residential program. "
                        "No eligibility documentation needed.",
         "lmi_required": False,
         "selectable": True,
     },
+    # ─────────────── E5: mass market, a program of its own ───────────────
+    #
+    # THE PRODUCTION BUG THIS FIXES. NYSEG, Orange & Rockland and Central
+    # Hudson return mass-market capacity with a valid rate and no true
+    # residential capacity at all. Residential was offered anyway - it is
+    # available on mass market - but its rates were read from the residential
+    # entry, which is empty, so the card arrived with no rate, flagged
+    # `savings_unresolved`, and the 5% Perch had actually published sat
+    # unreachable in `savings_candidates`. The rep saw an Open program they
+    # could not enroll.
+    #
+    # Reading the mass-market rate into the Residential program would have
+    # fixed the symptom and reintroduced the thing E2.1 removed on purpose: a
+    # substituted rate, a number Perch never quoted for that program. This
+    # instead names the program after the capacity that actually prices it, so
+    # the rate is read from the entry Perch published it on - no substitution
+    # anywhere, and the two stay distinct when a market returns both.
+    #
+    # ON THE WIRE IT IS STILL `Residential`. See perch_customer_type() above.
+    PROGRAM_MASS_MARKET: {
+        "capacity_types": (cap_module.MASS_MARKET,),
+        "savings_type": cap_module.MASS_MARKET,
+        "perch_customer_type": CUSTOMER_TYPE_RESIDENTIAL,
+        # Rep-facing, and deliberately NOT a bare "Residential": when this
+        # appears beside true Residential the two carry different rates, so a
+        # rep has something real to choose between and the label has to say
+        # which is which. When the rates are identical the two are merged into
+        # one card and this label is never shown - see available_programs().
+        "label": "Residential (Mass Market)",
+        "description": "Standard open enrollment on mass-market capacity. "
+                       "No eligibility documentation needed.",
+        "lmi_required": False,
+        "selectable": True,
+        # v2 only. v1 has no separate mass-market rate to offer.
+        "v2_only": True,
+    },
     CUSTOMER_TYPE_LMI: {
         "capacity_types": (cap_module.LMI,),
         "savings_type": cap_module.LMI,
+        "perch_customer_type": CUSTOMER_TYPE_LMI,
         "label": "Residential LMI",
         "description": "Income-eligible program.",
         # Decided per response, not here: on v1 by proof_documents_required, on
@@ -480,6 +566,7 @@ PROGRAM_RULES = {
     CUSTOMER_TYPE_LMI_IRA: {
         "capacity_types": (cap_module.LMI_IRA,),
         "savings_type": cap_module.LMI_IRA,
+        "perch_customer_type": CUSTOMER_TYPE_LMI_IRA,
         "label": "Residential LMI (IRA)",
         "description": "Income-eligible IRA program. "
                        "Requires proof of participation in a qualifying program.",
@@ -492,6 +579,7 @@ PROGRAM_RULES = {
         "capacity_types": (cap_module.MASS_MARKET,
                            cap_module.COMMERCIAL_AND_INDUSTRIAL),
         "savings_type": cap_module.MASS_MARKET,
+        "perch_customer_type": CUSTOMER_TYPE_BUSINESS,
         "label": "Business",
         "description": "Commercial enrollment.",
         "lmi_required": False,
@@ -506,6 +594,21 @@ PROGRAM_RULES = {
         "selectable": False,
     },
 }
+
+def _capacity_types_for(rule, model):
+    """The capacity types backing a program, for THIS response shape.
+
+    v1 publishes one combined rate field for residential and commercial
+    customers, so residential and mass market cannot be priced apart and the
+    Residential program keeps covering both exactly as it always has. The v2
+    entry shape prices them separately, so there each program reads only its
+    own type. A rule with no `v2_capacity_types` is shape-independent.
+    """
+    if (model.shape != cap_module.SHAPE_V1_FLAT
+            and rule.get("v2_capacity_types") is not None):
+        return rule["v2_capacity_types"]
+    return rule["capacity_types"]
+
 
 def offerable_customer_types(market_state=None):
     """The programs this market may offer, in the order a rep sees them.
@@ -523,9 +626,15 @@ def offerable_customer_types(market_state=None):
     income_qualified_only = market_products.is_income_qualified_only(market_state)
     return tuple(
         customer_type
-        for customer_type in (CUSTOMER_TYPE_RESIDENTIAL, CUSTOMER_TYPE_LMI,
-                              CUSTOMER_TYPE_LMI_IRA, CUSTOMER_TYPE_BUSINESS)
+        for customer_type in (CUSTOMER_TYPE_RESIDENTIAL, PROGRAM_MASS_MARKET,
+                              CUSTOMER_TYPE_LMI, CUSTOMER_TYPE_LMI_IRA,
+                              CUSTOMER_TYPE_BUSINESS)
         if PROGRAM_RULES[customer_type]["selectable"]
+        # E5: mass market is a non-LMI program, so an income-qualified-only
+        # market withholds it by the SAME rule that already withholds
+        # Residential there. Virginia must not gain an Open option by this
+        # change - and that is asserted, not assumed. See the E4 note in
+        # available_programs() and fixture 241.
         and not (income_qualified_only and not is_lmi_customer_type(customer_type))
     )
 
@@ -632,7 +741,7 @@ def _program_rates(model, rule, county, include_restricted):
     # Empty. Record what the backing types DO offer, without adopting any of
     # it, so the gap can be investigated rather than guessed at.
     candidates = []
-    for t in rule["capacity_types"]:
+    for t in _capacity_types_for(rule, model):
         if t == savings_type:
             continue
         other = model.savings_percents_for(t, county=county,
@@ -714,8 +823,11 @@ def available_programs(details, county=None, include_restricted=True,
 
     for customer_type in offerable_customer_types(market):
         rule = PROGRAM_RULES[customer_type]
+        # E5: a v2-only program is not offered against a v1 flat response.
+        if rule.get("v2_only") and model.shape == cap_module.SHAPE_V1_FLAT:
+            continue
 
-        backing = [t for t in rule["capacity_types"]
+        backing = [t for t in _capacity_types_for(rule, model)
                    if model.has_capacity(t, county=county,
                                          include_restricted=include_restricted)]
         if not backing:
@@ -735,7 +847,12 @@ def available_programs(details, county=None, include_restricted=True,
                 customer_type, savings_source, backing, candidates)
 
         programs.append({
+            # The UBS PROGRAM KEY. For every program but mass market this is
+            # also the Perch wire value; `perch_customer_type` is always the
+            # wire value. The field name is unchanged so every existing
+            # caller, stored selection and screen keeps working.
             "customer_type": customer_type,
+            "perch_customer_type": rule["perch_customer_type"],
             "label": rule["label"],
             "description": rule["description"],
             "savings_percents": rates,
@@ -762,7 +879,95 @@ def available_programs(details, county=None, include_restricted=True,
                                            include_restricted=True)),
         })
 
-    return programs
+    return _merge_identical_open_programs(programs)
+
+
+def program_segments(details, county=None, market_state=None):
+    """Every program this market may sell, each with whether it is available.
+
+    (label, available) pairs, in the order a rep reads them. This is what the
+    availability panel shows - including the programs that are NOT available,
+    which available_programs() necessarily omits.
+
+    IT EXISTS SO THE PANEL AND THE CARDS CANNOT DISAGREE. The panel used to
+    rebuild this list from PROGRAM_RULES itself, and every rule that was added
+    afterwards had to be remembered in two places. It was not: E4's market
+    rule had to be retro-fitted when Virginia kept showing a Residential row
+    after the cards had stopped offering it, and E5 found the same seam again -
+    a Mass Market row appeared on v1, where that program does not exist, and
+    beside a merged Residential card, where it had deliberately been folded in.
+    Both are the same bug, so the derivation now lives here, once.
+
+    An LMI_IRA row that is unavailable is dropped by the caller: on v1 it is
+    always unavailable, and a permanent "Not available" row on every NY screen
+    reports a limitation of the API version rather than of the location.
+    """
+    model = (details if isinstance(details, cap_module.CapacityModel)
+             else cap_module.parse(details))
+    market = market_state or getattr(model, "market_state", None)
+    # The programs actually offered here, AFTER the shape gate and the merge,
+    # so a program the cards do not show cannot get a row of its own.
+    offered = {p["customer_type"]
+               for p in available_programs(model, county=county,
+                                           market_state=market)}
+    segments = []
+    for customer_type in offerable_customer_types(market):
+        rule = PROGRAM_RULES[customer_type]
+        if customer_type == CUSTOMER_TYPE_BUSINESS:
+            continue
+        if rule.get("v2_only") and model.shape == cap_module.SHAPE_V1_FLAT:
+            continue
+        # Merged away into another card: its capacity is reported on that
+        # card's row, so a second row would double-count it.
+        if (customer_type == PROGRAM_MASS_MARKET
+                and customer_type not in offered
+                and CUSTOMER_TYPE_RESIDENTIAL in offered):
+            continue
+        available = (customer_type in offered) or any(
+            model.has_capacity(t, county=county)
+            for t in _capacity_types_for(rule, model))
+        segments.append((customer_type, rule["label"], available))
+    return segments
+
+
+def _merge_identical_open_programs(programs):
+    """One card when Residential and Mass Market price the same, two when not.
+
+    Both are Open enrollments that go to Perch as `Residential`. When their
+    published rates are IDENTICAL there is nothing for a rep to choose between,
+    and two cards showing the same number invite "which one do I pick?" when
+    the answer cannot matter. They are merged into the Residential card, which
+    keeps BOTH capacity types in its backing list, so the kW and the capacity
+    identity survive the merge and no capacity goes unreported.
+
+    When the rates DIFFER both stay, separately selectable, because then the
+    choice is real and the rep must be able to make it - and must be able to
+    quote the right number.
+
+    Merging only ever happens between these two. Nothing is deduplicated for
+    being "Open" alone, and an LMI program is never folded into anything.
+    """
+    by_key = {p["customer_type"]: p for p in programs}
+    residential = by_key.get(CUSTOMER_TYPE_RESIDENTIAL)
+    mass_market = by_key.get(PROGRAM_MASS_MARKET)
+    if not residential or not mass_market:
+        return programs
+    if residential["savings_percents"] != mass_market["savings_percents"]:
+        return programs
+
+    merged = dict(residential)
+    seen = {c["capacity_type"] for c in residential["capacity_types"]}
+    merged["capacity_types"] = residential["capacity_types"] + [
+        c for c in mass_market["capacity_types"]
+        if c["capacity_type"] not in seen]
+    # The rate is the same number from either entry, so the source is now both.
+    merged["savings_source"] = "+".join(
+        dict.fromkeys([residential["savings_source"],
+                       mass_market["savings_source"]]))
+    merged["county_restricted"] = (residential["county_restricted"]
+                                   or mass_market["county_restricted"])
+    return [merged if p["customer_type"] == CUSTOMER_TYPE_RESIDENTIAL else p
+            for p in programs if p["customer_type"] != PROGRAM_MASS_MARKET]
 
 
 def program_for(details, customer_type, county=None):
@@ -1078,7 +1283,15 @@ def create_enrollment(enrollment_id, enrollment_payload, user_id=None):
         model, customer_type, county=county, selected=selected_rate)
 
     payload = dict(enrollment_payload or {})
-    payload["customer_type"] = customer_type
+    # E5: THE PROGRAM KEY BECOMES THE WIRE VALUE HERE, and only here.
+    #
+    # `customer_type` above is the UBS program - which for mass market is
+    # "MassMarket", a key Perch has never heard of. The savings rate was
+    # resolved against that program a few lines up, which is the whole point:
+    # the rate comes from the mass_market entry Perch published it on. What
+    # goes on the wire is the customer_type the v2 spec's table names for
+    # mass-market capacity, which is `Residential`.
+    payload["customer_type"] = perch_customer_type(customer_type)
     payload["utility_name"] = capacity["utility_slug"]
     payload["zip_code"] = capacity["zip_code"]
 

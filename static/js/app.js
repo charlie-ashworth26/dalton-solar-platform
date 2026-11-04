@@ -6182,6 +6182,11 @@ function formatProgramType(programSavings, selectedType){
   // but neither reads as the raw `LMI_IRA` wire value.
   if(t === 'LMI_IRA') return 'Income-eligible (IRA)';
   if(isLmiCustomerType(t)) return 'Income-eligible (LMI)';
+  // E5: a mass-market enrollment reaches Perch as Residential, but it is a
+  // DISTINCT program that can carry its own rate - so a dashboard row says
+  // which one was sold rather than reading identically to a true Residential
+  // sale. The program KEY never reaches a screen; this is its English name.
+  if(t === 'MASSMARKET') return 'Open (Mass Market)';
   if(t === 'RESIDENTIAL') return null;
   if(!programSavings) return null;
   return programSavings.basis === 'lmi' ? 'Income-eligible (LMI)' : null;

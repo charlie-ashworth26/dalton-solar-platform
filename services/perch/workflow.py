@@ -361,18 +361,15 @@ def _capacity_panels(check, county=None, awaiting_county=False):
     # it is not selectable - UBS cannot enrol it - and listing a capacity a
     # rep cannot use as "Available" would be an invitation to a dead end.
     #
-    # E4: the SAME list available_programs() offers, so a program a market may
-    # not sell cannot appear here as "Available" after the cards have stopped
-    # offering it - which is exactly what Virginia did until this shared the
-    # one source.
+    # E5: DERIVED, not rebuilt. This loop used to re-apply the program rules
+    # here, which meant every rule added later had to be remembered twice -
+    # and twice it was not: E4's market rule left Virginia showing a
+    # Residential row the cards had stopped offering, and E5 put a Mass Market
+    # row on v1, where the program does not exist. adapter.program_segments()
+    # is now the single derivation, shape gate and card merge included.
     segments = []
-    for customer_type in adapter.offerable_customer_types(
-            getattr(model, "market_state", None)):
-        if customer_type == adapter.CUSTOMER_TYPE_BUSINESS:
-            continue
-        rule = adapter.PROGRAM_RULES[customer_type]
-        available = any(model.has_capacity(t, county=county)
-                        for t in rule["capacity_types"])
+    for customer_type, label, available in adapter.program_segments(
+            model, county=county):
         # The IRA row appears only when it is genuinely in play. On v1 it is
         # always unavailable - v1 cannot express it - and a permanent
         # "Residential LMI (IRA): Not available" row on every NY screen would
@@ -380,7 +377,7 @@ def _capacity_panels(check, county=None, awaiting_county=False):
         # location.
         if customer_type == adapter.CUSTOMER_TYPE_LMI_IRA and not available:
             continue
-        segments.append((rule["label"], available))
+        segments.append((label, available))
 
     return [
         {

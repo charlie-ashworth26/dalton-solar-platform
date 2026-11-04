@@ -337,6 +337,11 @@ def test_account_number_integrity():
     import test_account_number_integrity as suite
     suite.main()
 
+def test_mass_market_programs():
+    """E5: mass market is a sellable program, and reaches Perch as Residential."""
+    import test_mass_market_programs as suite
+    suite.main()
+
 
 def test_gui_perch_bridge():
     """The browser/Perch bridge: persisted workflow state and what the GUI reads from it."""

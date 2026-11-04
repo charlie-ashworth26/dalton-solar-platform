@@ -68,6 +68,9 @@ RES = adapter.CUSTOMER_TYPE_RESIDENTIAL
 LMI = adapter.CUSTOMER_TYPE_LMI
 LMI_IRA = adapter.CUSTOMER_TYPE_LMI_IRA
 BUSINESS = adapter.CUSTOMER_TYPE_BUSINESS
+# E5: a UBS PROGRAM key, not a Perch customer_type. It goes on the wire as
+# Residential - see adapter.perch_customer_type().
+MASS = adapter.PROGRAM_MASS_MARKET
 
 # Every string Perch uses for a capacity type or a customer type on the wire.
 # None of these may appear in anything a rep reads.
@@ -227,43 +230,112 @@ def test_v2_choices():
           BUSINESS not in types_of(spec_example))
 
     print("\n-- B2. the real NY case: mass market with NO residential entry --")
-    # residential has no capacity and therefore no rates, but mass_market
-    # does. The spec's table says Residential's rates come from the
-    # `residential` entries.
     #
-    # E2.1 REMOVED THE SUBSTITUTION THAT USED TO FILL THIS GAP. Quoting the
-    # mass-market rate for a Residential enrollment is a guess dressed as a
-    # quote - Perch has not said that is the price - and savings_percent is a
-    # figure a rep reads out to a customer. The program is still OFFERED,
-    # because the capacity is genuinely there; the rate stays empty and the
-    # ambiguity is stated rather than resolved.
+    # WHAT THIS BLOCK USED TO ASSERT, AND WHY IT CHANGED.
+    #
+    # E2.1 asserted that Residential stays OFFERED here with NO rate, flagged
+    # `savings_unresolved`, with the mass-market array parked in
+    # `savings_candidates`. The reasoning was sound on what was known then:
+    # quoting the mass-market rate for a Residential enrollment would be a
+    # guess dressed as a quote, and savings_percent is a figure a rep reads out
+    # to a customer.
+    #
+    # E5 - Perch Engineering Q&A, 2026-11: mass_market is a valid ENROLLABLE
+    # capacity type backing standard Open customers, and where it returns a
+    # valid rate that is the real, quotable price. The gap was never an
+    # ambiguity; it was UBS reading the wrong entry. NYSEG, Orange & Rockland
+    # and Central Hudson all return this shape in production, and reps were
+    # shown an Open program with no rate that they could not enroll.
+    #
+    # E2.1'S PRINCIPLE IS INTACT AND IS STILL ASSERTED BELOW: no rate is
+    # substituted across capacity types. The program is simply named after the
+    # capacity that actually prices it, so the rate is read from the entry
+    # Perch published it on.
     ny = [entry("residential", False, 0, []),
           entry("mass_market", True, 4200, [5.0])]
     progs = adapter.available_programs(ny)
-    check("Residential IS still offered on mass-market capacity",
-          [p["customer_type"] for p in progs] == [RES])
-    check("  ...but NO rate is substituted for it",
-          progs[0]["savings_percents"] == [] and progs[0]["savings_percent"] is None)
-    check("  ...the authoritative source is still named",
-          progs[0]["savings_source"] == cap.RESIDENTIAL)
-    check("  ...the gap is flagged, not hidden",
-          progs[0]["savings_unresolved"] is True)
-    check("  ...and the raw array of the backing type is preserved verbatim",
-          progs[0]["savings_candidates"]
-          == [{"capacity_type": cap.MASS_MARKET, "savings_percents": [5.0]}])
+    check("mass-market capacity is offered as its OWN program",
+          [p["customer_type"] for p in progs] == [MASS])
+    check("  ...and Residential is NOT offered, having no capacity of its own",
+          RES not in [p["customer_type"] for p in progs])
+    check("  ...it quotes the rate Perch published on that entry",
+          progs[0]["savings_percents"] == [5.0]
+          and progs[0]["savings_percent"] == 5.0)
+    check("  ...sourced from mass_market, the entry it was published on",
+          progs[0]["savings_source"] == cap.MASS_MARKET)
+    check("  ...so there is no unresolved ambiguity left to report",
+          progs[0]["savings_unresolved"] is False
+          and progs[0]["savings_candidates"] == [])
     check("  ...with the backing capacity type named",
           [t["capacity_type"] for t in progs[0]["capacity_types"]]
           == [cap.MASS_MARKET])
-    # When residential DOES have capacity, its own rates are used and nothing
-    # is flagged - there is no ambiguity to report.
+    check("  ...and it is ENROLLABLE: a rate and a wire customer_type",
+          bool(progs[0]["savings_percents"])
+          and progs[0]["perch_customer_type"] == RES)
+    check("  ...the program key is NOT a Perch customer_type",
+          progs[0]["customer_type"] == MASS and MASS != RES)
+
+    print("\n-- B2a. both types, DIFFERENT rates: neither hides the other --")
     both = [entry("residential", True, 2000, [7.0]),
             entry("mass_market", True, 4200, [5.0])]
-    p0 = adapter.available_programs(both)[0]
-    check("when residential HAS capacity its own rate is used",
-          p0["savings_percents"] == [7.0]
-          and p0["savings_source"] == cap.RESIDENTIAL)
-    check("  ...and nothing is flagged as unresolved",
-          p0["savings_unresolved"] is False and p0["savings_candidates"] == [])
+    progs = adapter.available_programs(both)
+    by_key = {p["customer_type"]: p for p in progs}
+    check("both are offered, separately", sorted(by_key) == sorted([RES, MASS]))
+    check("  ...Residential quotes its own 7%",
+          by_key[RES]["savings_percents"] == [7.0]
+          and by_key[RES]["savings_source"] == cap.RESIDENTIAL)
+    check("  ...Mass Market quotes its own 5%",
+          by_key[MASS]["savings_percents"] == [5.0]
+          and by_key[MASS]["savings_source"] == cap.MASS_MARKET)
+    check("  ...NO rate crosses between them",
+          by_key[RES]["savings_percents"] != by_key[MASS]["savings_percents"])
+    check("  ...neither is flagged unresolved",
+          not by_key[RES]["savings_unresolved"]
+          and not by_key[MASS]["savings_unresolved"])
+    check("  ...each names only its own backing capacity type",
+          [t["capacity_type"] for t in by_key[RES]["capacity_types"]] == [cap.RESIDENTIAL]
+          and [t["capacity_type"] for t in by_key[MASS]["capacity_types"]] == [cap.MASS_MARKET])
+    check("  ...and both enroll as Residential on the wire",
+          by_key[RES]["perch_customer_type"] == RES
+          and by_key[MASS]["perch_customer_type"] == RES)
+
+    print("\n-- B2b. both types, IDENTICAL rate: one card, both capacities --")
+    # Nothing for a rep to choose between, so two cards reading 7% would only
+    # invite "which one do I pick?". Merged - but the capacity is NOT lost.
+    same = [entry("residential", True, 2000, [7.0]),
+            entry("mass_market", True, 4200, [7.0])]
+    progs = adapter.available_programs(same)
+    check("one Open program, not two", [p["customer_type"] for p in progs] == [RES])
+    check("  ...still quoting 7%", progs[0]["savings_percents"] == [7.0])
+    check("  ...with BOTH capacity types preserved in its backing",
+          [t["capacity_type"] for t in progs[0]["capacity_types"]]
+          == [cap.RESIDENTIAL, cap.MASS_MARKET])
+    check("  ...the kW of both is reported, none dropped",
+          sum(t["capacity_available_kw"] for t in progs[0]["capacity_types"]) == 6200)
+    check("  ...and the source names both entries",
+          progs[0]["savings_source"] == "residential+mass_market")
+    check("  ...nothing flagged unresolved", progs[0]["savings_unresolved"] is False)
+
+    # A program with no rate ANYWHERE is not ambiguous - there is nothing to
+    # have chosen differently, so it is not flagged either.
+    nothing = [entry("residential", True, 100, [])]
+    check("no rate anywhere is not an 'unresolved' ambiguity",
+          adapter.available_programs(nothing)[0]["savings_unresolved"] is False)
+
+    print("\n-- B2c. a rate is still NEVER substituted across types --")
+    # The E2.1 principle, restated for the case where it still applies: mass
+    # market has CAPACITY but publishes no rate, while residential publishes
+    # one. Mass Market must not borrow it.
+    starved = [entry("residential", True, 2000, [7.0]),
+               entry("mass_market", True, 4200, [])]
+    by_key = {p["customer_type"]: p
+              for p in adapter.available_programs(starved)}
+    check("Mass Market is offered - the capacity is real", MASS in by_key)
+    check("  ...but quotes NOTHING, not residential's 7%",
+          by_key[MASS]["savings_percents"] == []
+          and by_key[MASS]["savings_percent"] is None)
+    check("  ...and Residential keeps its own rate untouched",
+          by_key[RES]["savings_percents"] == [7.0])
     # A program with no rate ANYWHERE is not ambiguous - there is nothing to
     # have chosen differently, so it is not flagged either.
     nothing = [entry("residential", True, 100, [])]
@@ -288,8 +360,32 @@ def test_v2_choices():
     for prefix in sorted(_V2_FIXTURES):
         details = _V2_FIXTURES[prefix]["project_details"]
         got = programs_of(details)
-        check(f"{prefix}: {got}", all(t in (RES, LMI, LMI_IRA)
+        check(f"{prefix}: {got}", all(t in (RES, MASS, LMI, LMI_IRA)
                                       for t, _r in got))
+    # E5: whatever the fixture, every program offered must be one a rep may
+    # choose AND must carry a customer_type Perch will actually accept. A
+    # program key that reached the wire unmapped is a guaranteed 422.
+    wire_values = (RES, LMI, LMI_IRA, BUSINESS)
+    for prefix in sorted(_V2_FIXTURES):
+        details = _V2_FIXTURES[prefix]["project_details"]
+        for p in adapter.available_programs(details, market_state="NY"):
+            check(f"{prefix}: {p['customer_type']} is selectable",
+                  p["customer_type"] in adapter.SELECTABLE_CUSTOMER_TYPES)
+            check(f"  ...and maps to a wire value Perch accepts "
+                  f"({p['perch_customer_type']})",
+                  p["perch_customer_type"] in wire_values
+                  and adapter.perch_customer_type(p["customer_type"])
+                      == p["perch_customer_type"])
+    # And no fixture may leave an Open program unenrollable the way the
+    # reported production bug did: capacity present, no rate, nothing to sell.
+    for prefix in sorted(_V2_FIXTURES):
+        details = _V2_FIXTURES[prefix]["project_details"]
+        model = cap.parse(details)
+        for p in adapter.available_programs(details, market_state="NY"):
+            if p["savings_unresolved"]:
+                check(f"{prefix}: {p['customer_type']} unresolved ONLY where no "
+                      f"backing type published a rate ({p['savings_candidates']})",
+                      not p["savings_candidates"])
 
     print("\n-- B4. every customer type is present in the model, always --")
     for prefix, f in _V2_FIXTURES.items():
@@ -365,9 +461,18 @@ def test_unavailable_never_selectable():
         check("requesting Business is refused", False)
     except PerchValidationError:
         check("requesting Business is refused", True)
-    # Mass market alone still means a Residential enrollment, as it always has.
-    check("  ...but mass market alone is still a Residential program",
-          types_of(mass_and_ci) == [RES])
+    # E5: mass market alone is now its own UBS program rather than a
+    # Residential one - but it still ENROLLS as Residential, which is the part
+    # that was always true and must stay true. Commercial and industrial
+    # capacity beside it changes nothing: UBS cannot sell it.
+    check("  ...mass market alone is offered as the Mass Market program",
+          types_of(mass_and_ci) == [MASS])
+    check("  ...and it still enrolls as Residential on the wire",
+          adapter.perch_customer_type(MASS) == RES)
+    check("  ...commercial capacity is not folded into it",
+          [t["capacity_type"]
+           for t in adapter.available_programs(mass_and_ci)[0]["capacity_types"]]
+          == [cap.MASS_MARKET])
 
     print("\n-- C5. a tampered client cannot select an unoffered program --")
     lmi_only = [entry("lmi", True, 900, [20.0])]
@@ -1355,8 +1460,22 @@ def test_county_field():
                        step_for(restricted_only, selected="Albany")])
     for tok in RAW_PERCH_TOKENS:
         check(f"county step JSON has no {tok!r}", tok not in blob)
-    check("  ...and no 'mass market' wording anywhere in the UI labels",
-          "mass market" not in blob.lower())
+    # E5 CHANGED WHAT THIS CHECKS, AND ONLY THIS MUCH.
+    #
+    # It used to forbid the words "mass market" anywhere in rep-facing copy,
+    # because under E2.1 mass market was not a program a rep could see - it
+    # was a capacity type behind Residential, and naming it would have raised
+    # a question with no answer.
+    #
+    # Perch Engineering now confirms it is a distinct enrollable program, and
+    # the brief is explicit that rep-facing labels may say so while the exact
+    # v2 identity is preserved underneath. So the English phrase is allowed;
+    # the RAW SLUG still is not, and that is what the loop above enforces.
+    check("  ...any mass-market wording is the English label, never the slug",
+          "mass_market" not in blob)
+    for raw in ("MassMarket", "massmarket"):
+        check(f"  ...and the program KEY {raw!r} never reaches the copy either",
+              raw not in blob)
 
 
 # ═══════════════ K. E3 - THE ENROLL PAYLOAD ═══════════════
@@ -2082,13 +2201,27 @@ def test_virginia_is_income_qualified_only():
           adapter.resolve_customer_type(va_model, requested=LMI)[0] == LMI)
     check("  ...and with nothing requested, LMI is the only option",
           adapter.resolve_customer_type(va_model)[0] == LMI)
-    # Residential was previously offered with NO rate, which is the shape that
-    # made the bug visible: a program a rep could pick and never quote.
+    # AND E5 MAKES THE MARKET RULE LOAD-BEARING, where before it had a safety
+    # net it did not need. VA staging returns mass-market capacity, so with no
+    # market known UBS offers the Open program - and it is now ENROLLABLE,
+    # quoting the 10% Perch published on that entry. Previously it came out
+    # rateless and unresolved, so a Virginia rep who somehow reached it could
+    # not have sold it anyway.
+    #
+    # Nothing about Virginia relies on that accident now. The market product
+    # rule is the ONLY thing withholding a non-LMI program there, which is why
+    # M2 above exercises it through the annotated model production uses.
     unrestricted = adapter.available_programs(REAL_VA_STAGING)
-    check("  ...whereas with no market known it WAS offered, rateless "
+    keys = [p["customer_type"] for p in unrestricted]
+    check("  ...whereas with NO market known the Open program is offered "
           f"({[(p['customer_type'], p['savings_percents']) for p in unrestricted]})",
-          RES in [p["customer_type"] for p in unrestricted]
-          and unrestricted[0]["savings_unresolved"] is True)
+          MASS in keys and RES not in keys)
+    open_prog = next(p for p in unrestricted if p["customer_type"] == MASS)
+    check("  ...and is now enrollable rather than rateless",
+          open_prog["savings_percents"] == [10.0]
+          and open_prog["savings_unresolved"] is False)
+    check("  ...so only the market rule keeps it out of Virginia",
+          MASS not in [p["customer_type"] for p in progs])
 
     print("\n-- M3. Perch's capacity model is untouched --")
     model = cap.parse(REAL_VA_STAGING)
@@ -2104,17 +2237,27 @@ def test_virginia_is_income_qualified_only():
     check("  ...and the stored shape carries no market annotation",
           "market_state" not in model.as_dict())
 
-    print("\n-- M4. mass market still means Residential everywhere else --")
-    # The exact NY shape this rule must not disturb: Central Hudson and
-    # Orange & Rockland return residential=false with mass_market=true and
-    # are standard residential enrollments.
+    print("\n-- M4. mass market is still an Open enrollment everywhere else --")
+    # The exact NY shape this rule must not disturb: Central Hudson, Orange &
+    # Rockland and NYSEG return residential=false with mass_market=true and
+    # are standard Open enrollments.
+    #
+    # E5: the PROGRAM is now Mass Market rather than Residential, so that its
+    # rate is read from the entry Perch published it on - but the enrollment
+    # Perch receives is a Residential one, exactly as before. That is the part
+    # this block exists to protect, and it is now asserted on the wire value
+    # rather than on the program key.
     ny_mass_market = [entry("residential", False, 0, []),
                       entry("mass_market", True, 4200, [5.0])]
     for market in ("NY", None, "MA"):
-        got = [p["customer_type"] for p in
-               adapter.available_programs(ny_mass_market, market_state=market)]
-        check(f"market={market!r}: mass market still offers Residential ({got})",
-              got == [RES])
+        progs_m = adapter.available_programs(ny_mass_market, market_state=market)
+        got = [p["customer_type"] for p in progs_m]
+        check(f"market={market!r}: mass market is offered ({got})",
+              got == [MASS])
+        check(f"  ...and enrolls as Residential on the wire",
+              [p["perch_customer_type"] for p in progs_m] == [RES])
+        check(f"  ...quoting the rate Perch published, not a blank",
+              [p["savings_percents"] for p in progs_m] == [[5.0]])
 
     print("\n-- M5. the rule is configuration, and names its markets --")
     check("VA is restricted by default",
@@ -2134,8 +2277,11 @@ def test_virginia_is_income_qualified_only():
         os.environ["UBS_LMI_ONLY_MARKETS"] = ""
         check("  ...and an explicitly empty value removes every restriction",
               market_products.income_qualified_only_markets() == frozenset())
-        check("  ...which lets VA offer Residential again, by configuration",
-              RES in [p["customer_type"] for p in adapter.available_programs(
+        # VA staging returns mass-market capacity, so the Open program the
+        # restriction withholds there is the Mass Market one. Lifting the
+        # restriction brings it back - by configuration, not by code.
+        check("  ...which lets VA offer its Open program again, by configuration",
+              MASS in [p["customer_type"] for p in adapter.available_programs(
                   REAL_VA_STAGING, market_state="VA")])
     finally:
         if saved is None:
@@ -2163,8 +2309,19 @@ def test_virginia_is_income_qualified_only():
           and "def offerable_customer_types(" in adapter_src)
     wf_src = open(os.path.join(ROOT, "services", "perch", "workflow.py"),
                   encoding="utf-8").read()
-    check("  ...which the availability panel uses too",
-          "adapter.offerable_customer_types(" in wf_src)
+    # E5: the panel now takes the whole derivation from the adapter rather than
+    # re-applying the rules itself. That seam is what let Virginia show a
+    # Residential row the cards had stopped offering (E4) and what put a Mass
+    # Market row on v1 (E5) - twice the same bug, so the panel no longer
+    # rebuilds the list at all.
+    check("  ...which the availability panel takes wholesale",
+          "adapter.program_segments(" in wf_src)
+    check("  ...and the panel no longer re-applies the rules itself",
+          "adapter.offerable_customer_types(" not in wf_src
+          and "PROGRAM_RULES[" not in wf_src)
+    check("  ...the shared derivation gates by response shape and merges cards",
+          "def program_segments(" in adapter_src
+          and 'rule.get("v2_only")' in adapter_src)
 
     print("\n-- M7. the market reaches the model through hydration --")
     model = adapter.capacity_model_for(
@@ -2178,17 +2335,21 @@ def test_virginia_is_income_qualified_only():
         {"zip_code": "12202", "capacity_available": True,
          "capacity_entries": cap.parse(ny_mass_market).as_dict()})
     check("an NY ZIP annotates NY", ny_model.market_state == "NY")
-    check("  ...and still offers Residential",
-          [p["customer_type"] for p in adapter.available_programs(ny_model)]
-          == [RES])
+    check("  ...and still offers its Open program, enrollable",
+          [(p["customer_type"], p["perch_customer_type"], p["savings_percents"])
+           for p in adapter.available_programs(ny_model)]
+          == [(MASS, RES, [5.0])])
     unknown = adapter.capacity_model_for(
         {"zip_code": "00000", "capacity_available": True,
          "capacity_entries": cap.parse(REAL_VA_STAGING).as_dict()})
     check("an unresolvable ZIP annotates nothing",
           unknown.market_state is None)
+    # The VA staging shape again, but with no market resolved: the Open
+    # program it carries is the mass-market one, and it is offered because an
+    # unknown market carries no restriction.
     check("  ...and carries NO restriction - an unknown market is not guessed at",
-          RES in [p["customer_type"] for p in
-                  adapter.available_programs(unknown)])
+          MASS in [p["customer_type"] for p in
+                   adapter.available_programs(unknown)])
 
     print("\n-- M8. end to end: a VA rep sees one program --")
     init_db(reset=True)
@@ -2243,8 +2404,18 @@ def test_virginia_is_income_qualified_only():
         offered_ch = [p["customer_type"] for p in
                       c.get(f"/api/perch/enrollments/{eid_ch}/programs",
                             headers=rep).get_json()["available_programs"]]
-        check(f"NY mass-market-only still offers Residential ({offered_ch})",
-              offered_ch == [RES])
+        # E5: Central Hudson's mass-market-only shape, end to end through the
+        # route a rep actually hits. The Open program is offered and is now
+        # enrollable; before, this returned a rateless Residential card.
+        ch_body = c.get(f"/api/perch/enrollments/{eid_ch}/programs",
+                        headers=rep).get_json()["available_programs"]
+        check(f"NY mass-market-only offers its Open program ({offered_ch})",
+              offered_ch == [MASS])
+        check("  ...with a rate the rep can quote",
+              [p["savings_percents"] for p in ch_body] == [[5.0]]
+              and not any(p["savings_unresolved"] for p in ch_body))
+        check("  ...and enrolling as Residential on the wire",
+              [p["perch_customer_type"] for p in ch_body] == [RES])
 
     print("\n-- M10. v1 is unchanged --")
     with api_version(None):

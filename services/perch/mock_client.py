@@ -369,6 +369,43 @@ _V2_FIXTURES = {
             lmi=[_v2_entry("lmi", True, 957.57, [10.0, 15.0])],
             lmi_ira=[_v2_entry("lmi_ira", True, 1688.31, [20.0])]),
     },
+    # ── 116: TRUE RESIDENTIAL AND MASS MARKET AT DIFFERENT RATES, with both
+    # income-qualified types beside them. E5's central case, and one no fixture
+    # could express before: Perch Engineering confirmed a market may return
+    # true residential capacity AND mass-market capacity at once, and that
+    # where both carry valid rates neither may hide the other.
+    #
+    # The rates DIFFER on purpose - 10% residential against 7% mass market.
+    # Identical rates are the other case (fixture 133) and merge into one card,
+    # because then a rep has nothing to choose between. Here the choice is
+    # real: all FOUR programs must be offered separately, each quoting its own
+    # number.
+    "116": {
+        "utility_slug": "national-grid-ny",
+        "project_details": _v2_details(
+            residential=[_v2_entry("residential", True, 2400, [10.0])],
+            mass_market=[_v2_entry("mass_market", True, 5000, [7.0])],
+            lmi=[_v2_entry("lmi", True, 957.57, [20.0])],
+            lmi_ira=[_v2_entry("lmi_ira", True, 1688.31, [25.0])]),
+    },
+    # ── 117: NYSEG, MASS MARKET ONLY - the reported production shape.
+    #
+    # The bug reps hit: Perch returns mass-market capacity with a valid rate
+    # and NO true residential capacity, and UBS offered a Residential program
+    # whose rates it read from the empty residential entry. The card arrived
+    # with no rate, flagged unresolved, and the 5% Perch had published sat
+    # unreachable in savings_candidates.
+    #
+    # Fixture 129 is NYSEG income-qualified only and cannot express this;
+    # Orange & Rockland (109) and Central Hudson (124) already carry the shape
+    # for their own utilities. NYSEG is named in the Perch Q&A, so it gets its
+    # own fixture rather than being assumed to behave like the other two.
+    "117": {
+        "utility_slug": "nyseg",
+        "project_details": _v2_details(
+            mass_market=[_v2_entry("mass_market", True, 4200, [5.0])],
+            lmi=[_v2_entry("lmi", True, 1100, [20.0])]),
+    },
 }
 
 # ────────────────────── Market rules (offline fixtures) ──────────────────────

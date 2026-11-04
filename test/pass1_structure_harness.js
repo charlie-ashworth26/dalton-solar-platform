@@ -176,9 +176,26 @@ for(const fn of ['handleBillUpload','extractTextFromFile','parseUtilityBill'])
   check(`${fn}() intact`, src.includes('function '+fn+'('));
 check('upload -> extract -> parse order preserved',
   src.indexOf('extractTextFromFile(f)') < src.indexOf('parseUtilityBill(text)'));
+// THESE SIX USED TO BE ASSERTED AS A LITERAL `getElementById('x').value =
+// parsed...`, which is to say: as an UNCONDITIONAL write. That shape was the
+// defect. Every re-upload - a second page, a replaced bill - wrote over
+// whatever the rep had typed, and alongside the account-number truncation
+// fixed on 2026-11-03 that meant a rep's correction was replaced by the short
+// value the moment they added the next page.
+//
+// What matters is that the bill's reading still REACHES each field, which is
+// what this block is here to protect. It now goes through fillIfEmpty(), so
+// that is what is asserted - plus the condition itself, so an unconditional
+// write cannot come back unnoticed.
 for(const f of ['c-first','c-last','c-acct','a-street','a-city','a-zip'])
-  check(`  OCR still populates #${f}`, new RegExp("getElementById\\('"+f+"'\\)\\.value = parsed").test(src));
-check('  ...and marks them as auto-filled', src.includes("markOcrFilled('c-first')"));
+  check(`  OCR still populates #${f}`, new RegExp("fillIfEmpty\\('"+f+"', parsed").test(src));
+check('  ...and only into an empty field',
+  /function fillIfEmpty\(id, value\)\{[\s\S]{0,260}?if\(String\(el\.value \|\| ''\)\.trim\(\)\) return false;/.test(src));
+for(const f of ['c-first','c-last','c-acct','a-street','a-city','a-zip'])
+  check(`  ...#${f} is never written unconditionally`,
+    !new RegExp("getElementById\\('"+f+"'\\)\\.value = parsed").test(src));
+check('  ...and marks them as auto-filled',
+  /function fillIfEmpty\(id, value\)\{[\s\S]{0,320}?markOcrFilled\(id\);/.test(src));
 check('  ...fields remain editable (no readonly added)',
   !/getElementById\('c-first'\)\.readOnly/.test(src));
 

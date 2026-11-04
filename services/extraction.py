@@ -69,20 +69,74 @@ def _published_rules(utility_hint):
     return {"account_lengths": lengths} if lengths else None
 
 
+def _effective_account_lengths(utility_hint, overrides):
+    """The lengths the LEGACY block below must judge what it reads against.
+
+    The published rule wins wherever there is one. Where the table is silent
+    the per-utility parser's own default is the only copy of the rule -
+    Dominion issues 10 OR 12 digits, which the table's single-length column
+    cannot express - and the legacy fallback must never be LOOSER than the
+    parser that owns that layout, or a run the utility does not issue gets
+    offered by one reader and refused by the other.
+
+    An empty tuple means no rule is published anywhere, so judge nothing and
+    pass the value through whole. Never read as "reject".
+    """
+    published = tuple((overrides or {}).get("account_lengths") or ())
+    if published or not utility_hint:
+        return published
+    try:
+        from services import bill_parsers
+        return tuple((bill_parsers.DEFAULT_RULES.get(utility_hint) or {})
+                     .get("account_lengths") or ())
+    except Exception:
+        return ()
+
+
 def parse_utility_bill(raw_text: str, utility_hint: str = None) -> dict:
     """Returns a dict of {field: {"value": ..., "confidence": 0-1}} plus a flat
     'fields' view for convenience. Confidence is a simple heuristic (regex hit = 0.9,
     with small penalties for ambiguity) — swap in a real model's confidence in production."""
     t = _clean(raw_text)
     result = {}
+    # The utility's OWN lengths, from the reference table. Looked up once here
+    # because BOTH readers below need them: the legacy National Grid block
+    # judges what it finds, and bill_parsers is handed them as overrides.
+    overrides = _published_rules(utility_hint)
+    allowed_lengths = _effective_account_lengths(utility_hint, overrides)
+    rejected_lengths = []
 
     def set_field(name, value, confidence):
         result[name] = {"value": value, "confidence": confidence}
 
-    # Account number (e.g. "ACCOUNT NUMBER 12345-67890")
-    m = re.search(r"ACCOUNT NUMBER\s*(\d{5}-\d{5}|\d{10})", t, re.I)
+    # ── Account number ──────────────────────────────────────────────────
+    #
+    # THE TRUNCATION THIS FIXES (traced 2026-11-03). The pattern was
+    #
+    #     ACCOUNT NUMBER\s*(\d{5}-\d{5}|\d{10})
+    #
+    # which asks for EXACTLY ten digits and is not anchored at the end. On an
+    # eleven-digit account it matched the first ten and dropped the last one -
+    # silently, and with a value that still looks like an account number. For
+    # Orange & Rockland, which now accepts 10 OR 11 digits, the short result
+    # also PASSES validation, so nothing downstream could catch it: the rep
+    # saw a plausible number that was not theirs.
+    #
+    # The whole run is captured now, and the length is judged against the
+    # utility's published rule rather than assumed. A run that does not match
+    # any accepted length is NOT offered: a wrong account number is worse than
+    # an empty box, because the box is obviously the rep's job and the wrong
+    # number looks finished. Nothing here pads, trims or guesses a digit.
+    m = re.search(r"ACCOUNT\s+NUMBER\s*:?\s*(\d[\d-]*\d)\b", t, re.I)
     if m:
-        set_field("account_number", m.group(1).replace("-", ""), 0.93)
+        digits = m.group(1).replace("-", "")
+        allowed = allowed_lengths
+        if not allowed or len(digits) in allowed:
+            set_field("account_number", digits, 0.93)
+        else:
+            # Read, but not the shape this utility issues. Reported so the
+            # panel can say the field still needs entering.
+            rejected_lengths.append("account_number")
 
     # Amount due
     m = re.search(r"AMOUNT DUE\D{0,25}?\$?\s*([\d,]+\.\d{2})", t, re.I)
@@ -154,7 +208,7 @@ def parse_utility_bill(raw_text: str, utility_hint: str = None) -> dict:
     try:
         from services import bill_parsers
         parsed = bill_parsers.parse_bill(t, utility_hint=utility_hint,
-                                         rule_overrides=_published_rules(utility_hint))
+                                         rule_overrides=overrides)
         for field, value in (parsed.get("fields") or {}).items():
             # Confidence is kept in the existing shape for existing readers.
             # It is NOT a measurement here any more than it is above.
@@ -163,8 +217,12 @@ def parse_utility_bill(raw_text: str, utility_hint: str = None) -> dict:
             set_field("utility", parsed["utility"], 0.9)
         # Reported so a caller can tell the rep WHICH fields still need
         # typing. Field names only - never a value.
-        if parsed.get("rejected"):
-            result["_rejected_fields"] = {"value": sorted(parsed["rejected"]),
+        rejected = set(parsed.get("rejected") or []) | set(rejected_lengths)
+        # A field the per-utility parser FILLED is not rejected, whatever the
+        # legacy block made of it: the utility's own reader is the better one.
+        rejected -= set((parsed.get("fields") or {}).keys())
+        if rejected:
+            result["_rejected_fields"] = {"value": sorted(rejected),
                                           "confidence": 1.0}
         if parsed.get("ambiguous"):
             result["_ambiguous_fields"] = {"value": sorted(parsed["ambiguous"]),
@@ -172,7 +230,9 @@ def parse_utility_bill(raw_text: str, utility_hint: str = None) -> dict:
     except Exception:
         # Extraction is an assist. A parser fault must never cost the rep the
         # upload, and the National Grid fields gathered above still stand.
-        pass
+        if rejected_lengths and "_rejected_fields" not in result:
+            result["_rejected_fields"] = {"value": sorted(set(rejected_lengths)),
+                                          "confidence": 1.0}
 
     return result
 

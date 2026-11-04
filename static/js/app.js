@@ -3782,7 +3782,18 @@ function cleanText(t){ return (t||'').replace(/\s+/g,' ').trim(); }
 function parseUtilityBill(rawText){
   const t = cleanText(rawText);
   const result = {first:'', last:'', street:'', city:'', zip:'', acct:''};
-  let m = t.match(/ACCOUNT NUMBER\s*(\d{5}-\d{5}|\d{10})/i);
+  // THE WHOLE RUN OF DIGITS, never a fixed ten.
+  //
+  // This asked for exactly \d{10} and was not anchored at the end, so an
+  // eleven-digit account matched its first ten digits and the last one was
+  // dropped on the floor. The value still looked like an account number, and
+  // for a utility that accepts ten OR eleven it also passed validation - so
+  // the rep was shown a plausible number that was not their customer's.
+  //
+  // What is captured here is never shortened. Whether the length is one this
+  // utility actually issues is decided by the CALLER, which knows the rule;
+  // this function stays a pure reader of text.
+  let m = t.match(/ACCOUNT\s+NUMBER\s*:?\s*(\d[\d-]*\d)\b/i);
   if(m) result.acct = m[1].replace(/-/g,'');
   // Utility PDFs flatten columns/lines into a single text stream. The old
   // pattern let the street stop immediately after the house number, which could
@@ -4013,7 +4024,12 @@ function renderBillReadPanel(){
           'Not found — enter manually')
     + row('Service address', !!p.street, val('a-street') && val('a-city'),
           'Not found — enter manually')
-    + row('Account number', !!p.acct, val('c-acct'), 'Not found — enter manually')
+    // A run that was READ but is not a length this utility issues is not
+    // "found on the bill" - the box is empty and it is the rep's to fill.
+    + row('Account number', !!p.acct && !p.acctRejected, val('c-acct'),
+          p.acctRejected
+            ? 'Not a valid account number for this utility — enter manually'
+            : 'Not found — enter manually')
     + extra
     + '</div>';
 }
@@ -4102,12 +4118,30 @@ async function handleBillUpload(files){
     renderPrefillScope('utility_bill');
     // Same assignments as before; markOcrFilled only flashes the field so the
     // rep can SEE what the bill supplied. Values stay fully editable.
-    if(parsed.first){ document.getElementById('c-first').value = parsed.first; markOcrFilled('c-first'); }
-    if(parsed.last){ document.getElementById('c-last').value = parsed.last; markOcrFilled('c-last'); }
-    if(parsed.acct){ document.getElementById('c-acct').value = parsed.acct; markOcrFilled('c-acct'); }
-    if(parsed.street){ document.getElementById('a-street').value = parsed.street; markOcrFilled('a-street'); }
-    if(parsed.city){ document.getElementById('a-city').value = parsed.city; markOcrFilled('a-city'); }
-    if(parsed.zip){ document.getElementById('a-zip').value = parsed.zip; markOcrFilled('a-zip'); }
+    // FILL WHAT IS EMPTY, LEAVE WHAT IS NOT.
+    //
+    // These six assignments were unconditional, so every re-upload - a second
+    // page, a replaced bill - overwrote whatever the rep had typed. Combined
+    // with the truncation above that was the reported symptom at its worst: a
+    // rep adds the eleventh digit the reader missed, uploads the next page,
+    // and their correction is replaced by the short value again.
+    //
+    // fillIfEmpty() is the same helper the server's reading already uses, so
+    // both readers now follow one rule and a first upload into an empty form
+    // behaves exactly as it always did.
+    if(parsed.first) fillIfEmpty('c-first', parsed.first);
+    if(parsed.last) fillIfEmpty('c-last', parsed.last);
+    // THE LENGTH IS THE UTILITY'S TO DECIDE. A run this utility does not
+    // issue is left for the rep rather than typed into the box for them -
+    // nothing here pads, trims or guesses a digit.
+    if(parsed.acct && acctLengthOk(currentUtilityRule(), parsed.acct)){
+      fillIfEmpty('c-acct', parsed.acct);
+    } else if(parsed.acct){
+      parsed.acctRejected = true;
+    }
+    if(parsed.street) fillIfEmpty('a-street', parsed.street);
+    if(parsed.city) fillIfEmpty('a-city', parsed.city);
+    if(parsed.zip) fillIfEmpty('a-zip', parsed.zip);
     // parsed.amount is still produced by the OCR parser; the field it used to
     // populate was removed because nothing consumed the value.
     syncBillingFromService();

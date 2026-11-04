@@ -332,6 +332,11 @@ def test_bill_ocr_utilities():
     import test_bill_ocr_utilities as suite
     suite.main()
 
+def test_account_number_integrity():
+    """An account number read off a bill is never shortened, padded or invented."""
+    import test_account_number_integrity as suite
+    suite.main()
+
 
 def test_gui_perch_bridge():
     """The browser/Perch bridge: persisted workflow state and what the GUI reads from it."""

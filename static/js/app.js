@@ -3210,9 +3210,16 @@ function configureBillUtilityRules(){
   acct.placeholder = longest ? ('•'.repeat(Math.min(longest, 12))) : 'Utility account number';
   // The LOCAL rule writes this first; refreshAcctHint() below replaces it
   // with the market's own wording once Perch's fields have been fetched.
+  // "an 11-digit", not "a 11-digit". The article follows how the number is
+  // SPOKEN, so it turns on the leading digit rather than on the value: 8 and
+  // 11 take "an", 10 and 18 take "a". This was always wrong for the 11-digit
+  // utilities and became visible on more screens when Central Hudson was
+  // corrected from 10 to 11.
+  const spoken = acctLengthText(rule).replace(' digits', '-digit');
+  const article = /^(8|11|18)\b/.test(spoken) ? 'an' : 'a';
   acctHelp.textContent = lengths.length
-    ? ((rule.display_name || 'This utility') + ' uses a '
-       + acctLengthText(rule).replace(' digits', '-digit') + ' account number.')
+    ? ((rule.display_name || 'This utility') + ' uses ' + article + ' '
+       + spoken + ' account number.')
     : '';
   const needsPod = !!(rule && rule.requires_pod_id);
   podField.style.display = needsPod ? 'block' : 'none';

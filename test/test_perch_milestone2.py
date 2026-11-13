@@ -305,7 +305,17 @@ def main():
     r = c.post(f"/api/perch/enrollments/{eid3}/capacity", headers=rep,
                json={"email": email_for(eid3), "zip_code": "13348", "utility_name": "Some Made Up Utility"})
     check("unknown utility rejected with 400", r.status_code == 400)
-    check("error explains slugs", "slug" in r.get_json()["error"].lower())
+    # D-3: the message names what the REP should do, not how Perch
+    # identifies a utility. It said "Perch matches utilities by slug",
+    # which named the vendor - so rep_errors replaced it and the browser
+    # filter would have blanked it regardless, leaving the rep with the
+    # generic sentence. Same instruction, now actually deliverable.
+    _msg = r.get_json()["error"]
+    check(f"error says to pick from the supported list ({_msg!r})",
+          "supported list" in _msg.lower()
+          and "not a recognized utility" in _msg.lower())
+    check("  ...and names no vendor or identifier jargon",
+          "perch" not in _msg.lower() and "slug" not in _msg.lower())
     r = c.post(f"/api/perch/enrollments/{eid3}/capacity", headers=rep,
                json={"email": email_for(eid3), "zip_code": "13348", "utility_name": "National Grid NY"})
     check("a DISPLAY NAME is translated to its slug rather than rejected",

@@ -80,8 +80,18 @@ def main():
     adapter.check_capacity = original
 
     check("the duplicate attempt is rejected", dup.status_code >= 400)
-    check("  ...and the error message survives cleanup",
-          "no in-progress enrollment" in (dup.get_json().get("error") or ""))
+    # D-3: THE INTENT, NOT THE VENDOR'S WORDS. This asserted that Perch's own
+    # sentence reached the response body - which also meant it reached the rep,
+    # and because it named the partner the browser's filter blanked it, so the
+    # rep saw the generic message anyway. What this check exists to protect is
+    # that cleanup does not SWALLOW the failure: an error still comes back, it
+    # still describes the failure, and it is not replaced by a cleanup message.
+    _err = (dup.get_json().get("error") or "")
+    check(f"  ...and an error message survives cleanup ({_err!r})", bool(_err))
+    check("  ...which describes the failure, not the cleanup",
+          "could not" in _err.lower() or "not eligible" in _err.lower()
+          or "already" in _err.lower())
+    check("  ...and carries no partner internals", "perch" not in _err.lower())
     # Scoped to the message the rep reads. The body also carries the
     # enrollment_discarded flag, which is a fact for the browser, not an error.
     check("  ...cleanup did not replace it with its own error",

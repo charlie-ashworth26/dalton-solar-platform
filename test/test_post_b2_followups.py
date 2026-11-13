@@ -394,9 +394,13 @@ def main():
         # several savings rates for one program and REQUIRES one at /enroll,
         # so the rep's choice has to survive a reload like the program and
         # the county do. Additive - one nullable column, no backfill.
-        check("migration count is 15 (015_selected_savings_percent added)",
+        # 016_central_hudson_account_length corrects reference DATA, not
+        # schema: migration 003 recorded Central Hudson as 10 digits from the
+        # OpenAPI spec, Perch's training guide says 11, and a rep could not
+        # enroll a real account at all. One UPDATE to one column of one row.
+        check("migration count is 16 (016_central_hudson_account_length added)",
               query_one(
-                  "SELECT COUNT(*) n FROM schema_migrations")["n"] == 15)
+                  "SELECT COUNT(*) n FROM schema_migrations")["n"] == 16)
 
     # ═══════════════════════════════════════════════════════
     section("2d. REAL STAGING RESPONSES — savings pinned to the right field")

@@ -1,0 +1,43 @@
+-- 016_central_hudson_account_length.sql
+--
+-- Central Hudson account numbers are ELEVEN digits, not ten.
+--
+-- Migration 003 set 10 for central-hudson-gas-electric, citing Perch's
+-- OpenAPI specification. Perch's partner training guide says 11, and reps hit
+-- the consequence: an enrollment with a real 11-digit Central Hudson account
+-- number was refused with "account numbers must be 10 digits", so the
+-- customer could not be enrolled at all.
+--
+-- ELEVEN ONLY, not "ten or eleven". Orange & Rockland genuinely issues both
+-- lengths and is modelled that way in ACCOUNT_LENGTH_EXCEPTIONS; Central
+-- Hudson is not that case, it was simply recorded wrong. The distinction
+-- earns its keep: a bill reader that drops a final digit turns an 11-digit
+-- number into a plausible 10-digit one, and for O&R that truncated value
+-- passes validation precisely because both lengths are legal. Keeping Central
+-- Hudson to a single length means a truncated number is caught instead of
+-- enrolled against the wrong account.
+--
+-- WHY A MIGRATION AND NOT AN EDIT TO 003: the length lives in a table, and 003
+-- has already run everywhere. Editing it would change a fresh database and
+-- leave every existing one - staging included - still on 10. This is the only
+-- change that reaches them.
+--
+-- Data-only and additive: one UPDATE to one column of one row. No table is
+-- created, altered or dropped, and no enrollment, customer or sales record is
+-- touched. Re-running it is harmless.
+--
+-- Everything else derives from this value and needs no change: the browser's
+-- maxlength and its length check, the rep-facing "11 digits" help text, the
+-- bill reader's accepted lengths, and the pre-flight check on the enrollment
+-- payload all read account_number_lengths(). The account number is handled as
+-- a string throughout, so leading zeros survive.
+--
+-- NOTE: in live mode Perch ALSO publishes a per-utility account_number regex
+-- (markets.validate_account_value), which runs after this check and is
+-- authoritative there. If that pattern still says 10 digits for Central
+-- Hudson, Perch has to update it too - this migration cannot override it.
+-- Verify with: GET /api/markets/utility-account-fields?utility=central-hudson-gas-electric
+
+UPDATE perch_utilities
+   SET account_number_length = 11
+ WHERE slug = 'central-hudson-gas-electric';

@@ -342,6 +342,16 @@ def test_mass_market_programs():
     import test_mass_market_programs as suite
     suite.main()
 
+def test_capacity_error_reporting():
+    """D-3: a rejected availability check says what to change, and is recorded."""
+    import test_capacity_error_reporting as suite
+    suite.main()
+
+def test_central_hudson_account_length():
+    """Central Hudson account numbers are 11 digits, and all 11 reach Perch."""
+    import test_central_hudson_account_length as suite
+    suite.main()
+
 
 def test_gui_perch_bridge():
     """The browser/Perch bridge: persisted workflow state and what the GUI reads from it."""

@@ -349,8 +349,13 @@ def main():
         migrations = query("SELECT filename FROM schema_migrations")
     # 008_program_selection added later for dual-program persistence; this
     # milestone itself still added none. 012 is the orphan-enrollment discard,
-    # 013 the additive v2 capacity entries (E2), 014 the capacity county (E2.1).
-    check("this milestone added no migration of its own", len(migrations) == 15)
+    # 013 the additive v2 capacity entries (E2), 014 the capacity county (E2.1),
+    # 015 the selected savings rate, and 016 the Central Hudson account-number
+    # length - data-only, one column of one row, correcting the 10 that
+    # migration 003 recorded for a utility that issues 11 digits.
+    #
+    # The count stays pinned so an UNANNOUNCED migration still fails here.
+    check("this milestone added no migration of its own", len(migrations) == 16)
 
     print(f"\n{'='*72}\nPROGRAM SELECTION - ALL CHECKS PASSED\n{'='*72}")
 
